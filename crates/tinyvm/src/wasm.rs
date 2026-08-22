@@ -5981,11 +5981,19 @@ impl Module {
         {
             return Err(WasmError::Trap("call stack"));
         }
-        let mut locals = Vec::new();
-        locals
-            .try_reserve_exact(local_count)
-            .map_err(|_| WasmError::Trap("function locals"))?;
-        locals.extend(args);
+        // The caller already built `args` as an owned, exactly-sized buffer.
+        // Allocating a second buffer and copying the arguments across cost one
+        // allocation, one copy and one free per guest call; the argument
+        // buffer *is* the head of the local frame, so it becomes the frame
+        // instead. A callee that declares no locals — the common leaf — now
+        // reaches its first instruction without allocating at all.
+        let mut locals = args;
+        let extra = local_count.saturating_sub(locals.len());
+        if extra > 0 {
+            locals
+                .try_reserve_exact(extra)
+                .map_err(|_| WasmError::Trap("function locals"))?;
+        }
         // Declared locals default to the zero value of their declared type.
         locals.extend_from_slice(&func.locals);
 

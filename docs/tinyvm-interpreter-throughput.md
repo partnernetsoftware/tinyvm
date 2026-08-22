@@ -101,9 +101,38 @@ kept each monomorphisation down to a couple of calls: same speed, **+16 bytes**
 of core. Portability is ranked above throughput in the PRD, so the size gate
 decided the shape of the optimization rather than being renegotiated around it.
 
-Call-heavy rows barely moved, which is the honest read: their cost is
-activation setup, not operand traffic. They are the next target, along with the
-load-time lowering and stack-top caching sketched in
+Call-heavy rows barely moved on that pass, which was the honest read: their
+cost is activation setup, not operand traffic.
+
+## Second optimization: the argument buffer is the local frame
+
+Profiling the two call rows on their own — `TINYVM_THROUGHPUT_ONLY` exists for
+exactly this — put about 27% of their time in the allocator and in `memmove`.
+Each guest call allocated an owned argument buffer, then allocated a second
+buffer for the local frame and copied the arguments across.
+
+The argument buffer *is* the head of the local frame, so it now becomes the
+frame instead of being copied into one. A callee that declares no locals — the
+common leaf — reaches its first instruction without allocating at all.
+
+| Workload | ns/instr before | ns/instr after | Change |
+| --- | ---: | ---: | ---: |
+| `call_direct` | 17.197 | 15.643 | −9.0% |
+| `call_indirect` | 17.871 | 16.824 | −5.9% |
+
+Static core unchanged at 101,256 bytes. Against the original baseline the two
+call rows are down 13.9% and 12.1%.
+
+## What is left
+
+The remaining call cost is the two buffers still allocated per activation (the
+operand stack and the control stack) and the activation bookkeeping itself.
+Recycling those across activations is the obvious next step and is deliberately
+*not* taken here: pooled buffers retain capacity that the host's
+`max_activation_slots` ceiling does not account for, so it needs a bounded-pool
+design rather than a quick free list. Boundedness outranks throughput.
+
+Beyond that sit the load-time lowering and stack-top caching sketched in
 [the performance notes](../prd/notes-performance.md).
 
 ## Running it

@@ -306,13 +306,28 @@ fn measure(workload: &Workload, repetitions: usize) -> Observation {
     }
 }
 
+/// Comma-separated workload names to measure, for isolating one shape under a
+/// profiler. The smoke script leaves it unset, and the completeness assertion
+/// below only accepts a full matrix, so a filtered run can never be mistaken
+/// for a passing gate.
+fn selected() -> Option<Vec<String>> {
+    let raw = std::env::var("TINYVM_THROUGHPUT_ONLY").ok()?;
+    Some(raw.split(',').map(|name| name.trim().to_string()).collect())
+}
+
 #[test]
 #[ignore = "development benchmark; run through smoke-interpreter-throughput.sh"]
 fn interpreter_throughput_reports_nanoseconds_per_guest_instruction() {
     let repetitions = repetitions();
+    let selected = selected();
     println!("engine,workload,stresses,steps,nanos,nanos_per_step,million_steps_per_second");
     let mut observations = Vec::new();
     for workload in WORKLOADS {
+        if let Some(names) = &selected
+            && !names.iter().any(|name| name == workload.name)
+        {
+            continue;
+        }
         let observation = measure(workload, repetitions);
         println!(
             "tinyvm,{},{},{},{},{:.3},{:.1}",
@@ -329,11 +344,18 @@ fn interpreter_throughput_reports_nanoseconds_per_guest_instruction() {
     // The matrix, not the ranking, is the gate: every workload shape must have
     // produced a positive observation, so a silently skipped row cannot pass as
     // a fast one.
-    assert_eq!(
-        observations.len(),
-        WORKLOADS.len(),
-        "every workload shape must publish one observation"
-    );
+    match &selected {
+        None => assert_eq!(
+            observations.len(),
+            WORKLOADS.len(),
+            "every workload shape must publish one observation"
+        ),
+        Some(names) => assert_eq!(
+            observations.len(),
+            names.len(),
+            "every selected workload must publish one observation"
+        ),
+    }
     for observation in &observations {
         assert!(
             observation.nanos > 0,
