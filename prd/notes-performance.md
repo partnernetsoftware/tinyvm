@@ -43,6 +43,34 @@ TinyArcade 是 i32-only，f64 不在关键路径，<100 KiB 才是「无 JIT 也
 是余量被吃掉的大头；改成函数指针能省很多但会加一次间接调用，需要拿门量过
 再决定。谁买回余量，第一件事就该把 f64 那刀捡回来——它是已测的 27.7%。
 
+## 核里的 68 KiB 花在哪（2026-08-23 实测）
+
+staticcore + `-Copt-level=z` 链接后按符号排：
+
+| 字节 | 符号 |
+| ---: | --- |
+| 17,524 | `Module::from_bytes_with`（解码器，冷路径，最大的一块） |
+| 15,192 | `Module::run_defined`（解释器） |
+| 4,204 | `wasm::decode` |
+| 3,016 | `tinyvm_selftest`（体积门自己的入口） |
+| 2,556 | `Module::call_any_until_boundary` |
+| 1,292 | `BTreeMap<String, usize>::insert` |
+| 1,220 | `parse_const_expr` |
+| 640 + 568 + 436 | `fmt::Formatter::pad_integral`、`str::from_utf8`、`do_count_chars` |
+
+两条可动的线索：
+
+1. **自称 fmt-free 的 crate 里有 fmt。** 来源是会 panic 的下标/切片操作——
+   越界 panic 的消息要格式化两个整数，于是整套 fmt 机器被链进来。
+   这不是本次改动引入的，基线同样有。清掉要把 wasm.rs 里约 86 处标量下标 +
+   20 处切片区间（其它文件另算）全换成 `.get()`，**全有全无**：剩一处 fmt 就还在。
+   顺带一提，这跟 PRD 的「坏模块必须返回类型化错误、绝不 abort 进程」是同一件事——
+   iOS C ABI 那条路有 catch_unwind 兜着，`staticcore` + `panic=abort` 的嵌入没有。
+
+2. **解码器比解释器还大。** 冷路径占了四分之一的核。要余量先看它。
+
+买回余量后第一件事是把 f64 那刀捡回来（已测 −27.7%）。
+
 ## 门
 
 globals/locals 那扇门要薄。import 跳板别做成第二套运行时。
