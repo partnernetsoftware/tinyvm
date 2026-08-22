@@ -15,6 +15,22 @@
 3. **以后才开的分叉**  
    桌面可 AOT 成本机码，iOS 仍解释。那是槽 B，现在停着。
 
+## 已落地（2026-08-23）
+
+先有门再有刀：`smoke-interpreter-throughput.sh` 量「每条 guest 指令多少纳秒」，
+八种指令组合，计时前先让 wabt 独立算一遍答案。
+证据在 [docs/tinyvm-interpreter-throughput.md](../docs/tinyvm-interpreter-throughput.md)。
+
+第一刀是采样指出来的，不是猜的：`local.get` 里的 `push_operand` 占了五分之一时间，
+因为每次压栈都调一次 `Vec::try_reserve`；算术助手则用三次 Vec 边界检查去做一次
+「栈少一格」。直线代码快了 12–30%，调用密集的两行几乎没动——它们的成本在
+activation 建立，不在操作数搬运，那是下一刀。
+
+体积门在这里决定了刀的形状：把栈处理摊进泛型助手会让静态核从 101,240 涨到
+117,752 字节，超 100 KiB 上限 15 KiB（助手对闭包泛型，~150 个调用点各一份）。
+改成走非泛型共享函数后同样快，核只 +16 字节。可移植性排在吞吐前面，
+门没有被重新谈判。
+
 ## 门
 
 globals/locals 那扇门要薄。import 跳板别做成第二套运行时。

@@ -638,8 +638,20 @@ fn parse_prd_x_leaves(prd: &str) -> Vec<String> {
 /// test must exist in this package's integration tests and assert something
 /// concrete — the point of naming it here is that a leaf can no longer be
 /// satisfied by a text row.
-const LEAF_TESTS: [(&str, &str); 157] = [
+const LEAF_TESTS: [(&str, &str); 160] = [
     ("eval(bytes)", "eval_bytes"),
+    (
+        "in-guest throughput gate",
+        "interpreter_throughput_reports_nanoseconds_per_guest_instruction",
+    ),
+    (
+        "ns per guest instruction, eight shapes",
+        "interpreter_throughput_reports_nanoseconds_per_guest_instruction",
+    ),
+    (
+        "WABT agrees before any timing is believed",
+        "interpreter_throughput_reports_nanoseconds_per_guest_instruction",
+    ),
     (
         "eval_wasm(data, globals, locals)",
         "eval_wasm_sends_globals_and_locals_to_the_host_door",

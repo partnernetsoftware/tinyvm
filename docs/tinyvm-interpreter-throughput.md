@@ -49,28 +49,62 @@ The gate is the matrix, not the ranking: eight shapes, one positive observation
 each, same answers from both engines. A silently skipped row cannot pass as a
 fast one.
 
-## Baseline, 2026-08-22
+## Method for a before/after claim
 
-Release profile, Apple Silicon development machine, 50 repetitions. These are
-the numbers the interpreter had on the day the gate was written, recorded so a
-later change has something to be measured against.
+One run is not a measurement. Run-to-run spread on a development laptop is
+several percent, wide enough to manufacture a win. Every comparison recorded
+here is **three full runs per side, median taken per workload**, with both
+sides built from the same profile on the same machine in the same sitting.
 
-| Workload | ns / guest instruction | M steps/s |
-| --- | ---: | ---: |
-| `i32_loop` | 8.655 | 115.5 |
-| `i64_loop` | 7.302 | 136.9 |
-| `f64_math` | 8.130 | 123.0 |
-| `memory_scan` | 8.289 | 120.6 |
-| `call_direct` | 17.907 | 55.8 |
-| `call_indirect` | 18.795 | 53.2 |
-| `br_table` | 8.273 | 120.9 |
-| `local_shuffle` | 6.380 | 156.7 |
+Note the release profile is `opt-level = "z"`: these are the numbers of the
+size-optimized build the product actually ships, not of a speed-tuned build.
 
-Read the shape, not the absolute values. Straight-line work sat near 8 ns per
-instruction while call-heavy work sat near 18 ns, on a machine where a
-comparable no-JIT interpreter reaches low single-digit nanoseconds. That gap
-was the reason the per-instruction prologue became the first optimization
-target rather than any individual opcode.
+## Baseline and first optimization, 2026-08-22 / 23
+
+Release profile, Apple Silicon development machine, 50 entries per run, three
+runs per side.
+
+| Workload | ns/instr before | ns/instr after | Change |
+| --- | ---: | ---: | ---: |
+| `i32_loop` | 8.548 | 6.456 | −24.5% |
+| `i64_loop` | 7.604 | 5.343 | −29.7% |
+| `f64_math` | 8.333 | 7.775 | −6.7% |
+| `memory_scan` | 8.533 | 7.144 | −16.3% |
+| `call_direct` | 18.161 | 17.197 | −5.3% |
+| `call_indirect` | 19.147 | 17.871 | −6.7% |
+| `br_table` | 8.443 | 7.382 | −12.6% |
+| `local_shuffle` | 6.362 | 5.792 | −9.0% |
+
+What the profiler said, and what changed because of it:
+
+1. **A fifth of the interpreter's time was in one line** — the `push_operand`
+   call inside `local.get`. `push_operand` asked `Vec::try_reserve(1)` on
+   *every* push, so the hottest instruction in the engine carried an
+   out-of-line allocator call. `Vec::push` allocates exactly when
+   `len == capacity`, so the reserve now runs only in that case. Growth stays
+   fallible — below capacity the push cannot allocate, at capacity the
+   fallible reserve still runs first — and the static core grew by **0 bytes**.
+
+2. **Arithmetic paid three `Vec` edge checks to shrink the stack by one.**
+   Every `bin_*` / `un_*` helper popped both operands and pushed the result.
+   These shapes never grow the stack, so they now read the operands in place
+   and fold the result over the first one: one bounds check, no push, no
+   `Option` unwrap.
+
+The second change is also where the size gate earned its keep. The obvious
+version — inlining the stack handling into each helper — ran fast and pushed
+the static core from 101,240 to **117,752 bytes**, 15 KiB over the 100 KiB
+product limit, because every helper is generic over its closure and is
+monomorphised at each of its ~150 call sites. Routing the operand access
+through non-generic shared functions (`top2_i32`, `fold_top2`, `set_top`, …)
+kept each monomorphisation down to a couple of calls: same speed, **+16 bytes**
+of core. Portability is ranked above throughput in the PRD, so the size gate
+decided the shape of the optimization rather than being renegotiated around it.
+
+Call-heavy rows barely moved, which is the honest read: their cost is
+activation setup, not operand traffic. They are the next target, along with the
+load-time lowering and stack-top caching sketched in
+[the performance notes](../prd/notes-performance.md).
 
 ## Running it
 

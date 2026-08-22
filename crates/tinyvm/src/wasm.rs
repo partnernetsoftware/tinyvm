@@ -8789,25 +8789,20 @@ fn sat_f64_to_i64_u(x: f64) -> i64 {
 
 /// Pop `b` then `a` and push `f(a, b)` — the shape of every binary f32 op.
 fn bin_f32(stack: &mut Vec<Val>, f: impl FnOnce(f32, f32) -> f32) -> Result<(), WasmError> {
-    let b = pop_f32(stack)?;
-    let a = pop_f32(stack)?;
-    stack.push(Val::F32(f(a, b)));
-    Ok(())
+    let (a, b) = top2_f32(stack)?;
+    fold_top2(stack, Val::F32(f(a, b)))
 }
 
 /// Pop `b` then `a`, push `1`/`0` — the shape of every f32 comparison.
 fn bin_f32_cmp(stack: &mut Vec<Val>, f: impl FnOnce(f32, f32) -> bool) -> Result<(), WasmError> {
-    let b = pop_f32(stack)?;
-    let a = pop_f32(stack)?;
-    stack.push(Val::I32(i32::from(f(a, b))));
-    Ok(())
+    let (a, b) = top2_f32(stack)?;
+    fold_top2(stack, Val::I32(i32::from(f(a, b))))
 }
 
 /// Pop `a` and push `f(a)` — the shape of every unary f32 op.
-fn un_f32(stack: &mut Vec<Val>, f: impl FnOnce(f32) -> f32) -> Result<(), WasmError> {
-    let a = pop_f32(stack)?;
-    stack.push(Val::F32(f(a)));
-    Ok(())
+fn un_f32(stack: &mut [Val], f: impl FnOnce(f32) -> f32) -> Result<(), WasmError> {
+    let a = top1_f32(stack)?;
+    set_top(stack, Val::F32(f(a)))
 }
 
 /// WASM `f32.min`: NaN propagates; `min(-0.0, +0.0)` is `-0.0`.
@@ -8889,10 +8884,8 @@ fn leb_s64(bytes: &[u8], mut i: usize) -> Result<(i64, usize), WasmError> {
 
 /// Pop `b` then `a` and push `f(a, b)` — the shape of every binary i64 op.
 fn bin_i64(stack: &mut Vec<Val>, f: impl FnOnce(i64, i64) -> i64) -> Result<(), WasmError> {
-    let b = pop_i64(stack)?;
-    let a = pop_i64(stack)?;
-    stack.push(Val::I64(f(a, b)));
-    Ok(())
+    let (a, b) = top2_i64(stack)?;
+    fold_top2(stack, Val::I64(f(a, b)))
 }
 
 /// Like [`bin_i64`] but the operation may trap (e.g. divide by zero).
@@ -8900,34 +8893,29 @@ fn bin_i64_try(
     stack: &mut Vec<Val>,
     f: impl FnOnce(i64, i64) -> Result<i64, WasmError>,
 ) -> Result<(), WasmError> {
-    let b = pop_i64(stack)?;
-    let a = pop_i64(stack)?;
+    let (a, b) = top2_i64(stack)?;
+    // The trapping operation runs before the stack is edited, so a trap leaves
+    // the operands where the popping version left them.
     let r = f(a, b)?;
-    stack.push(Val::I64(r));
-    Ok(())
+    fold_top2(stack, Val::I64(r))
 }
 
 /// Pop `b` then `a` and push an i32 boolean — the shape of every i64 comparison.
 fn cmp_i64(stack: &mut Vec<Val>, f: impl FnOnce(i64, i64) -> bool) -> Result<(), WasmError> {
-    let b = pop_i64(stack)?;
-    let a = pop_i64(stack)?;
-    stack.push(Val::I32(i32::from(f(a, b))));
-    Ok(())
+    let (a, b) = top2_i64(stack)?;
+    fold_top2(stack, Val::I32(i32::from(f(a, b))))
 }
 
 /// Pop `a` and push `f(a)` — the shape of every unary i64 op.
-fn un_i64(stack: &mut Vec<Val>, f: impl FnOnce(i64) -> i64) -> Result<(), WasmError> {
-    let a = pop_i64(stack)?;
-    stack.push(Val::I64(f(a)));
-    Ok(())
+fn un_i64(stack: &mut [Val], f: impl FnOnce(i64) -> i64) -> Result<(), WasmError> {
+    let a = top1_i64(stack)?;
+    set_top(stack, Val::I64(f(a)))
 }
 
 /// Pop `b` then `a` and push `f(a, b)` — the shape of every binary i32 op.
 fn bin_i32(stack: &mut Vec<Val>, f: impl FnOnce(i32, i32) -> i32) -> Result<(), WasmError> {
-    let b = pop(stack)?;
-    let a = pop(stack)?;
-    stack.push(Val::I32(f(a, b)));
-    Ok(())
+    let (a, b) = top2_i32(stack)?;
+    fold_top2(stack, Val::I32(f(a, b)))
 }
 
 /// Like [`bin_i32`] but the operation may trap (e.g. divide by zero).
@@ -8935,17 +8923,116 @@ fn bin_i32_try(
     stack: &mut Vec<Val>,
     f: impl FnOnce(i32, i32) -> Result<i32, WasmError>,
 ) -> Result<(), WasmError> {
-    let b = pop(stack)?;
-    let a = pop(stack)?;
+    let (a, b) = top2_i32(stack)?;
+    // The trapping operation runs before the stack is edited, so a trap leaves
+    // the operands where the popping version left them.
     let r = f(a, b)?;
-    stack.push(Val::I32(r));
-    Ok(())
+    fold_top2(stack, Val::I32(r))
 }
 
 /// Pop `a` and push `f(a)` — the shape of every unary i32 op.
-fn un_i32(stack: &mut Vec<Val>, f: impl FnOnce(i32) -> i32) -> Result<(), WasmError> {
-    let a = pop(stack)?;
-    stack.push(Val::I32(f(a)));
+fn un_i32(stack: &mut [Val], f: impl FnOnce(i32) -> i32) -> Result<(), WasmError> {
+    let a = top1_i32(stack)?;
+    set_top(stack, Val::I32(f(a)))
+}
+
+/// Operand access for arithmetic, split out so it stays *one* copy.
+///
+/// Every `bin_*` / `un_*` helper is generic over its closure, so it is
+/// monomorphised at each of its ~150 call sites. Inlining stack handling into
+/// those bodies grew the static core by 16 KiB and broke the < 100 KiB product
+/// gate; delegating to these non-generic functions keeps each monomorphisation
+/// down to a couple of calls, which is what the popping versions cost.
+///
+/// The win over pop/pop/push is that arithmetic never grows the stack: reading
+/// the operands in place and folding the result over the first one skips the
+/// `Option` unwrap and the capacity-aware push that the push path must carry.
+/// Type and arity are proven at load time; these checks stay as defence in
+/// depth for the unvalidated builder path and report the same faults the
+/// popping versions reported.
+fn top2_i32(stack: &[Val]) -> Result<(i32, i32), WasmError> {
+    let Some([first, second]) = stack.last_chunk::<2>() else {
+        return Err(WasmError::Trap("operand stack underflow"));
+    };
+    let (Val::I32(a), Val::I32(b)) = (*first, *second) else {
+        return Err(WasmError::Trap("expected i32 on stack, got"));
+    };
+    Ok((a, b))
+}
+
+/// Read the top two operands as `i64` without removing them.
+fn top2_i64(stack: &[Val]) -> Result<(i64, i64), WasmError> {
+    let Some([first, second]) = stack.last_chunk::<2>() else {
+        return Err(WasmError::Trap("operand stack underflow"));
+    };
+    let (Val::I64(a), Val::I64(b)) = (*first, *second) else {
+        return Err(WasmError::Trap("expected i64 on stack, got"));
+    };
+    Ok((a, b))
+}
+
+/// Read the top two operands as `f32` without removing them.
+fn top2_f32(stack: &[Val]) -> Result<(f32, f32), WasmError> {
+    let Some([first, second]) = stack.last_chunk::<2>() else {
+        return Err(WasmError::Trap("operand stack underflow"));
+    };
+    let (Val::F32(a), Val::F32(b)) = (*first, *second) else {
+        return Err(WasmError::Trap("expected f32 on stack, got"));
+    };
+    Ok((a, b))
+}
+
+/// Write `value` over the second-from-top operand and drop the top — the shape
+/// every binary operation ends with.
+fn fold_top2(stack: &mut Vec<Val>, value: Val) -> Result<(), WasmError> {
+    let index = stack
+        .len()
+        .checked_sub(2)
+        .ok_or(WasmError::Trap("operand stack underflow"))?;
+    stack[index] = value;
+    stack.pop();
+    Ok(())
+}
+
+/// Read the top operand as `i32` without removing it.
+fn top1_i32(stack: &[Val]) -> Result<i32, WasmError> {
+    let Some(top) = stack.last() else {
+        return Err(WasmError::Trap("operand stack underflow"));
+    };
+    let Val::I32(a) = *top else {
+        return Err(WasmError::Trap("expected i32 on stack, got"));
+    };
+    Ok(a)
+}
+
+/// Read the top operand as `i64` without removing it.
+fn top1_i64(stack: &[Val]) -> Result<i64, WasmError> {
+    let Some(top) = stack.last() else {
+        return Err(WasmError::Trap("operand stack underflow"));
+    };
+    let Val::I64(a) = *top else {
+        return Err(WasmError::Trap("expected i64 on stack, got"));
+    };
+    Ok(a)
+}
+
+/// Read the top operand as `f32` without removing it.
+fn top1_f32(stack: &[Val]) -> Result<f32, WasmError> {
+    let Some(top) = stack.last() else {
+        return Err(WasmError::Trap("operand stack underflow"));
+    };
+    let Val::F32(a) = *top else {
+        return Err(WasmError::Trap("expected f32 on stack, got"));
+    };
+    Ok(a)
+}
+
+/// Overwrite the top operand — the shape every unary operation ends with.
+fn set_top(stack: &mut [Val], value: Val) -> Result<(), WasmError> {
+    let Some(top) = stack.last_mut() else {
+        return Err(WasmError::Trap("operand stack underflow"));
+    };
+    *top = value;
     Ok(())
 }
 
@@ -9039,9 +9126,11 @@ fn push_operand(
     if live_slots >= available_slots {
         return Err(WasmError::Trap("call stack"));
     }
-    stack
-        .try_reserve(1)
-        .map_err(|_| WasmError::Trap("operand stack"))?;
+    if stack.len() == stack.capacity() {
+        stack
+            .try_reserve(1)
+            .map_err(|_| WasmError::Trap("operand stack"))?;
+    }
     stack.push(value);
     Ok(())
 }

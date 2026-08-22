@@ -114,8 +114,12 @@ tinyvm (35)                                      [~]
 │       │   └── fallible execution-stack growth           [x]
 │       ├── memory budget                                 [x]
 │       ├── table budget                                  [x]
-│       └── deterministic execution stats                 [x]
-│           └── call/activation peak telemetry            [x]
+│       ├── deterministic execution stats                 [x]
+│       │   └── call/activation peak telemetry            [x]
+│       └── in-guest throughput gate                      [x]
+│           ├── ns per guest instruction, eight shapes    [x]
+│           ├── WABT agrees before any timing is believed [x]
+│           └── load-time lowering / stack-top caching    [ ]
 │
 ├── standard host and linking                            [~]
 │   ├── owned host ABI                                   [~]
@@ -489,6 +493,7 @@ Current evidence owners:
 - [Host resource table](../docs/tinyvm-host-resource-table.md)
 - [Native completion channel](../docs/tinyvm-native-completions.md)
 - [Optional SIMD audio profile](../docs/tinyvm-simd-audio.md)
+- [In-guest interpreter throughput](../docs/tinyvm-interpreter-throughput.md)
 - [JavaScriptCore public/private boundary](../docs/tinyarcade-javascriptcore-boundary.md)
 - [Converter conformance](../docs/tinyarcade-converter-conformance-v1.md)
 - [Cartridge conformance report v1](../docs/tinyarcade-cartridge-conformance-report-v1.md)
