@@ -123,6 +123,31 @@ common leaf — reaches its first instruction without allocating at all.
 Static core unchanged at 101,256 bytes. Against the original baseline the two
 call rows are down 13.9% and 12.1%.
 
+## A win that was measured and then declined: f64
+
+The same in-place transformation applies to the f64 arms, which are still
+written as pop / pop / push. It was implemented and measured: `f64_math` goes
+from 7.775 to 5.621 ns per instruction, **−27.7%**, the same size of win i64
+got.
+
+It was reverted, because it costs about 200 bytes of `__text` and the size gate
+has no room for them. The linked core sits at 101,256 bytes against a 102,400
+limit — 1.1 KiB of headroom — while the linked file grows in 16 KiB steps as
+`__TEXT` crosses a page. A 192-byte text growth therefore measured as a
+16,512-byte file growth and put the core 15 KiB over the product limit.
+
+Three shapes were tried and all landed at the same place: helper functions
+generic over a closure (+216 bytes), the same helpers with the libm calls
+wrapped so no function item is taken by value (+216), and no new functions at
+all with each arm calling the shared accessors directly (+192).
+
+Spending the last kilobyte of a <100 KiB core on f64 throughput is the wrong
+trade for this product: the TinyArcade embedding is deliberately i32-only, so
+f64 is not on the critical path, while the size limit is the reason the engine
+runs where JIT is forbidden. Whoever buys headroom back — by cutting
+monomorphisation elsewhere, for instance — should take this change first: it is
+a known, measured 27.7%.
+
 ## What is left
 
 The remaining call cost is the two buffers still allocated per activation (the
