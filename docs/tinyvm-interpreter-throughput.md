@@ -123,6 +123,23 @@ common leaf — reaches its first instruction without allocating at all.
 Static core unchanged at 101,256 bytes. Against the original baseline the two
 call rows are down 13.9% and 12.1%.
 
+## Where the eight rows stand
+
+Cumulative, against the 2026-08-22 baseline, medians of three runs per side:
+
+| Workload | baseline | now | Change |
+| --- | ---: | ---: | ---: |
+| `i32_loop` | 8.548 | 6.640 | −22.3% |
+| `i64_loop` | 7.604 | 5.631 | −25.9% |
+| `f64_math` | 8.333 | 7.739 | −7.1% |
+| `memory_scan` | 8.533 | 7.134 | −16.4% |
+| `call_direct` | 18.161 | 15.643 | −13.9% |
+| `call_indirect` | 19.147 | 16.824 | −12.1% |
+| `br_table` | 8.443 | 7.573 | −10.3% |
+| `local_shuffle` | 6.362 | 5.724 | −10.0% |
+
+Static core 101,240 → 101,256 bytes, still under the 100 KiB gate.
+
 ## A win that was measured and then declined: f64
 
 The same in-place transformation applies to the f64 arms, which are still
