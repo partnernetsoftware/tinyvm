@@ -5,9 +5,12 @@
 
 ## 产品句
 
-便携可编程核。超级应用「跑程序」必须经此：`eval_wasm(data, globals, locals)`，装载期校验，宿主资源上限，无 JIT 也能活（含 iOS）。
+政委 2026-08-22：做得好是刚性需求。自己要一颗融合 qjs+wasm 的跨架构引擎，像自己的 JVM/V8：写一次，多平台，高性能。
 
-语言皮（qjs 子集糖）在 `agenterm-tinyvm-qjs`：`eval_qjs = qjs2wasm + eval_wasm`。完整 JS / 容器 / 市场后加。
+便携可编程核。超级应用「跑程序」必须经此：`eval_wasm(data, globals, locals)`，装载期校验，宿主资源上限，无 JIT 也能活（含 iOS）。
+对齐 JVM（校验+上限+同语义），不对齐 V8（JIT+完整 JS）。qjs 糖是皮，wasm 是核。
+
+语言皮在 `agenterm-tinyvm-qjs`：`eval_qjs = qjs2wasm + eval_wasm`。完整 JS / 容器 / 市场后加。
 
 ## 纪律
 
