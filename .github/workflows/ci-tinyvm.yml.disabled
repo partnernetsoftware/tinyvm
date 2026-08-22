@@ -1,0 +1,132 @@
+# PARKED — GitHub only reads `*.yml` / `*.yaml` in this directory, so this file
+# never triggers while it ends in `.disabled`. Enable it with one rename:
+#
+#   git mv .github/workflows/ci-tinyvm.yml.disabled .github/workflows/ci-tinyvm.yml
+#
+# Before flipping it on, read the two runner caveats:
+#   - `core` and `oracles` need wabt + binaryen from apt. Both are pinned by
+#     name, not version; a distro bump can move the wabt oracle baseline.
+#   - `apple` boots a simulator. That step is the slowest and the first to go
+#     flaky on a hosted runner; the link-only gate above it is the cheap floor.
+#
+# Every gate command below was run locally and green at migration time,
+# including the booted-simulator pass. Only the runner setup steps
+# (apt/brew installs, the simulator boot) are untried on a hosted runner.
+
+name: CI / tinyvm
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+concurrency:
+  # An exact-SHA manual qualification must survive later main pushes. Ordinary
+  # push/PR feedback remains replaceable within its mutable ref.
+  group: ci-tinyvm-${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: tinyvm core, both feature sets, < 100 KiB gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+      - name: Install Rust quality components
+        run: rustup component add rustfmt clippy
+      # Cartridge fixtures are compiled to standard wasm by the checked-in build
+      # scripts, which shell out to `rustup run 1.97.0 rustc --target wasm32` and
+      # then `wasm-opt`. Without these two the cartridge tests fail on tooling,
+      # not on the VM.
+      - name: Install cartridge toolchain
+        run: |
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update
+          sudo apt-get install -y binaryen
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy every target and feature
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Test default features
+        run: cargo test --locked --workspace
+      # cartridge-trust / replay / catalog-publisher / std-host only build here.
+      - name: Test all features
+        run: cargo test --locked --workspace --all-features
+      # The product sentence is a portable kernel that fits where JIT is
+      # forbidden. This is the gate that keeps that sentence true.
+      - name: Gate the static core under 100 KiB
+        run: crates/tinyvm/measure-core.sh
+
+  oracles:
+    name: tinyvm wabt differential oracles
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+      - name: Install wabt and cartridge toolchain
+        run: |
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update
+          sudo apt-get install -y wabt binaryen
+      # Each script builds one standard module, runs it through wabt's
+      # interpreter and through tinyvm, and requires the same result. A tinyvm
+      # bug that agrees with itself still fails here.
+      - name: Run every wabt oracle
+        run: |
+          set -eu
+          for smoke in crates/tinyvm/smoke-wabt-*.sh; do
+            echo "::group::$(basename "$smoke")"
+            "$smoke"
+            echo "::endgroup::"
+          done
+      - name: Standard feature matrix
+        run: crates/tinyvm/smoke-standard-feature-matrix.sh
+      - name: Cartridge feature profile
+        run: crates/tinyvm/smoke-cartridge-feature-profile.sh
+      - name: Host boundary benchmark
+        run: crates/tinyvm/smoke-boundary-benchmark.sh
+
+  apple:
+    name: tinyvm iOS bridge and JavaScriptCore differential
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+      - name: Install Apple Rust targets
+        run: |
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+          brew install binaryen
+      # JavaScriptCore is a development oracle, never a shipped dependency or
+      # fallback. This gate is the only place it is allowed to appear.
+      - name: WebKit differential oracle
+        run: crates/tinyvm/smoke-webkit-differential.sh
+      # Link-only by default: builds the device + universal-simulator
+      # XCFramework and links every Swift consumer against it.
+      - name: XCFramework build and Swift link
+        run: crates/tinyvm/smoke-ios-bridge.sh
+      - name: Boot a simulator
+        run: |
+          set -eu
+          device=$(xcrun simctl list devices available --json \
+            | python3 -c 'import json,sys;d=json.load(sys.stdin)["devices"];print(next(x["udid"] for v in d.values() for x in v if "iPhone" in x["name"]))')
+          xcrun simctl boot "$device"
+          xcrun simctl bootstatus "$device"
+      # Running inside a booted container is what proves the C ABI, the
+      # completion channel and the host profile actually work on-device, rather
+      # than merely linking.
+      - name: Booted-container runtime gate
+        env:
+          TINYARCADE_RUN_BOOTED_SIMULATOR: "1"
+        run: crates/tinyvm/smoke-ios-bridge.sh
+      - name: Optional WASI host booted run
+        run: crates/tinyvm/smoke-ios-wasi-host.sh
