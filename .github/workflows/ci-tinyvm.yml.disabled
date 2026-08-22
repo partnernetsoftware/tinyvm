@@ -93,6 +93,11 @@ jobs:
         run: crates/tinyvm/smoke-cartridge-feature-profile.sh
       - name: Host boundary benchmark
         run: crates/tinyvm/smoke-boundary-benchmark.sh
+      # Timing is development evidence, not a threshold, so this row gates the
+      # matrix: eight workload shapes, WABT agreeing on every answer before any
+      # timing is believed.
+      - name: In-guest interpreter throughput
+        run: crates/tinyvm/smoke-interpreter-throughput.sh
 
   apple:
     name: tinyvm iOS bridge and JavaScriptCore differential
