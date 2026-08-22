@@ -80,6 +80,24 @@
     v128.load
     v128.any_true)
 
+  ;; Byte rearrangement emitted by portable image/audio codecs. Shuffle can
+  ;; select either source; swizzle returns zero for indices outside 0..15.
+  (func (export "rearrange") (param $left i32) (param $right i32) (param $output i32)
+    local.get $output
+    local.get $left
+    v128.load
+    local.get $right
+    v128.load
+    i8x16.shuffle 0 17 2 19 4 21 6 23 8 25 10 27 12 29 14 31
+    v128.store
+
+    local.get $output
+    local.get $left
+    v128.load
+    v128.const i8x16 15 14 13 12 11 10 9 8 7 6 5 4 3 2 16 255
+    i8x16.swizzle
+    v128.store offset=16)
+
   ;; Wrapping integer lane arithmetic used by packed counters, coordinates,
   ;; fixed-point state and deterministic game simulation. Results are ordered
   ;; i8 add/sub; i16 add/sub/mul; i32 add/sub/mul; i64 add/sub/mul.

@@ -1554,6 +1554,10 @@ enum Op {
     #[cfg(feature = "simd")]
     V128Const([u8; 16]),
     #[cfg(feature = "simd")]
+    I8x16Shuffle([u8; 16]),
+    #[cfg(feature = "simd")]
+    I8x16Swizzle,
+    #[cfg(feature = "simd")]
     V128Not,
     #[cfg(feature = "simd")]
     V128And,
@@ -2080,6 +2084,20 @@ fn decode(body: &[u8], budget: &mut DecodeBudget) -> Result<DecodedCode, WasmErr
                             i = end;
                             ops.push(Op::V128Const(value));
                         }
+                        13 => {
+                            let end = i
+                                .checked_add(16)
+                                .filter(|&end| end <= body.len())
+                                .ok_or(WasmError::Decode("truncated i8x16.shuffle immediate"))?;
+                            let mut lanes = [0; 16];
+                            lanes.copy_from_slice(&body[i..end]);
+                            if lanes.iter().any(|&lane| lane >= 32) {
+                                return Err(WasmError::Decode("i8x16.shuffle lane out of range"));
+                            }
+                            i = end;
+                            ops.push(Op::I8x16Shuffle(lanes));
+                        }
+                        14 => ops.push(Op::I8x16Swizzle),
                         15 => ops.push(Op::I8x16Splat),
                         16 => ops.push(Op::I16x8Splat),
                         17 => ops.push(Op::I32x4Splat),
@@ -5014,6 +5032,8 @@ impl Module {
                     Op::V128Load(_)
                     | Op::V128Store(_)
                     | Op::V128Const(_)
+                    | Op::I8x16Shuffle(_)
+                    | Op::I8x16Swizzle
                     | Op::V128Not
                     | Op::V128And
                     | Op::V128AndNot
@@ -6921,6 +6941,29 @@ impl Module {
                         live_slots,
                         resources.available_slots,
                     )?;
+                }
+                #[cfg(feature = "simd")]
+                Op::I8x16Shuffle(lanes) => {
+                    let right = pop_v128(&mut stack)?;
+                    let left = pop_v128(&mut stack)?;
+                    let value = core::array::from_fn(|index| {
+                        let lane = lanes[index] as usize;
+                        if lane < 16 {
+                            left[lane]
+                        } else {
+                            right[lane - 16]
+                        }
+                    });
+                    stack.push(Val::V128(value));
+                }
+                #[cfg(feature = "simd")]
+                Op::I8x16Swizzle => {
+                    let indices = pop_v128(&mut stack)?;
+                    let input = pop_v128(&mut stack)?;
+                    let value = core::array::from_fn(|index| {
+                        input.get(indices[index] as usize).copied().unwrap_or(0)
+                    });
+                    stack.push(Val::V128(value));
                 }
                 #[cfg(feature = "simd")]
                 Op::V128Store(arg) => {

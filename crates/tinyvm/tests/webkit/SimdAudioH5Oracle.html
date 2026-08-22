@@ -4,7 +4,7 @@
 <body data-status="running">running</body>
 <script>
 (() => {
-  const expected = "32767,-32768,300,-300,32767,-32768,-5000,5000|20000,-20000,-100,100,32766,-32767,32767,-32768|mask=1,0|lanes=pass|bridge=pass";
+  const expected = "32767,-32768,300,-300,32767,-32768,-5000,5000|20000,-20000,-100,100,32766,-32767,32767,-32768|mask=1,0|rearrange=pass|lanes=pass|bridge=pass";
   const decode = value => {
     const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
     const binary = atob(base64 + "=".repeat((4 - base64.length % 4) % 4));
@@ -42,6 +42,16 @@
       if (actual !== (value & 0xff)) throw new Error(`logic ${operation}:${index}=${actual}`);
     }));
     const any = `${instance.exports.any(0)},${instance.exports.any(176)}`;
+    bytes.fill(0xa5, 192, 224);
+    instance.exports.rearrange(0, 16, 192);
+    const rearranged = [
+      left.map((value, index) => index % 2 === 0 ? value : right[index]),
+      left.map((_, index) => index < 14 ? left[15 - index] : 0)
+    ];
+    rearranged.forEach((vector, operation) => vector.forEach((value, index) => {
+      const actual = bytes[192 + operation * 16 + index];
+      if (actual !== value) throw new Error(`rearrange ${operation}:${index}=${actual}`);
+    }));
     const laneOperations = [[1,0],[1,1],[2,0],[2,1],[2,2],[4,0],[4,1],[4,2],[8,0],[8,1],[8,2]];
     const laneVector = ([width, arithmetic]) => {
       const vector = new Array(16).fill(0);
@@ -104,7 +114,7 @@
       const actual = bytes[448 + index];
       if (actual !== value) throw new Error(`bridge ${index}=${actual}`);
     });
-    const result = `${added}|${subtracted}|mask=${any}|lanes=pass|bridge=pass`;
+    const result = `${added}|${subtracted}|mask=${any}|rearrange=pass|lanes=pass|bridge=pass`;
     if (result !== expected) throw new Error(`wrong result ${result}`);
     document.body.dataset.status = "pass";
     document.body.textContent = `OK: H5 SIMD game kernels=${result}`;

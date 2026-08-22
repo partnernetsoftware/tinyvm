@@ -7,7 +7,7 @@ Status: implemented, optional workload profile
 The Cargo feature `simd` enables a bounded standard WebAssembly SIMD subset
 inside the unified `tinyvm` crate. It is deliberately driven by game
 runtime jobs: saturated signed PCM mixing, whole-vector masks for packed flags
-or pixel composition, wrapping integer lanes for coordinates, counters and
+or pixel composition, byte shuffle/swizzle for codecs, wrapping integer lanes for coordinates, counters and
 deterministic fixed-point state, and the scalar/vector lane bridge emitted by
 portable C/Rust SIMD frontends. It is not a claim that the complete SIMD
 proposal is implemented.
@@ -26,6 +26,8 @@ v128 value type
 ├── v128.load
 ├── v128.store
 ├── v128.const
+├── i8x16.shuffle
+├── i8x16.swizzle
 ├── v128.not
 ├── v128.and
 ├── v128.andnot

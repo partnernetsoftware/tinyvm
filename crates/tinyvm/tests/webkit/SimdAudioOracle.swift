@@ -53,6 +53,16 @@ struct SimdAudioOracle {
                 if (actual !== (value & 0xff)) throw new Error(`logic ${operation}:${index}=${actual}`);
               }));
               const any = `${instance.exports.any(0)},${instance.exports.any(176)}`;
+              bytes.fill(0xa5, 192, 224);
+              instance.exports.rearrange(0, 16, 192);
+              const rearranged = [
+                left.map((value, index) => index % 2 === 0 ? value : right[index]),
+                left.map((_, index) => index < 14 ? left[15 - index] : 0)
+              ];
+              rearranged.forEach((vector, operation) => vector.forEach((value, index) => {
+                const actual = bytes[192 + operation * 16 + index];
+                if (actual !== value) throw new Error(`rearrange ${operation}:${index}=${actual}`);
+              }));
               const laneOperations = [[1,0],[1,1],[2,0],[2,1],[2,2],[4,0],[4,1],[4,2],[8,0],[8,1],[8,2]];
               const laneVector = ([width, arithmetic]) => {
                 const vector = new Array(16).fill(0);
@@ -115,13 +125,13 @@ struct SimdAudioOracle {
                 const actual = bytes[448 + index];
                 if (actual !== value) throw new Error(`bridge ${index}=${actual}`);
               });
-              return `${added}|${subtracted}|mask=${any}|lanes=pass|bridge=pass`;
+              return `${added}|${subtracted}|mask=${any}|rearrange=pass|lanes=pass|bridge=pass`;
             })()
             """
         )
         if let javascriptError { throw OracleError.javascript(javascriptError) }
         let result = value?.toString() ?? ""
-        let expected = "32767,-32768,300,-300,32767,-32768,-5000,5000|20000,-20000,-100,100,32766,-32767,32767,-32768|mask=1,0|lanes=pass|bridge=pass"
+        let expected = "32767,-32768,300,-300,32767,-32768,-5000,5000|20000,-20000,-100,100,32766,-32767,32767,-32768|mask=1,0|rearrange=pass|lanes=pass|bridge=pass"
         guard result == expected else { throw OracleError.wrongResult(result) }
         print("OK: JavaScriptCore SIMD game kernels=\(result)")
     }

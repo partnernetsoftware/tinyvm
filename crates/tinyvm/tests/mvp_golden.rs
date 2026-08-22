@@ -638,7 +638,7 @@ fn parse_prd_x_leaves(prd: &str) -> Vec<String> {
 /// test must exist in this package's integration tests and assert something
 /// concrete — the point of naming it here is that a leaf can no longer be
 /// satisfied by a text row.
-const LEAF_TESTS: [(&str, &str); 160] = [
+const LEAF_TESTS: [(&str, &str); 161] = [
     ("eval(bytes)", "eval_bytes"),
     (
         "in-guest throughput gate",
@@ -1152,6 +1152,10 @@ const LEAF_TESTS: [(&str, &str); 160] = [
     ),
     (
         "whole-vector bitwise masks",
+        "wabt_compiled_simd_game_kernels_match_tinyvm",
+    ),
+    (
+        "byte shuffle/swizzle",
         "wabt_compiled_simd_game_kernels_match_tinyvm",
     ),
     (

@@ -52,6 +52,22 @@ fn expected_logic() -> [[u8; 16]; 6] {
     })
 }
 
+fn expected_rearrange() -> [[u8; 16]; 2] {
+    [
+        core::array::from_fn(|index| {
+            if index % 2 == 0 {
+                LOGIC_LEFT[index]
+            } else {
+                LOGIC_RIGHT[index]
+            }
+        }),
+        core::array::from_fn(|index| match index {
+            0..=13 => LOGIC_LEFT[15 - index],
+            _ => 0,
+        }),
+    ]
+}
+
 fn expected_lanes() -> [[u8; 16]; 11] {
     const OPERATIONS: [(usize, u8); 11] = [
         (1, 0),
@@ -226,6 +242,23 @@ fn wabt_compiled_simd_game_kernels_match_tinyvm() {
     ));
 
     {
+        let mut memory = must(instance.memory_mut(), "borrow SIMD rearrange memory");
+        memory[0..16].copy_from_slice(&LOGIC_LEFT);
+        memory[16..32].copy_from_slice(&LOGIC_RIGHT);
+        memory[192..224].fill(0xa5);
+    }
+    must(
+        instance.invoke_by_name("rearrange", &[Val::I32(0), Val::I32(16), Val::I32(192)]),
+        "run SIMD byte rearrangement",
+    );
+    let memory = must(instance.memory(), "read SIMD rearrangement results");
+    for (operation, expected) in expected_rearrange().iter().enumerate() {
+        let start = 192 + operation * 16;
+        assert_eq!(&memory[start..start + 16], expected);
+    }
+    drop(memory);
+
+    {
         let mut memory = must(instance.memory_mut(), "borrow SIMD lane memory");
         memory[0..16].copy_from_slice(&LOGIC_LEFT);
         memory[16..32].copy_from_slice(&LOGIC_RIGHT);
@@ -326,6 +359,25 @@ fn simd_lane_immediate_is_range_checked_during_decode() {
         Ok(_) => panic!("out-of-range SIMD lane must fail at load"),
     };
     assert_eq!(error.message(), "SIMD lane index out of range");
+}
+
+#[test]
+fn simd_shuffle_immediate_is_range_checked_during_decode() {
+    let mut bytes = wat::parse_str(
+        "(module (func (result v128) v128.const i32x4 0 0 0 0 v128.const i32x4 0 0 0 0 i8x16.shuffle 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 31))",
+    )
+    .expect("encode valid SIMD shuffle fixture");
+    let immediate = bytes
+        .windows(2)
+        .position(|window| window == [0xfd, 0x0d])
+        .expect("find shuffle opcode")
+        + 2;
+    bytes[immediate + 15] = 32;
+    let error = match WasmModule::from_bytes(&bytes) {
+        Err(error) => error,
+        Ok(_) => panic!("out-of-range SIMD shuffle lane must fail at load"),
+    };
+    assert_eq!(error.message(), "i8x16.shuffle lane out of range");
 }
 
 #[test]
