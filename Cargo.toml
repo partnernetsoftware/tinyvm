@@ -1,0 +1,27 @@
+[workspace]
+members = ["crates/tinyvm", "crates/tinyvm-qjs"]
+resolver = "3"
+
+# `cargo test` links ~45 integration binaries, each pulling in the whole crate.
+# Carrying dev's debug info through all of them is what drives peak memory on
+# an 8 GB machine; line tables still give readable panic locations, which is
+# all the suite needs.
+[profile.test]
+debug = 0
+incremental = true
+
+# The product sentence is a < 100 KiB static core, so the distributable profile
+# optimizes for size. `measure-core.sh` passes its own rustc flags and does not
+# depend on this profile.
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Static C bridge embedded in an iOS app. The exported boundary catches Rust
+# panics and maps them to a stable status, so this profile must preserve unwind.
+[profile.tinyvm-ios-release]
+inherits = "release"
+panic = "unwind"

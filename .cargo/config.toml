@@ -1,0 +1,8 @@
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+
+# tinyvm 的测试套件会派生嵌套 cargo（卡带 guest 编译、wabt oracle）。
+# 不封顶时会在 8 核机上把 CPU/内存打满，卡死整机而不是慢跑。
+# 需要更多并行时用 `cargo build -j N` 或 CARGO_BUILD_JOBS 覆盖。
+[build]
+jobs = 6
