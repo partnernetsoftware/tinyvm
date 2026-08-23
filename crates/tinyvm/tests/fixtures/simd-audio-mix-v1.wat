@@ -236,6 +236,35 @@
 
     i32.const 1)
 
+  ;; Collapse lane truth and sign bits without copying the vector back to the
+  ;; host. These are the standard bridge from SIMD masks to scalar branches.
+  (func (export "reductions") (result i32)
+    v128.const i8x16 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+    i8x16.all_true
+    i32.const 1
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i16x8 1 1 1 0 1 1 1 1
+    i16x8.all_true
+    i32.const 0
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i32x4 -1 1 -1 1
+    i32x4.bitmask
+    i32.const 5
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i64x2 1 -1
+    i64x2.bitmask
+    i32.const 2
+    i32.ne
+    if i32.const 0 return end
+
+    i32.const 1)
+
   ;; Scalar/vector lane bridge emitted by portable C/Rust SIMD frontends.
   ;; Six splats, six replacements and all signed/unsigned/numeric extraction
   ;; result families are serialized so independent engines can compare bytes.

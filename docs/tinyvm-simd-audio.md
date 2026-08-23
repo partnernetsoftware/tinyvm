@@ -44,6 +44,7 @@ v128 value type
 ├── f32x4 / f64x2 .replace_lane
 ├── i8x16 / i16x8 / i32x4 integer comparisons (signed + unsigned)
 ├── i64x2 integer comparisons (signed)
+├── i8x16 / i16x8 / i32x4 / i64x2 .all_true / .bitmask
 ├── i8x16.add / i8x16.sub
 ├── i16x8.add / i16x8.sub / i16x8.mul
 ├── i16x8.add_sat_s
@@ -67,7 +68,9 @@ lane; signed and unsigned order are kept distinct. Lane immediates are
 range-checked during decoding; extraction sign-extends only the standard signed
 8- and 16-bit
 forms, while replacement keeps the low lane bits. Float lanes preserve their
-exact IEEE-754 bytes.
+exact IEEE-754 bytes. `all_true` tests complete lanes for nonzero values;
+`bitmask` packs each lane's most-significant bit into the corresponding scalar
+bit, following standard lane order.
 
 Any other `0xfd` instruction is rejected during module decoding with a typed
 unsupported-opcode error. When the Cargo feature is absent, the first SIMD
@@ -76,7 +79,7 @@ instruction fails explicitly as `SIMD feature is disabled`; default and
 
 ## Evidence
 
-`smoke-wabt-simd-audio.sh` compiles the 1,329-byte workload independently with
+`smoke-wabt-simd-audio.sh` compiles the 1,467-byte workload independently with
 WABT, validates it with `wasm-validate`, then runs the same lane vectors through
 tinyvm, macOS JavaScriptCore and an actual headless H5 browser. The three
 runtimes produce the same saturated lanes, six nontrivial mask vectors and
@@ -84,7 +87,8 @@ runtimes produce the same saturated lanes, six nontrivial mask vectors and
 add/subtract/multiply vectors across 8-, 16-, 32- and 64-bit lanes and
 representative signed/unsigned comparison masks across all four widths. A Rust
 black-box table separately executes true and false cases for all 36 accepted
-integer comparison opcodes. The engines also compare every byte from six
+integer comparison opcodes and both scalar reductions for every integer lane
+width. The engines also compare every byte from six
 splats, six replacements and every integer/float
 extraction family. The audio lanes are:
 
@@ -102,7 +106,7 @@ there is no heap allocation or native handle per vector.
 The default stripped static core remains 101,256 bytes under its unchanged
 100 KiB gate. The optional profile is 117,800 bytes under its separate 120 KiB
 gate. With the current complete iOS host owners, the SIMD build links at
-1,810,840 bytes arm64 and 1,910,240 bytes x86_64, under separate explicit
+1,810,808 bytes arm64 and 1,914,336 bytes x86_64, under separate explicit
 opt-in ceilings; those budgets do not weaken the default product boundaries.
 
 A separate manifest-bearing TinyArcade cartridge performs the same add and
@@ -110,5 +114,5 @@ subtract operations during `game_init`, checks both saturation extremes, then
 executes every splat/extract/replace family before it renders one indexed frame
 and round-trips its 16-byte state. With an
 `ios-c-api,simd` XCFramework, the Swift/C ABI opens and executes that cartridge
-on the booted iPhone 17 Pro Simulator. The focused linked consumer is 1,617,752
+on the booted iPhone 17 Pro Simulator. The focused linked consumer is 1,617,704
 bytes with the current game-kernel profile.

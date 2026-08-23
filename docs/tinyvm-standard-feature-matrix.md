@@ -36,8 +36,8 @@ Evidence on 2026-08-23:
 - default stripped static core: 101,256 bytes, below the unchanged 100 KiB ceiling;
 - opt-in `staticcore,simd`: 117,800 bytes, below its separate 120 KiB ceiling;
 - default arm64/x86_64 iOS consumers: 1,791,960 / 1,897,232 bytes;
-- opt-in SIMD arm64/x86_64 iOS consumers: 1,810,840 / 1,910,240 bytes;
-- focused opt-in SIMD Swift consumer: 1,617,752 bytes.
+- opt-in SIMD arm64/x86_64 iOS consumers: 1,810,808 / 1,914,336 bytes;
+- focused opt-in SIMD Swift consumer: 1,617,704 bytes.
 
 This matrix proves the accepted subsets implemented and reported by tinyvm. It does not claim
 complete coverage of every instruction in the upstream proposals. A future proposal or newly

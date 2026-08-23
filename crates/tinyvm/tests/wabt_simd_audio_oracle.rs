@@ -283,6 +283,14 @@ fn wabt_compiled_simd_game_kernels_match_tinyvm() {
         .as_slice(),
         [Val::I32(1)]
     ));
+    assert!(matches!(
+        must(
+            instance.invoke_by_name("reductions", &[]),
+            "run SIMD integer reductions"
+        )
+        .as_slice(),
+        [Val::I32(1)]
+    ));
 
     {
         let mut memory = must(instance.memory_mut(), "borrow SIMD bridge memory");
@@ -332,6 +340,10 @@ fn v128_game_kernel_validation_rejects_scalar_and_missing_operands() {
         ),
         (
             "(module (func (result v128) i32.const 1 i32.const 2 i8x16.eq))",
+            "validation: type mismatch",
+        ),
+        (
+            "(module (func (result i32) i32.const 1 i8x16.all_true))",
             "validation: type mismatch",
         ),
         (
@@ -443,6 +455,45 @@ fn every_integer_lane_comparison_has_standard_mask_semantics() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn every_integer_lane_reduction_has_standard_scalar_semantics() {
+    for (shape, lanes) in [("i8x16", 16), ("i16x8", 8), ("i32x4", 4), ("i64x2", 2)] {
+        for (last, expected) in [(1, 1), (0, 0)] {
+            let mut values = vec!["1"; lanes];
+            values[lanes - 1] = if last == 0 { "0" } else { "1" };
+            let source = format!(
+                "(module (func (export \"run\") (result i32) v128.const {shape} {} {shape}.all_true))",
+                values.join(" ")
+            );
+            let bytes = wat::parse_str(source).expect("encode SIMD all_true fixture");
+            let module = must(WasmModule::from_bytes(&bytes), "load SIMD all_true");
+            let mut instance = must(module.instantiate(), "instantiate SIMD all_true");
+            assert!(matches!(
+                must(instance.invoke_by_name("run", &[]), "execute SIMD all_true").as_slice(),
+                [Val::I32(actual)] if *actual == expected
+            ));
+        }
+
+        let values = (0..lanes)
+            .map(|lane| if lane % 2 == 0 { "-1" } else { "1" })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let source = format!(
+            "(module (func (export \"run\") (result i32) v128.const {shape} {values} {shape}.bitmask))"
+        );
+        let bytes = wat::parse_str(source).expect("encode SIMD bitmask fixture");
+        let module = must(WasmModule::from_bytes(&bytes), "load SIMD bitmask");
+        let mut instance = must(module.instantiate(), "instantiate SIMD bitmask");
+        let expected = (0..lanes)
+            .filter(|lane| lane % 2 == 0)
+            .fold(0, |mask, lane| mask | (1 << lane));
+        assert!(matches!(
+            must(instance.invoke_by_name("run", &[]), "execute SIMD bitmask").as_slice(),
+            [Val::I32(actual)] if *actual == expected
+        ));
     }
 }
 

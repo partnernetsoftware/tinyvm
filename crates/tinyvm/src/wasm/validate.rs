@@ -453,7 +453,7 @@ fn step(v: &mut V<'_>, op: &Op) -> Result<(), WasmError> {
             v.push(V128);
         }
         #[cfg(feature = "simd")]
-        V128AnyTrue => {
+        V128AnyTrue | SimdIntReduction(_, _) => {
             v.pop_expect(V128)?;
             v.push(I32);
         }

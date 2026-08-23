@@ -53,4 +53,4 @@ if ! grep -Fq 'data-status="pass"' "$DOM"; then
   exit 1
 fi
 sed -n 's/.*\(OK: H5 SIMD game kernels=[^<]*\).*/\1/p' "$DOM"
-echo 'OK: WABT, tinyvm, JavaScriptCore and H5 agree on SIMD audio, masks, byte rearrangement, integer lanes, comparisons and scalar bridge'
+echo 'OK: WABT, tinyvm, JavaScriptCore and H5 agree on SIMD audio, masks, byte rearrangement, integer lanes, comparisons, reductions and scalar bridge'

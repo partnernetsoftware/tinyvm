@@ -1389,6 +1389,14 @@ enum SimdIntCompare {
     GeU,
 }
 
+#[cfg(feature = "simd")]
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SimdIntReduction {
+    AllTrue,
+    Bitmask,
+}
+
 /// A decoded instruction. Branch/call operands keep their WASM indices; block
 /// and loop carry the index of their matching `End` so branches resolve in O(1).
 ///
@@ -1585,6 +1593,8 @@ enum Op {
     I8x16Swizzle,
     #[cfg(feature = "simd")]
     SimdIntCompare(SimdIntShape, SimdIntCompare),
+    #[cfg(feature = "simd")]
+    SimdIntReduction(SimdIntShape, SimdIntReduction),
     #[cfg(feature = "simd")]
     V128Not,
     #[cfg(feature = "simd")]
@@ -2221,7 +2231,23 @@ fn decode(body: &[u8], budget: &mut DecodeBudget) -> Result<DecodedCode, WasmErr
                         81 => ops.push(Op::V128Xor),
                         82 => ops.push(Op::V128Bitselect),
                         83 => ops.push(Op::V128AnyTrue),
+                        99 => ops.push(Op::SimdIntReduction(
+                            SimdIntShape::I8x16,
+                            SimdIntReduction::AllTrue,
+                        )),
+                        100 => ops.push(Op::SimdIntReduction(
+                            SimdIntShape::I8x16,
+                            SimdIntReduction::Bitmask,
+                        )),
                         110 => ops.push(Op::I8x16Add),
+                        131 => ops.push(Op::SimdIntReduction(
+                            SimdIntShape::I16x8,
+                            SimdIntReduction::AllTrue,
+                        )),
+                        132 => ops.push(Op::SimdIntReduction(
+                            SimdIntShape::I16x8,
+                            SimdIntReduction::Bitmask,
+                        )),
                         113 => ops.push(Op::I8x16Sub),
                         142 => ops.push(Op::I16x8Add),
                         143 => ops.push(Op::I16x8AddSatS),
@@ -2231,6 +2257,22 @@ fn decode(body: &[u8], budget: &mut DecodeBudget) -> Result<DecodedCode, WasmErr
                         174 => ops.push(Op::I32x4Add),
                         177 => ops.push(Op::I32x4Sub),
                         181 => ops.push(Op::I32x4Mul),
+                        163 => ops.push(Op::SimdIntReduction(
+                            SimdIntShape::I32x4,
+                            SimdIntReduction::AllTrue,
+                        )),
+                        164 => ops.push(Op::SimdIntReduction(
+                            SimdIntShape::I32x4,
+                            SimdIntReduction::Bitmask,
+                        )),
+                        195 => ops.push(Op::SimdIntReduction(
+                            SimdIntShape::I64x2,
+                            SimdIntReduction::AllTrue,
+                        )),
+                        196 => ops.push(Op::SimdIntReduction(
+                            SimdIntShape::I64x2,
+                            SimdIntReduction::Bitmask,
+                        )),
                         206 => ops.push(Op::I64x2Add),
                         209 => ops.push(Op::I64x2Sub),
                         213 => ops.push(Op::I64x2Mul),
@@ -5113,6 +5155,7 @@ impl Module {
                     | Op::I8x16Shuffle(_)
                     | Op::I8x16Swizzle
                     | Op::SimdIntCompare(_, _)
+                    | Op::SimdIntReduction(_, _)
                     | Op::V128Not
                     | Op::V128And
                     | Op::V128AndNot
@@ -7049,6 +7092,11 @@ impl Module {
                     let right = pop_v128(&mut stack)?;
                     let left = pop_v128(&mut stack)?;
                     stack.push(Val::V128(simd_int_compare(left, right, shape, comparison)));
+                }
+                #[cfg(feature = "simd")]
+                Op::SimdIntReduction(shape, reduction) => {
+                    let value = pop_v128(&mut stack)?;
+                    stack.push(Val::I32(simd_int_reduce(value, shape, reduction)));
                 }
                 #[cfg(feature = "simd")]
                 Op::V128Store(arg) => {
@@ -9276,6 +9324,28 @@ fn simd_int_compare(
         result[start..start + lane_bytes].fill(if matches { 0xff } else { 0 });
     }
     result
+}
+
+#[cfg(feature = "simd")]
+fn simd_int_reduce(value: [u8; 16], shape: SimdIntShape, reduction: SimdIntReduction) -> i32 {
+    let lane_bytes = match shape {
+        SimdIntShape::I8x16 => 1,
+        SimdIntShape::I16x8 => 2,
+        SimdIntShape::I32x4 => 4,
+        SimdIntShape::I64x2 => 8,
+    };
+    match reduction {
+        SimdIntReduction::AllTrue => value
+            .chunks_exact(lane_bytes)
+            .all(|lane| lane.iter().any(|&byte| byte != 0))
+            as i32,
+        SimdIntReduction::Bitmask => value
+            .chunks_exact(lane_bytes)
+            .enumerate()
+            .fold(0_i32, |mask, (lane, bytes)| {
+                mask | (i32::from(bytes[lane_bytes - 1] >> 7) << lane)
+            }),
+    }
 }
 
 fn i32_args_to_vals(args: &[i32]) -> Result<Vec<Val>, WasmError> {
