@@ -291,6 +291,14 @@ fn wabt_compiled_simd_game_kernels_match_tinyvm() {
         .as_slice(),
         [Val::I32(1)]
     ));
+    assert!(matches!(
+        must(
+            instance.invoke_by_name("lane_bounds", &[]),
+            "run SIMD integer lane bounds"
+        )
+        .as_slice(),
+        [Val::I32(1)]
+    ));
 
     {
         let mut memory = must(instance.memory_mut(), "borrow SIMD bridge memory");
@@ -309,7 +317,7 @@ fn wabt_compiled_simd_game_kernels_match_tinyvm() {
 #[test]
 fn unsupported_simd_instruction_fails_during_decode() {
     let bytes = wat::parse_str(
-        "(module (func (param v128 v128) (result v128) local.get 0 local.get 1 i16x8.min_s))",
+        "(module (func (param v128) (result v128) local.get 0 i16x8.q15mulr_sat_s))",
     )
     .expect("compile unsupported SIMD instruction");
     let error = match WasmModule::from_bytes(&bytes) {
@@ -317,6 +325,164 @@ fn unsupported_simd_instruction_fails_during_decode() {
         Ok(_) => panic!("unsupported SIMD must fail at load"),
     };
     assert_eq!(error.message(), "unsupported 0xfd opcode");
+}
+
+#[test]
+fn integer_lane_min_max_and_unsigned_average_have_standard_semantics() {
+    struct Case {
+        shape: &'static str,
+        left: &'static str,
+        right: &'static str,
+        operations: &'static [(&'static str, [u8; 16])],
+    }
+
+    const I8: &[(&str, [u8; 16])] = &[
+        (
+            "min_s",
+            [
+                0x80, 0xff, 0x80, 0xff, 0x80, 0xff, 0x80, 0xff, 0x80, 0xff, 0x80, 0xff, 0x80, 0xff,
+                0x80, 0xff,
+            ],
+        ),
+        (
+            "min_u",
+            [
+                0x01, 0x7f, 0x01, 0x7f, 0x01, 0x7f, 0x01, 0x7f, 0x01, 0x7f, 0x01, 0x7f, 0x01, 0x7f,
+                0x01, 0x7f,
+            ],
+        ),
+        (
+            "max_s",
+            [
+                0x01, 0x7f, 0x01, 0x7f, 0x01, 0x7f, 0x01, 0x7f, 0x01, 0x7f, 0x01, 0x7f, 0x01, 0x7f,
+                0x01, 0x7f,
+            ],
+        ),
+        (
+            "max_u",
+            [
+                0x80, 0xff, 0x80, 0xff, 0x80, 0xff, 0x80, 0xff, 0x80, 0xff, 0x80, 0xff, 0x80, 0xff,
+                0x80, 0xff,
+            ],
+        ),
+        (
+            "avgr_u",
+            [
+                0x41, 0xbf, 0x41, 0xbf, 0x41, 0xbf, 0x41, 0xbf, 0x41, 0xbf, 0x41, 0xbf, 0x41, 0xbf,
+                0x41, 0xbf,
+            ],
+        ),
+    ];
+    const I16: &[(&str, [u8; 16])] = &[
+        (
+            "min_s",
+            [
+                0x00, 0x80, 0xff, 0xff, 0x00, 0x80, 0xff, 0xff, 0x00, 0x80, 0xff, 0xff, 0x00, 0x80,
+                0xff, 0xff,
+            ],
+        ),
+        (
+            "min_u",
+            [
+                0x01, 0x00, 0xff, 0x7f, 0x01, 0x00, 0xff, 0x7f, 0x01, 0x00, 0xff, 0x7f, 0x01, 0x00,
+                0xff, 0x7f,
+            ],
+        ),
+        (
+            "max_s",
+            [
+                0x01, 0x00, 0xff, 0x7f, 0x01, 0x00, 0xff, 0x7f, 0x01, 0x00, 0xff, 0x7f, 0x01, 0x00,
+                0xff, 0x7f,
+            ],
+        ),
+        (
+            "max_u",
+            [
+                0x00, 0x80, 0xff, 0xff, 0x00, 0x80, 0xff, 0xff, 0x00, 0x80, 0xff, 0xff, 0x00, 0x80,
+                0xff, 0xff,
+            ],
+        ),
+        (
+            "avgr_u",
+            [
+                0x01, 0x40, 0xff, 0xbf, 0x01, 0x40, 0xff, 0xbf, 0x01, 0x40, 0xff, 0xbf, 0x01, 0x40,
+                0xff, 0xbf,
+            ],
+        ),
+    ];
+    const I32: &[(&str, [u8; 16])] = &[
+        (
+            "min_s",
+            [
+                0x00, 0x00, 0x00, 0x80, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x80, 0xff, 0xff,
+                0xff, 0xff,
+            ],
+        ),
+        (
+            "min_u",
+            [
+                0x01, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x7f, 0x01, 0x00, 0x00, 0x00, 0xff, 0xff,
+                0xff, 0x7f,
+            ],
+        ),
+        (
+            "max_s",
+            [
+                0x01, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x7f, 0x01, 0x00, 0x00, 0x00, 0xff, 0xff,
+                0xff, 0x7f,
+            ],
+        ),
+        (
+            "max_u",
+            [
+                0x00, 0x00, 0x00, 0x80, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x80, 0xff, 0xff,
+                0xff, 0xff,
+            ],
+        ),
+    ];
+
+    for case in [
+        Case {
+            shape: "i8x16",
+            left: "128 127 128 127 128 127 128 127 128 127 128 127 128 127 128 127",
+            right: "1 255 1 255 1 255 1 255 1 255 1 255 1 255 1 255",
+            operations: I8,
+        },
+        Case {
+            shape: "i16x8",
+            left: "32768 32767 32768 32767 32768 32767 32768 32767",
+            right: "1 65535 1 65535 1 65535 1 65535",
+            operations: I16,
+        },
+        Case {
+            shape: "i32x4",
+            left: "2147483648 2147483647 2147483648 2147483647",
+            right: "1 4294967295 1 4294967295",
+            operations: I32,
+        },
+    ] {
+        for &(operation, expected) in case.operations {
+            let source = format!(
+                "(module (func (export \"run\") (result v128) v128.const {} {} v128.const {} {} {}.{}))",
+                case.shape, case.left, case.shape, case.right, case.shape, operation
+            );
+            let bytes = wat::parse_str(source).expect("encode SIMD lane binary fixture");
+            let module = must(
+                WasmModule::from_bytes(&bytes),
+                "load SIMD lane binary fixture",
+            );
+            let mut instance = must(module.instantiate(), "instantiate SIMD lane binary fixture");
+            assert!(
+                matches!(
+                    must(instance.invoke_by_name("run", &[]), "execute SIMD lane binary fixture").as_slice(),
+                    [Val::V128(actual)] if *actual == expected
+                ),
+                "wrong result for {}.{}",
+                case.shape,
+                operation
+            );
+        }
+    }
 }
 
 #[test]

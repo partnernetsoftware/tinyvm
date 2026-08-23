@@ -45,6 +45,8 @@ v128 value type
 ├── i8x16 / i16x8 / i32x4 integer comparisons (signed + unsigned)
 ├── i64x2 integer comparisons (signed)
 ├── i8x16 / i16x8 / i32x4 / i64x2 .all_true / .bitmask
+├── i8x16 / i16x8 / i32x4 signed + unsigned .min / .max
+├── i8x16 / i16x8 .avgr_u
 ├── i8x16.add / i8x16.sub
 ├── i16x8.add / i16x8.sub / i16x8.mul
 ├── i16x8.add_sat_s
@@ -70,7 +72,9 @@ range-checked during decoding; extraction sign-extends only the standard signed
 forms, while replacement keeps the low lane bits. Float lanes preserve their
 exact IEEE-754 bytes. `all_true` tests complete lanes for nonzero values;
 `bitmask` packs each lane's most-significant bit into the corresponding scalar
-bit, following standard lane order.
+bit, following standard lane order. Integer min/max keeps signed and unsigned
+ordering separate at each lane width; unsigned average computes the standard
+rounded-up `(a + b + 1) / 2` result without overflowing the lane type.
 
 Any other `0xfd` instruction is rejected during module decoding with a typed
 unsupported-opcode error. When the Cargo feature is absent, the first SIMD
@@ -88,7 +92,9 @@ add/subtract/multiply vectors across 8-, 16-, 32- and 64-bit lanes and
 representative signed/unsigned comparison masks across all four widths. A Rust
 black-box table separately executes true and false cases for all 36 accepted
 integer comparison opcodes and both scalar reductions for every integer lane
-width. The engines also compare every byte from six
+width. The same four-engine fixture exercises all signed/unsigned min/max
+families and both rounded unsigned-average widths at high-bit boundaries. The
+engines also compare every byte from six
 splats, six replacements and every integer/float
 extraction family. The audio lanes are:
 

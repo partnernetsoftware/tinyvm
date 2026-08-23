@@ -428,6 +428,7 @@ fn step(v: &mut V<'_>, op: &Op) -> Result<(), WasmError> {
         | I8x16Shuffle(_)
         | I8x16Swizzle
         | SimdIntCompare(_, _)
+        | SimdIntBinary(_, _)
         | I8x16Add
         | I8x16Sub
         | I16x8Add

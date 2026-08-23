@@ -265,6 +265,124 @@
 
     i32.const 1)
 
+  ;; Lane bounds and rounded unsigned averages used by image compositing,
+  ;; collision clamps and PCM/sample conversion. Each family deliberately
+  ;; distinguishes signed from unsigned order at the high-bit boundary.
+  (func (export "lane_bounds") (result i32)
+    v128.const i8x16 128 127 128 127 128 127 128 127 128 127 128 127 128 127 128 127
+    v128.const i8x16 1 255 1 255 1 255 1 255 1 255 1 255 1 255 1 255
+    i8x16.min_s
+    i8x16.extract_lane_s 0
+    i32.const -128
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i8x16 128 127 128 127 128 127 128 127 128 127 128 127 128 127 128 127
+    v128.const i8x16 1 255 1 255 1 255 1 255 1 255 1 255 1 255 1 255
+    i8x16.min_u
+    i8x16.extract_lane_u 0
+    i32.const 1
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i8x16 128 127 128 127 128 127 128 127 128 127 128 127 128 127 128 127
+    v128.const i8x16 1 255 1 255 1 255 1 255 1 255 1 255 1 255 1 255
+    i8x16.max_s
+    i8x16.extract_lane_s 1
+    i32.const 127
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i8x16 128 127 128 127 128 127 128 127 128 127 128 127 128 127 128 127
+    v128.const i8x16 1 255 1 255 1 255 1 255 1 255 1 255 1 255 1 255
+    i8x16.max_u
+    i8x16.extract_lane_u 1
+    i32.const 255
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i8x16 128 127 128 127 128 127 128 127 128 127 128 127 128 127 128 127
+    v128.const i8x16 1 255 1 255 1 255 1 255 1 255 1 255 1 255 1 255
+    i8x16.avgr_u
+    i8x16.extract_lane_u 0
+    i32.const 65
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i16x8 32768 32767 32768 32767 32768 32767 32768 32767
+    v128.const i16x8 1 65535 1 65535 1 65535 1 65535
+    i16x8.min_s
+    i16x8.extract_lane_s 0
+    i32.const -32768
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i16x8 32768 32767 32768 32767 32768 32767 32768 32767
+    v128.const i16x8 1 65535 1 65535 1 65535 1 65535
+    i16x8.min_u
+    i16x8.extract_lane_u 0
+    i32.const 1
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i16x8 32768 32767 32768 32767 32768 32767 32768 32767
+    v128.const i16x8 1 65535 1 65535 1 65535 1 65535
+    i16x8.max_s
+    i16x8.extract_lane_s 1
+    i32.const 32767
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i16x8 32768 32767 32768 32767 32768 32767 32768 32767
+    v128.const i16x8 1 65535 1 65535 1 65535 1 65535
+    i16x8.max_u
+    i16x8.extract_lane_u 1
+    i32.const 65535
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i16x8 32768 32767 32768 32767 32768 32767 32768 32767
+    v128.const i16x8 1 65535 1 65535 1 65535 1 65535
+    i16x8.avgr_u
+    i16x8.extract_lane_u 0
+    i32.const 16385
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i32x4 2147483648 2147483647 2147483648 2147483647
+    v128.const i32x4 1 4294967295 1 4294967295
+    i32x4.min_s
+    i32x4.extract_lane 0
+    i32.const -2147483648
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i32x4 2147483648 2147483647 2147483648 2147483647
+    v128.const i32x4 1 4294967295 1 4294967295
+    i32x4.min_u
+    i32x4.extract_lane 0
+    i32.const 1
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i32x4 2147483648 2147483647 2147483648 2147483647
+    v128.const i32x4 1 4294967295 1 4294967295
+    i32x4.max_s
+    i32x4.extract_lane 1
+    i32.const 2147483647
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i32x4 2147483648 2147483647 2147483648 2147483647
+    v128.const i32x4 1 4294967295 1 4294967295
+    i32x4.max_u
+    i32x4.extract_lane 1
+    i32.const -1
+    i32.ne
+    if i32.const 0 return end
+
+    i32.const 1)
+
   ;; Scalar/vector lane bridge emitted by portable C/Rust SIMD frontends.
   ;; Six splats, six replacements and all signed/unsigned/numeric extraction
   ;; result families are serialized so independent engines can compare bytes.

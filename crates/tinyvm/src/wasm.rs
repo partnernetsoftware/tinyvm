@@ -1397,6 +1397,17 @@ enum SimdIntReduction {
     Bitmask,
 }
 
+#[cfg(feature = "simd")]
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SimdIntBinary {
+    MinS,
+    MinU,
+    MaxS,
+    MaxU,
+    AvgrU,
+}
+
 /// A decoded instruction. Branch/call operands keep their WASM indices; block
 /// and loop carry the index of their matching `End` so branches resolve in O(1).
 ///
@@ -1595,6 +1606,8 @@ enum Op {
     SimdIntCompare(SimdIntShape, SimdIntCompare),
     #[cfg(feature = "simd")]
     SimdIntReduction(SimdIntShape, SimdIntReduction),
+    #[cfg(feature = "simd")]
+    SimdIntBinary(SimdIntShape, SimdIntBinary),
     #[cfg(feature = "simd")]
     V128Not,
     #[cfg(feature = "simd")]
@@ -2240,6 +2253,21 @@ fn decode(body: &[u8], budget: &mut DecodeBudget) -> Result<DecodedCode, WasmErr
                             SimdIntReduction::Bitmask,
                         )),
                         110 => ops.push(Op::I8x16Add),
+                        118 => {
+                            ops.push(Op::SimdIntBinary(SimdIntShape::I8x16, SimdIntBinary::MinS))
+                        }
+                        119 => {
+                            ops.push(Op::SimdIntBinary(SimdIntShape::I8x16, SimdIntBinary::MinU))
+                        }
+                        120 => {
+                            ops.push(Op::SimdIntBinary(SimdIntShape::I8x16, SimdIntBinary::MaxS))
+                        }
+                        121 => {
+                            ops.push(Op::SimdIntBinary(SimdIntShape::I8x16, SimdIntBinary::MaxU))
+                        }
+                        123 => {
+                            ops.push(Op::SimdIntBinary(SimdIntShape::I8x16, SimdIntBinary::AvgrU))
+                        }
                         131 => ops.push(Op::SimdIntReduction(
                             SimdIntShape::I16x8,
                             SimdIntReduction::AllTrue,
@@ -2254,9 +2282,36 @@ fn decode(body: &[u8], budget: &mut DecodeBudget) -> Result<DecodedCode, WasmErr
                         145 => ops.push(Op::I16x8Sub),
                         146 => ops.push(Op::I16x8SubSatS),
                         149 => ops.push(Op::I16x8Mul),
+                        150 => {
+                            ops.push(Op::SimdIntBinary(SimdIntShape::I16x8, SimdIntBinary::MinS))
+                        }
+                        151 => {
+                            ops.push(Op::SimdIntBinary(SimdIntShape::I16x8, SimdIntBinary::MinU))
+                        }
+                        152 => {
+                            ops.push(Op::SimdIntBinary(SimdIntShape::I16x8, SimdIntBinary::MaxS))
+                        }
+                        153 => {
+                            ops.push(Op::SimdIntBinary(SimdIntShape::I16x8, SimdIntBinary::MaxU))
+                        }
+                        155 => {
+                            ops.push(Op::SimdIntBinary(SimdIntShape::I16x8, SimdIntBinary::AvgrU))
+                        }
                         174 => ops.push(Op::I32x4Add),
                         177 => ops.push(Op::I32x4Sub),
                         181 => ops.push(Op::I32x4Mul),
+                        182 => {
+                            ops.push(Op::SimdIntBinary(SimdIntShape::I32x4, SimdIntBinary::MinS))
+                        }
+                        183 => {
+                            ops.push(Op::SimdIntBinary(SimdIntShape::I32x4, SimdIntBinary::MinU))
+                        }
+                        184 => {
+                            ops.push(Op::SimdIntBinary(SimdIntShape::I32x4, SimdIntBinary::MaxS))
+                        }
+                        185 => {
+                            ops.push(Op::SimdIntBinary(SimdIntShape::I32x4, SimdIntBinary::MaxU))
+                        }
                         163 => ops.push(Op::SimdIntReduction(
                             SimdIntShape::I32x4,
                             SimdIntReduction::AllTrue,
@@ -5156,6 +5211,7 @@ impl Module {
                     | Op::I8x16Swizzle
                     | Op::SimdIntCompare(_, _)
                     | Op::SimdIntReduction(_, _)
+                    | Op::SimdIntBinary(_, _)
                     | Op::V128Not
                     | Op::V128And
                     | Op::V128AndNot
@@ -7097,6 +7153,12 @@ impl Module {
                 Op::SimdIntReduction(shape, reduction) => {
                     let value = pop_v128(&mut stack)?;
                     stack.push(Val::I32(simd_int_reduce(value, shape, reduction)));
+                }
+                #[cfg(feature = "simd")]
+                Op::SimdIntBinary(shape, operation) => {
+                    let right = pop_v128(&mut stack)?;
+                    let left = pop_v128(&mut stack)?;
+                    stack.push(Val::V128(simd_int_binary(left, right, shape, operation)));
                 }
                 #[cfg(feature = "simd")]
                 Op::V128Store(arg) => {
@@ -9346,6 +9408,64 @@ fn simd_int_reduce(value: [u8; 16], shape: SimdIntShape, reduction: SimdIntReduc
                 mask | (i32::from(bytes[lane_bytes - 1] >> 7) << lane)
             }),
     }
+}
+
+#[cfg(feature = "simd")]
+fn simd_int_binary(
+    left: [u8; 16],
+    right: [u8; 16],
+    shape: SimdIntShape,
+    operation: SimdIntBinary,
+) -> [u8; 16] {
+    use SimdIntBinary::*;
+    let lane_bytes = match shape {
+        SimdIntShape::I8x16 => 1,
+        SimdIntShape::I16x8 => 2,
+        SimdIntShape::I32x4 => 4,
+        SimdIntShape::I64x2 => 8,
+    };
+    let lane_bits = lane_bytes * 8;
+    let lane_mask = if lane_bits == 64 {
+        u64::MAX
+    } else {
+        (1_u64 << lane_bits) - 1
+    };
+    let mut result = [0; 16];
+    for start in (0..16).step_by(lane_bytes) {
+        let mut a = 0_u64;
+        let mut b = 0_u64;
+        for byte in 0..lane_bytes {
+            a |= u64::from(left[start + byte]) << (byte * 8);
+            b |= u64::from(right[start + byte]) << (byte * 8);
+        }
+        let sign_extend = |value: u64| -> i64 {
+            let shift = 64 - lane_bits;
+            ((value << shift) as i64) >> shift
+        };
+        let value = match operation {
+            MinS => {
+                if sign_extend(a) <= sign_extend(b) {
+                    a
+                } else {
+                    b
+                }
+            }
+            MinU => a.min(b),
+            MaxS => {
+                if sign_extend(a) >= sign_extend(b) {
+                    a
+                } else {
+                    b
+                }
+            }
+            MaxU => a.max(b),
+            AvgrU => (a as u128 + b as u128).div_ceil(2) as u64,
+        } & lane_mask;
+        for byte in 0..lane_bytes {
+            result[start + byte] = (value >> (byte * 8)) as u8;
+        }
+    }
+    result
 }
 
 fn i32_args_to_vals(args: &[i32]) -> Result<Vec<Val>, WasmError> {
