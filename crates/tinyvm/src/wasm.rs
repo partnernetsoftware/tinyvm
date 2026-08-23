@@ -1363,6 +1363,32 @@ struct MemArg {
     offset: u32,
 }
 
+#[cfg(feature = "simd")]
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SimdIntShape {
+    I8x16,
+    I16x8,
+    I32x4,
+    I64x2,
+}
+
+#[cfg(feature = "simd")]
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SimdIntCompare {
+    Eq,
+    Ne,
+    LtS,
+    LtU,
+    GtS,
+    GtU,
+    LeS,
+    LeU,
+    GeS,
+    GeU,
+}
+
 /// A decoded instruction. Branch/call operands keep their WASM indices; block
 /// and loop carry the index of their matching `End` so branches resolve in O(1).
 ///
@@ -1557,6 +1583,8 @@ enum Op {
     I8x16Shuffle([u8; 16]),
     #[cfg(feature = "simd")]
     I8x16Swizzle,
+    #[cfg(feature = "simd")]
+    SimdIntCompare(SimdIntShape, SimdIntCompare),
     #[cfg(feature = "simd")]
     V128Not,
     #[cfg(feature = "simd")]
@@ -2174,6 +2202,18 @@ fn decode(body: &[u8], budget: &mut DecodeBudget) -> Result<DecodedCode, WasmErr
                             i = ni;
                             ops.push(Op::F64x2ReplaceLane(lane));
                         }
+                        35..=44 => ops.push(Op::SimdIntCompare(
+                            SimdIntShape::I8x16,
+                            decode_simd_int_compare(simd_opcode - 35, true)?,
+                        )),
+                        45..=54 => ops.push(Op::SimdIntCompare(
+                            SimdIntShape::I16x8,
+                            decode_simd_int_compare(simd_opcode - 45, true)?,
+                        )),
+                        55..=64 => ops.push(Op::SimdIntCompare(
+                            SimdIntShape::I32x4,
+                            decode_simd_int_compare(simd_opcode - 55, true)?,
+                        )),
                         77 => ops.push(Op::V128Not),
                         78 => ops.push(Op::V128And),
                         79 => ops.push(Op::V128AndNot),
@@ -2194,6 +2234,10 @@ fn decode(body: &[u8], budget: &mut DecodeBudget) -> Result<DecodedCode, WasmErr
                         206 => ops.push(Op::I64x2Add),
                         209 => ops.push(Op::I64x2Sub),
                         213 => ops.push(Op::I64x2Mul),
+                        214..=219 => ops.push(Op::SimdIntCompare(
+                            SimdIntShape::I64x2,
+                            decode_simd_int_compare(simd_opcode - 214, false)?,
+                        )),
                         _ => return Err(WasmError::Decode("unsupported 0xfd opcode")),
                     }
                 }
@@ -2617,6 +2661,40 @@ fn simd_lane(bytes: &[u8], i: usize, lane_count: u8) -> Result<(u8, usize), Wasm
         return Err(WasmError::Decode("SIMD lane index out of range"));
     }
     Ok((lane, i + 1))
+}
+
+#[cfg(feature = "simd")]
+fn decode_simd_int_compare(
+    offset: u32,
+    has_unsigned_relations: bool,
+) -> Result<SimdIntCompare, WasmError> {
+    use SimdIntCompare::*;
+    let comparison = if has_unsigned_relations {
+        match offset {
+            0 => Eq,
+            1 => Ne,
+            2 => LtS,
+            3 => LtU,
+            4 => GtS,
+            5 => GtU,
+            6 => LeS,
+            7 => LeU,
+            8 => GeS,
+            9 => GeU,
+            _ => return Err(WasmError::Decode("unsupported SIMD integer comparison")),
+        }
+    } else {
+        match offset {
+            0 => Eq,
+            1 => Ne,
+            2 => LtS,
+            3 => GtS,
+            4 => LeS,
+            5 => GeS,
+            _ => return Err(WasmError::Decode("unsupported SIMD integer comparison")),
+        }
+    };
+    Ok(comparison)
 }
 
 /// Read `n` value-type bytes, bounds-checked, returning them and the next
@@ -5034,6 +5112,7 @@ impl Module {
                     | Op::V128Const(_)
                     | Op::I8x16Shuffle(_)
                     | Op::I8x16Swizzle
+                    | Op::SimdIntCompare(_, _)
                     | Op::V128Not
                     | Op::V128And
                     | Op::V128AndNot
@@ -6964,6 +7043,12 @@ impl Module {
                         input.get(indices[index] as usize).copied().unwrap_or(0)
                     });
                     stack.push(Val::V128(value));
+                }
+                #[cfg(feature = "simd")]
+                Op::SimdIntCompare(shape, comparison) => {
+                    let right = pop_v128(&mut stack)?;
+                    let left = pop_v128(&mut stack)?;
+                    stack.push(Val::V128(simd_int_compare(left, right, shape, comparison)));
                 }
                 #[cfg(feature = "simd")]
                 Op::V128Store(arg) => {
@@ -9136,6 +9221,61 @@ fn pop_v128(stack: &mut Vec<Val>) -> Result<[u8; 16], WasmError> {
         Val::V128(value) => Ok(value),
         _other => Err(WasmError::Trap("expected v128 on stack, got")),
     }
+}
+
+#[cfg(feature = "simd")]
+fn simd_int_compare(
+    left: [u8; 16],
+    right: [u8; 16],
+    shape: SimdIntShape,
+    comparison: SimdIntCompare,
+) -> [u8; 16] {
+    use SimdIntCompare::*;
+    let lane_bytes = match shape {
+        SimdIntShape::I8x16 => 1,
+        SimdIntShape::I16x8 => 2,
+        SimdIntShape::I32x4 => 4,
+        SimdIntShape::I64x2 => 8,
+    };
+    let mut result = [0; 16];
+    for start in (0..16).step_by(lane_bytes) {
+        let mut left_unsigned = 0_u64;
+        let mut right_unsigned = 0_u64;
+        for byte in 0..lane_bytes {
+            left_unsigned |= u64::from(left[start + byte]) << (byte * 8);
+            right_unsigned |= u64::from(right[start + byte]) << (byte * 8);
+        }
+        let (left_signed, right_signed) = match lane_bytes {
+            1 => (
+                left_unsigned as u8 as i8 as i64,
+                right_unsigned as u8 as i8 as i64,
+            ),
+            2 => (
+                left_unsigned as u16 as i16 as i64,
+                right_unsigned as u16 as i16 as i64,
+            ),
+            4 => (
+                left_unsigned as u32 as i32 as i64,
+                right_unsigned as u32 as i32 as i64,
+            ),
+            8 => (left_unsigned as i64, right_unsigned as i64),
+            _ => unreachable!(),
+        };
+        let matches = match comparison {
+            Eq => left_unsigned == right_unsigned,
+            Ne => left_unsigned != right_unsigned,
+            LtS => left_signed < right_signed,
+            LtU => left_unsigned < right_unsigned,
+            GtS => left_signed > right_signed,
+            GtU => left_unsigned > right_unsigned,
+            LeS => left_signed <= right_signed,
+            LeU => left_unsigned <= right_unsigned,
+            GeS => left_signed >= right_signed,
+            GeU => left_unsigned >= right_unsigned,
+        };
+        result[start..start + lane_bytes].fill(if matches { 0xff } else { 0 });
+    }
+    result
 }
 
 fn i32_args_to_vals(args: &[i32]) -> Result<Vec<Val>, WasmError> {

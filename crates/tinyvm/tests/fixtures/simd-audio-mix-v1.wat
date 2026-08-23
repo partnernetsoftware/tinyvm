@@ -190,6 +190,52 @@
     i64x2.mul
     v128.store offset=160)
 
+  ;; Comparison masks are standard all-ones/all-zero lanes. Exercise signed
+  ;; and unsigned order across every integer lane width without exposing v128
+  ;; at the host boundary.
+  (func (export "comparisons") (result i32)
+    v128.const i8x16 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+    v128.const i8x16 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+    i8x16.lt_s
+    i8x16.extract_lane_s 0
+    i32.const -1
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i8x16 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+    v128.const i8x16 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+    i8x16.gt_u
+    i8x16.extract_lane_s 0
+    i32.const -1
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i16x8 -1 -1 -1 -1 -1 -1 -1 -1
+    v128.const i16x8 1 1 1 1 1 1 1 1
+    i16x8.ge_u
+    i16x8.extract_lane_s 0
+    i32.const -1
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i32x4 -1 -1 -1 -1
+    v128.const i32x4 1 1 1 1
+    i32x4.le_s
+    i32x4.extract_lane 0
+    i32.const -1
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i64x2 -1 -1
+    v128.const i64x2 1 1
+    i64x2.ne
+    i64x2.extract_lane 0
+    i64.const -1
+    i64.ne
+    if i32.const 0 return end
+
+    i32.const 1)
+
   ;; Scalar/vector lane bridge emitted by portable C/Rust SIMD frontends.
   ;; Six splats, six replacements and all signed/unsigned/numeric extraction
   ;; result families are serialized so independent engines can compare bytes.

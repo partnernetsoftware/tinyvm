@@ -4,7 +4,7 @@
 <body data-status="running">running</body>
 <script>
 (() => {
-  const expected = "32767,-32768,300,-300,32767,-32768,-5000,5000|20000,-20000,-100,100,32766,-32767,32767,-32768|mask=1,0|rearrange=pass|lanes=pass|bridge=pass";
+  const expected = "32767,-32768,300,-300,32767,-32768,-5000,5000|20000,-20000,-100,100,32766,-32767,32767,-32768|mask=1,0|rearrange=pass|lanes=pass|comparisons=pass|bridge=pass";
   const decode = value => {
     const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
     const binary = atob(base64 + "=".repeat((4 - base64.length % 4) % 4));
@@ -77,6 +77,8 @@
       const actual = bytes[256 + operation * 16 + index];
       if (actual !== value) throw new Error(`lanes ${operation}:${index}=${actual}`);
     }));
+    const comparisons = instance.exports.comparisons();
+    if (comparisons !== 1) throw new Error(`comparisons=${comparisons}`);
     const bridge = new Uint8Array(240);
     const bridgeView = new DataView(bridge.buffer);
     const writeUnsigned = (offset, value, width) => {
@@ -114,7 +116,7 @@
       const actual = bytes[448 + index];
       if (actual !== value) throw new Error(`bridge ${index}=${actual}`);
     });
-    const result = `${added}|${subtracted}|mask=${any}|rearrange=pass|lanes=pass|bridge=pass`;
+    const result = `${added}|${subtracted}|mask=${any}|rearrange=pass|lanes=pass|comparisons=pass|bridge=pass`;
     if (result !== expected) throw new Error(`wrong result ${result}`);
     document.body.dataset.status = "pass";
     document.body.textContent = `OK: H5 SIMD game kernels=${result}`;

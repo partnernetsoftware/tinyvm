@@ -7,10 +7,11 @@ Status: implemented, optional workload profile
 The Cargo feature `simd` enables a bounded standard WebAssembly SIMD subset
 inside the unified `tinyvm` crate. It is deliberately driven by game
 runtime jobs: saturated signed PCM mixing, whole-vector masks for packed flags
-or pixel composition, byte shuffle/swizzle for codecs, wrapping integer lanes for coordinates, counters and
-deterministic fixed-point state, and the scalar/vector lane bridge emitted by
-portable C/Rust SIMD frontends. It is not a claim that the complete SIMD
-proposal is implemented.
+or pixel composition, byte shuffle/swizzle for codecs, wrapping integer lanes
+for coordinates, counters and deterministic fixed-point state, signed/unsigned
+integer comparison masks for collision and pixel tests, and the scalar/vector
+lane bridge emitted by portable C/Rust SIMD frontends. It is not a claim that
+the complete SIMD proposal is implemented.
 
 ## Accepted standard surface
 
@@ -41,6 +42,8 @@ v128 value type
 ├── f32x4 / f64x2 .extract_lane
 ├── integer replace_lane
 ├── f32x4 / f64x2 .replace_lane
+├── i8x16 / i16x8 / i32x4 integer comparisons (signed + unsigned)
+├── i64x2 integer comparisons (signed)
 ├── i8x16.add / i8x16.sub
 ├── i16x8.add / i16x8.sub / i16x8.mul
 ├── i16x8.add_sat_s
@@ -58,8 +61,11 @@ immediates and preflight the complete 16-byte memory range. Signed lanes use
 Rust's defined `i16::saturating_add` and `i16::saturating_sub`, including both
 overflow boundaries. Integer lane arithmetic uses the corresponding wrapping
 operation at each lane width, so overflow is deterministic in debug and
-release builds and independent of host ISA. Lane immediates are range-checked
-during decoding; extraction sign-extends only the standard signed 8- and 16-bit
+release builds and independent of host ISA. Integer comparisons cover every
+standard relation for each accepted lane width and produce the standard all-one or all-zero mask in every
+lane; signed and unsigned order are kept distinct. Lane immediates are
+range-checked during decoding; extraction sign-extends only the standard signed
+8- and 16-bit
 forms, while replacement keeps the low lane bits. Float lanes preserve their
 exact IEEE-754 bytes.
 
@@ -70,13 +76,16 @@ instruction fails explicitly as `SIMD feature is disabled`; default and
 
 ## Evidence
 
-`smoke-wabt-simd-audio.sh` compiles the 969-byte workload independently with
+`smoke-wabt-simd-audio.sh` compiles the 1,329-byte workload independently with
 WABT, validates it with `wasm-validate`, then runs the same lane vectors through
 tinyvm, macOS JavaScriptCore and an actual headless H5 browser. The three
 runtimes produce the same saturated lanes, six nontrivial mask vectors and
 `any_true` results for both nonzero and zero inputs, plus eleven wrapping
-add/subtract/multiply vectors across 8-, 16-, 32- and 64-bit lanes. They also
-compare every byte from six splats, six replacements and every integer/float
+add/subtract/multiply vectors across 8-, 16-, 32- and 64-bit lanes and
+representative signed/unsigned comparison masks across all four widths. A Rust
+black-box table separately executes true and false cases for all 36 accepted
+integer comparison opcodes. The engines also compare every byte from six
+splats, six replacements and every integer/float
 extraction family. The audio lanes are:
 
 ```text
@@ -93,7 +102,7 @@ there is no heap allocation or native handle per vector.
 The default stripped static core remains 101,256 bytes under its unchanged
 100 KiB gate. The optional profile is 117,800 bytes under its separate 120 KiB
 gate. With the current complete iOS host owners, the SIMD build links at
-1,797,832 bytes arm64 and 1,901,624 bytes x86_64, under separate explicit
+1,810,840 bytes arm64 and 1,910,240 bytes x86_64, under separate explicit
 opt-in ceilings; those budgets do not weaken the default product boundaries.
 
 A separate manifest-bearing TinyArcade cartridge performs the same add and
@@ -101,5 +110,5 @@ subtract operations during `game_init`, checks both saturation extremes, then
 executes every splat/extract/replace family before it renders one indexed frame
 and round-trips its 16-byte state. With an
 `ios-c-api,simd` XCFramework, the Swift/C ABI opens and executes that cartridge
-on the booted iPhone 17 Pro Simulator. The focused linked consumer is 1,622,952
+on the booted iPhone 17 Pro Simulator. The focused linked consumer is 1,617,752
 bytes with the current game-kernel profile.

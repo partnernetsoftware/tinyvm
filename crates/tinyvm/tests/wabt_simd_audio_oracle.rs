@@ -275,6 +275,15 @@ fn wabt_compiled_simd_game_kernels_match_tinyvm() {
     }
     drop(memory);
 
+    assert!(matches!(
+        must(
+            instance.invoke_by_name("comparisons", &[]),
+            "run SIMD integer comparisons"
+        )
+        .as_slice(),
+        [Val::I32(1)]
+    ));
+
     {
         let mut memory = must(instance.memory_mut(), "borrow SIMD bridge memory");
         memory[448..688].fill(0xa5);
@@ -319,6 +328,10 @@ fn v128_game_kernel_validation_rejects_scalar_and_missing_operands() {
         ),
         (
             "(module (func (result v128) i32.const 1 i32.const 2 i32x4.add))",
+            "validation: type mismatch",
+        ),
+        (
+            "(module (func (result v128) i32.const 1 i32.const 2 i8x16.eq))",
             "validation: type mismatch",
         ),
         (
@@ -378,6 +391,59 @@ fn simd_shuffle_immediate_is_range_checked_during_decode() {
         Ok(_) => panic!("out-of-range SIMD shuffle lane must fail at load"),
     };
     assert_eq!(error.message(), "i8x16.shuffle lane out of range");
+}
+
+#[test]
+fn every_integer_lane_comparison_has_standard_mask_semantics() {
+    const FULL: [u8; 16] = [0xff; 16];
+    const EMPTY: [u8; 16] = [0; 16];
+    const RELATIONS: [(&str, i64, i64, i64, i64); 10] = [
+        ("eq", 5, 5, 5, 4),
+        ("ne", 5, 4, 5, 5),
+        ("lt_s", -1, 1, 1, -1),
+        ("lt_u", 1, 2, 2, 1),
+        ("gt_s", 1, -1, -1, 1),
+        ("gt_u", 2, 1, 1, 2),
+        ("le_s", -1, -1, 1, -1),
+        ("le_u", 1, 1, 2, 1),
+        ("ge_s", 1, -1, -1, 1),
+        ("ge_u", 2, 1, 1, 2),
+    ];
+    const ALL_RELATIONS: [usize; 10] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+    const I64_RELATIONS: [usize; 6] = [0, 1, 2, 4, 6, 8];
+
+    for (shape, lanes, relations) in [
+        ("i8x16", 16, ALL_RELATIONS.as_slice()),
+        ("i16x8", 8, ALL_RELATIONS.as_slice()),
+        ("i32x4", 4, ALL_RELATIONS.as_slice()),
+        ("i64x2", 2, I64_RELATIONS.as_slice()),
+    ] {
+        for &relation_index in relations {
+            let (relation, true_left, true_right, false_left, false_right) =
+                RELATIONS[relation_index];
+            for (left, right, expected) in [
+                (true_left, true_right, FULL),
+                (false_left, false_right, EMPTY),
+            ] {
+                let left = vec![left.to_string(); lanes].join(" ");
+                let right = vec![right.to_string(); lanes].join(" ");
+                let source = format!(
+                    "(module (func (export \"run\") (result v128) v128.const {shape} {left} v128.const {shape} {right} {shape}.{relation}))"
+                );
+                let bytes = wat::parse_str(source).expect("encode SIMD comparison fixture");
+                let module = must(WasmModule::from_bytes(&bytes), "load SIMD comparison");
+                let mut instance = must(module.instantiate(), "instantiate SIMD comparison");
+                let values = must(
+                    instance.invoke_by_name("run", &[]),
+                    "execute SIMD comparison",
+                );
+                assert!(
+                    matches!(values.as_slice(), [Val::V128(actual)] if actual == &expected),
+                    "wrong mask for {shape}.{relation}({left}, {right})"
+                );
+            }
+        }
+    }
 }
 
 #[test]
