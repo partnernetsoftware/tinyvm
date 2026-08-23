@@ -94,6 +94,8 @@ struct SimdAudioOracle {
               if (reductions !== 1) throw new Error(`reductions=${reductions}`);
               const laneBounds = instance.exports.lane_bounds();
               if (laneBounds !== 1) throw new Error(`lane_bounds=${laneBounds}`);
+              const saturation = instance.exports.saturation();
+              if (saturation !== 1) throw new Error(`saturation=${saturation}`);
               const bridge = new Uint8Array(240);
               const bridgeView = new DataView(bridge.buffer);
               const writeUnsigned = (offset, value, width) => {
@@ -131,13 +133,13 @@ struct SimdAudioOracle {
                 const actual = bytes[448 + index];
                 if (actual !== value) throw new Error(`bridge ${index}=${actual}`);
               });
-              return `${added}|${subtracted}|mask=${any}|rearrange=pass|lanes=pass|comparisons=pass|reductions=pass|bounds=pass|bridge=pass`;
+              return `${added}|${subtracted}|mask=${any}|rearrange=pass|lanes=pass|comparisons=pass|reductions=pass|bounds=pass|saturation=pass|bridge=pass`;
             })()
             """
         )
         if let javascriptError { throw OracleError.javascript(javascriptError) }
         let result = value?.toString() ?? ""
-        let expected = "32767,-32768,300,-300,32767,-32768,-5000,5000|20000,-20000,-100,100,32766,-32767,32767,-32768|mask=1,0|rearrange=pass|lanes=pass|comparisons=pass|reductions=pass|bounds=pass|bridge=pass"
+        let expected = "32767,-32768,300,-300,32767,-32768,-5000,5000|20000,-20000,-100,100,32766,-32767,32767,-32768|mask=1,0|rearrange=pass|lanes=pass|comparisons=pass|reductions=pass|bounds=pass|saturation=pass|bridge=pass"
         guard result == expected else { throw OracleError.wrongResult(result) }
         print("OK: JavaScriptCore SIMD game kernels=\(result)")
     }

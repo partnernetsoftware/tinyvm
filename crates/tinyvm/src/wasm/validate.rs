@@ -430,12 +430,18 @@ fn step(v: &mut V<'_>, op: &Op) -> Result<(), WasmError> {
         | SimdIntCompare(_, _)
         | SimdIntBinary(_, _)
         | I8x16Add
+        | I8x16AddSatS
+        | I8x16AddSatU
         | I8x16Sub
+        | I8x16SubSatS
+        | I8x16SubSatU
         | I16x8Add
         | I16x8Sub
         | I16x8Mul
         | I16x8AddSatS
+        | I16x8AddSatU
         | I16x8SubSatS
+        | I16x8SubSatU
         | I32x4Add
         | I32x4Sub
         | I32x4Mul

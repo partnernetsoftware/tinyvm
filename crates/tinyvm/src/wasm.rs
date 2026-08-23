@@ -1665,7 +1665,15 @@ enum Op {
     #[cfg(feature = "simd")]
     I8x16Add,
     #[cfg(feature = "simd")]
+    I8x16AddSatS,
+    #[cfg(feature = "simd")]
+    I8x16AddSatU,
+    #[cfg(feature = "simd")]
     I8x16Sub,
+    #[cfg(feature = "simd")]
+    I8x16SubSatS,
+    #[cfg(feature = "simd")]
+    I8x16SubSatU,
     #[cfg(feature = "simd")]
     I16x8Add,
     #[cfg(feature = "simd")]
@@ -1675,7 +1683,11 @@ enum Op {
     #[cfg(feature = "simd")]
     I16x8AddSatS,
     #[cfg(feature = "simd")]
+    I16x8AddSatU,
+    #[cfg(feature = "simd")]
     I16x8SubSatS,
+    #[cfg(feature = "simd")]
+    I16x8SubSatU,
     #[cfg(feature = "simd")]
     I32x4Add,
     #[cfg(feature = "simd")]
@@ -2253,6 +2265,10 @@ fn decode(body: &[u8], budget: &mut DecodeBudget) -> Result<DecodedCode, WasmErr
                             SimdIntReduction::Bitmask,
                         )),
                         110 => ops.push(Op::I8x16Add),
+                        111 => ops.push(Op::I8x16AddSatS),
+                        112 => ops.push(Op::I8x16AddSatU),
+                        114 => ops.push(Op::I8x16SubSatS),
+                        115 => ops.push(Op::I8x16SubSatU),
                         118 => {
                             ops.push(Op::SimdIntBinary(SimdIntShape::I8x16, SimdIntBinary::MinS))
                         }
@@ -2279,8 +2295,10 @@ fn decode(body: &[u8], budget: &mut DecodeBudget) -> Result<DecodedCode, WasmErr
                         113 => ops.push(Op::I8x16Sub),
                         142 => ops.push(Op::I16x8Add),
                         143 => ops.push(Op::I16x8AddSatS),
+                        144 => ops.push(Op::I16x8AddSatU),
                         145 => ops.push(Op::I16x8Sub),
                         146 => ops.push(Op::I16x8SubSatS),
+                        147 => ops.push(Op::I16x8SubSatU),
                         149 => ops.push(Op::I16x8Mul),
                         150 => {
                             ops.push(Op::SimdIntBinary(SimdIntShape::I16x8, SimdIntBinary::MinS))
@@ -5240,12 +5258,18 @@ impl Module {
                     | Op::F64x2ExtractLane(_)
                     | Op::F64x2ReplaceLane(_)
                     | Op::I8x16Add
+                    | Op::I8x16AddSatS
+                    | Op::I8x16AddSatU
                     | Op::I8x16Sub
+                    | Op::I8x16SubSatS
+                    | Op::I8x16SubSatU
                     | Op::I16x8Add
                     | Op::I16x8Sub
                     | Op::I16x8Mul
                     | Op::I16x8AddSatS
+                    | Op::I16x8AddSatU
                     | Op::I16x8SubSatS
+                    | Op::I16x8SubSatU
                     | Op::I32x4Add
                     | Op::I32x4Sub
                     | Op::I32x4Mul
@@ -7336,14 +7360,27 @@ impl Module {
                     stack.push(Val::V128(value));
                 }
                 #[cfg(feature = "simd")]
-                operation @ (Op::I8x16Add | Op::I8x16Sub) => {
+                operation @ (Op::I8x16Add
+                | Op::I8x16AddSatS
+                | Op::I8x16AddSatU
+                | Op::I8x16Sub
+                | Op::I8x16SubSatS
+                | Op::I8x16SubSatU) => {
                     let right = pop_v128(&mut stack)?;
                     let left = pop_v128(&mut stack)?;
                     let mut value = [0; 16];
                     for index in 0..16 {
                         value[index] = match operation {
                             Op::I8x16Add => left[index].wrapping_add(right[index]),
+                            Op::I8x16AddSatS => {
+                                (left[index] as i8).saturating_add(right[index] as i8) as u8
+                            }
+                            Op::I8x16AddSatU => left[index].saturating_add(right[index]),
                             Op::I8x16Sub => left[index].wrapping_sub(right[index]),
+                            Op::I8x16SubSatS => {
+                                (left[index] as i8).saturating_sub(right[index] as i8) as u8
+                            }
+                            Op::I8x16SubSatU => left[index].saturating_sub(right[index]),
                             _ => unreachable!(),
                         };
                     }
@@ -7354,7 +7391,9 @@ impl Module {
                 | Op::I16x8Sub
                 | Op::I16x8Mul
                 | Op::I16x8AddSatS
-                | Op::I16x8SubSatS) => {
+                | Op::I16x8AddSatU
+                | Op::I16x8SubSatS
+                | Op::I16x8SubSatU) => {
                     let right = pop_v128(&mut stack)?;
                     let left = pop_v128(&mut stack)?;
                     let mut value = [0; 16];
@@ -7367,7 +7406,9 @@ impl Module {
                             Op::I16x8Sub => a.wrapping_sub(b),
                             Op::I16x8Mul => a.wrapping_mul(b),
                             Op::I16x8AddSatS => a.saturating_add(b),
+                            Op::I16x8AddSatU => (a as u16).saturating_add(b as u16) as i16,
                             Op::I16x8SubSatS => a.saturating_sub(b),
+                            Op::I16x8SubSatU => (a as u16).saturating_sub(b as u16) as i16,
                             _ => unreachable!(),
                         };
                         value[start..start + 2].copy_from_slice(&result.to_le_bytes());

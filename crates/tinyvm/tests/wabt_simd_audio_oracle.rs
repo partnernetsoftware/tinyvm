@@ -299,6 +299,14 @@ fn wabt_compiled_simd_game_kernels_match_tinyvm() {
         .as_slice(),
         [Val::I32(1)]
     ));
+    assert!(matches!(
+        must(
+            instance.invoke_by_name("saturation", &[]),
+            "run SIMD narrow-lane saturation"
+        )
+        .as_slice(),
+        [Val::I32(1)]
+    ));
 
     {
         let mut memory = must(instance.memory_mut(), "borrow SIMD bridge memory");

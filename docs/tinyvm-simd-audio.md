@@ -47,10 +47,9 @@ v128 value type
 ├── i8x16 / i16x8 / i32x4 / i64x2 .all_true / .bitmask
 ├── i8x16 / i16x8 / i32x4 signed + unsigned .min / .max
 ├── i8x16 / i16x8 .avgr_u
-├── i8x16.add / i8x16.sub
+├── i8x16.add / i8x16.sub / signed + unsigned saturating forms
 ├── i16x8.add / i16x8.sub / i16x8.mul
-├── i16x8.add_sat_s
-├── i16x8.sub_sat_s
+├── i16x8 signed + unsigned saturating add / sub
 ├── i32x4.add / i32x4.sub / i32x4.mul
 └── i64x2.add / i64x2.sub / i64x2.mul
 ```
@@ -60,9 +59,9 @@ semantics. The interpreter does not emit host vector instructions and does not
 depend on the host ISA. Whole-vector logic operates on the canonical 16 bytes;
 `bitselect(a, b, mask)` chooses each bit from `a` where the mask bit is one and
 from `b` otherwise. `v128.load` and `v128.store` validate natural alignment
-immediates and preflight the complete 16-byte memory range. Signed lanes use
-Rust's defined `i16::saturating_add` and `i16::saturating_sub`, including both
-overflow boundaries. Integer lane arithmetic uses the corresponding wrapping
+immediates and preflight the complete 16-byte memory range. Signed and unsigned
+narrow lanes use Rust's defined saturating operations, including both overflow
+boundaries. Integer lane arithmetic uses the corresponding wrapping
 operation at each lane width, so overflow is deterministic in debug and
 release builds and independent of host ISA. Integer comparisons cover every
 standard relation for each accepted lane width and produce the standard all-one or all-zero mask in every
@@ -83,7 +82,7 @@ instruction fails explicitly as `SIMD feature is disabled`; default and
 
 ## Evidence
 
-`smoke-wabt-simd-audio.sh` compiles the 1,467-byte workload independently with
+`smoke-wabt-simd-audio.sh` compiles the 2,544-byte workload independently with
 WABT, validates it with `wasm-validate`, then runs the same lane vectors through
 tinyvm, macOS JavaScriptCore and an actual headless H5 browser. The three
 runtimes produce the same saturated lanes, six nontrivial mask vectors and
@@ -103,7 +102,8 @@ add: 32767,-32768,300,-300,32767,-32768,-5000,5000
 sub: 20000,-20000,-100,100,32766,-32767,32767,-32768
 ```
 
-The Rust black box also covers v128 function/local/global/constant values,
+The four-engine fixture also checks signed and unsigned saturation at every
+accepted 8- and 16-bit boundary. The Rust black box also covers v128 function/local/global/constant values,
 rejects scalar lane operands, scalar or missing mask operands and an
 over-aligned load, and proves an out-of-bounds store leaves the destination tail
 unchanged. The optional profile stores v128 inline and keeps `Val` at 24 bytes;

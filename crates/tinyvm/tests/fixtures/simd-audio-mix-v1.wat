@@ -383,6 +383,58 @@
 
     i32.const 1)
 
+  ;; Complete the narrow-lane saturating family used by PCM and pixels.
+  (func (export "saturation") (result i32)
+    v128.const i8x16 120 120 120 120 120 120 120 120 120 120 120 120 120 120 120 120
+    v128.const i8x16 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20
+    i8x16.add_sat_s
+    i8x16.extract_lane_s 0
+    i32.const 127
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i8x16 250 250 250 250 250 250 250 250 250 250 250 250 250 250 250 250
+    v128.const i8x16 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20
+    i8x16.add_sat_u
+    i8x16.extract_lane_u 0
+    i32.const 255
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i8x16 -120 -120 -120 -120 -120 -120 -120 -120 -120 -120 -120 -120 -120 -120 -120 -120
+    v128.const i8x16 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20
+    i8x16.sub_sat_s
+    i8x16.extract_lane_s 0
+    i32.const -128
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i8x16 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5
+    v128.const i8x16 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20
+    i8x16.sub_sat_u
+    i8x16.extract_lane_u 0
+    i32.const 0
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i16x8 65000 65000 65000 65000 65000 65000 65000 65000
+    v128.const i16x8 1000 1000 1000 1000 1000 1000 1000 1000
+    i16x8.add_sat_u
+    i16x8.extract_lane_u 0
+    i32.const 65535
+    i32.ne
+    if i32.const 0 return end
+
+    v128.const i16x8 5 5 5 5 5 5 5 5
+    v128.const i16x8 20 20 20 20 20 20 20 20
+    i16x8.sub_sat_u
+    i16x8.extract_lane_u 0
+    i32.const 0
+    i32.ne
+    if i32.const 0 return end
+
+    i32.const 1)
+
   ;; Scalar/vector lane bridge emitted by portable C/Rust SIMD frontends.
   ;; Six splats, six replacements and all signed/unsigned/numeric extraction
   ;; result families are serialized so independent engines can compare bytes.

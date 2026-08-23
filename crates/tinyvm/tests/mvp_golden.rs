@@ -1147,7 +1147,7 @@ const LEAF_TESTS: [(&str, &str); 165] = [
         "wabt_compiled_simd_game_kernels_match_tinyvm",
     ),
     (
-        "signed PCM saturating add/sub",
+        "narrow-lane saturating add/sub",
         "wabt_compiled_simd_game_kernels_match_tinyvm",
     ),
     (
