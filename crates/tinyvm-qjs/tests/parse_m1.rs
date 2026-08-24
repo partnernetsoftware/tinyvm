@@ -112,6 +112,7 @@ fn sexpr(e: &Expr) -> String {
                 UnaryOp::Neg => "-",
                 UnaryOp::Plus => "+",
                 UnaryOp::Not => "!",
+                UnaryOp::TypeOf => "typeof",
             };
             format!("({op} {})", sexpr(operand))
         }
@@ -678,7 +679,6 @@ fn what_the_front_end_cannot_read_yet_names_the_construct() {
     for (source, phrase) in [
         ("$0.x;", "property access"),
         ("[1];", "array"),
-        ("typeof 1;", "typeof"),
         ("1, 2;", "comma"),
         ("1 ? 2 : 3;", "conditional"),
         ("2 ** 3;", "exponentiation"),

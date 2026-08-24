@@ -51,9 +51,9 @@
 //! reads the layout except [`super::repr`]'s string pointer.
 
 use super::repr::{
-    self, BlockType, Ins, ValType, WIDTH, box_bool, box_number, box_string, const_bool, is_bool,
-    is_null, is_nullish, is_number, is_string, is_undefined, load_local, same_type, store_local,
-    unbox_bool, unbox_number, unbox_string,
+    self, BlockType, Ins, ValType, WIDTH, box_bool, box_number, box_string, const_bool,
+    const_string, is_bool, is_null, is_nullish, is_number, is_string, is_undefined, load_local,
+    same_type, store_local, unbox_bool, unbox_number, unbox_string,
 };
 
 /// Byte 0..8 is left out of the data segment so a null pointer is never a
@@ -70,6 +70,7 @@ pub(crate) enum Rt {
     Div,
     Rem,
     Neg,
+    TypeOf,
     Lt,
     Le,
     Gt,
@@ -94,6 +95,7 @@ pub(crate) const SET: &[Rt] = &[
     Rt::Div,
     Rt::Rem,
     Rt::Neg,
+    Rt::TypeOf,
     Rt::Lt,
     Rt::Le,
     Rt::Gt,
@@ -122,6 +124,7 @@ impl Rt {
             Rt::Div => "__div",
             Rt::Rem => "__rem",
             Rt::Neg => "__neg",
+            Rt::TypeOf => "__typeof",
             Rt::Lt => "__lt",
             Rt::Le => "__le",
             Rt::Gt => "__gt",
@@ -159,6 +162,35 @@ pub(crate) struct RtFunc {
     pub(crate) body: Vec<Ins>,
 }
 
+/// The five strings ECMA-262 13.5.3 can name over this engine's five types,
+/// as guest addresses in the module's string pool.
+///
+/// They are pool records like any other literal, so `typeof x === "number"`
+/// compares two records of the same shape -- and, because
+/// [`StringPool::intern`] shares equal literals, usually the very same one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TypeNames {
+    pub(crate) number: i32,
+    pub(crate) string: i32,
+    pub(crate) boolean: i32,
+    pub(crate) undefined: i32,
+    /// 13.5.3 step 3: the name of the Null type is `"object"`.
+    pub(crate) object: i32,
+}
+
+impl TypeNames {
+    /// Intern all five, in the dispatch order [`super::repr`] documents.
+    pub(crate) fn intern(pool: &mut StringPool) -> Self {
+        Self {
+            number: pool.intern("number"),
+            string: pool.intern("string"),
+            boolean: pool.intern("boolean"),
+            undefined: pool.intern("undefined"),
+            object: pool.intern("object"),
+        }
+    }
+}
+
 /// What the runtime needs to know about the module it is being spliced into.
 pub(crate) struct Ctx {
     /// Function index of `__add`. Imports occupy the first indices, so this is
@@ -166,6 +198,15 @@ pub(crate) struct Ctx {
     pub(crate) func_base: u32,
     /// Index of the mutable `i32` global holding the bump pointer.
     pub(crate) heap_global: u32,
+    /// Where `__typeof`'s five answers live, or `None` for a program that
+    /// never writes `typeof`.
+    ///
+    /// A `Option` rather than five unconditional literals because the pool is
+    /// the module's data segment: interning "number", "string", "boolean",
+    /// "undefined" and "object" into every compiled module would cost 64 bytes
+    /// of guest memory and shift every other literal's address, in a module
+    /// that may have no `typeof` in it at all.
+    pub(crate) type_names: Option<TypeNames>,
 }
 
 impl Ctx {
@@ -188,6 +229,7 @@ fn one(ctx: &Ctx, rt: Rt) -> RtFunc {
         Rt::Div => (values(2), values(1), arith(ctx, Ins::F64Div)),
         Rt::Rem => (values(2), values(1), remainder(ctx)),
         Rt::Neg => (values(1), values(1), negate(ctx)),
+        Rt::TypeOf => (values(1), values(1), type_of(ctx)),
         Rt::Lt => (values(2), values(1), relational(ctx, Ins::F64Lt)),
         Rt::Le => (values(2), values(1), relational(ctx, Ins::F64Le)),
         Rt::Gt => (values(2), values(1), relational(ctx, Ins::F64Gt)),
@@ -391,6 +433,39 @@ fn negate(ctx: &Ctx) -> FnBuild {
     to_number_of(ctx, 0, &mut inner);
     inner.push(Ins::F64Neg);
     box_number(&inner, &mut f.body);
+    f
+}
+
+/// `typeof`: ECMA-262 13.5.3, one string per language type.
+///
+/// Five arms and no default that guesses: every tag this engine defines is
+/// listed, so reaching the end means the pair was not built by this engine.
+/// The order is `repr`'s documented one -- Number, then String, then the rest
+/// -- so adding a type appends an arm and costs the existing ones nothing.
+///
+/// `Ctx::type_names` is `None` for a program with no `typeof` in it, and then
+/// nothing in the module calls this function. Its body is the trap that says
+/// so, rather than five literals no script can reach.
+fn type_of(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(WIDTH);
+    let Some(names) = ctx.type_names else {
+        f.body.push(Ins::Unreachable);
+        return f;
+    };
+    for (test, at) in [
+        (is_number as fn(u32, &mut Vec<Ins>), names.number),
+        (is_string, names.string),
+        (is_bool, names.boolean),
+        (is_undefined, names.undefined),
+        (is_null, names.object),
+    ] {
+        test(0, &mut f.body);
+        f.body.push(Ins::If(BlockType::Empty));
+        const_string(at, &mut f.body);
+        f.body.push(Ins::Return);
+        f.body.push(Ins::End);
+    }
+    f.body.push(Ins::Unreachable);
     f
 }
 

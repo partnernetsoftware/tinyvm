@@ -376,6 +376,70 @@ fn the_remainder_binds_where_the_multiplicative_rung_is() {
     number("7 % -4", 3.0);
 }
 
+/// 13.5.3, the `typeof` operator: one string per ECMA-262 language type this
+/// engine has. `typeof null` is `"object"` because step 3 of the table says
+/// so -- it is the spec's answer, not this engine's approximation of one.
+#[test]
+fn typeof_names_the_language_type() {
+    text("typeof 1", "number");
+    text("typeof (1 / 0)", "number");
+    text("typeof (0 / 0)", "number");
+    text("typeof -0", "number");
+    text("typeof \"a\"", "string");
+    text("typeof \"\"", "string");
+    text("typeof true", "boolean");
+    text("typeof false", "boolean");
+    text("typeof undefined", "undefined");
+    text("typeof null", "object");
+    // Not only over literals: a binding, an uninitialised binding, a `$N`, and
+    // a call all have a type at the moment `typeof` asks.
+    text("let x = \"a\"; return typeof x;", "string");
+    text("let y; return typeof y;", "undefined");
+    text("function f() { return 1; } return typeof f();", "number");
+    text("function g() {} return typeof g();", "undefined");
+    assert_eq!(
+        attempt(
+            "return typeof $0;",
+            &[Value::Bool(true)],
+            Names::Unbound,
+            false
+        )
+        .unwrap(),
+        Out::Str("boolean".to_string())
+    );
+}
+
+/// `typeof` is a UnaryExpression operator (13.5), so it binds tighter than
+/// every infix rung -- and the readable proof is that `typeof 2 * 3` reaches
+/// `"number" * 3`, which is the unimplemented StringToNumber and traps. Were
+/// it looser, `typeof (2 * 3)` would be `"number"` and nothing would trap.
+#[test]
+fn typeof_binds_where_a_unary_operator_binds() {
+    boolean("typeof 1 === \"number\"", true);
+    // `(typeof 1) + 1` is `"number" + 1`, which needs ToString of a Number and
+    // traps; `typeof (1 + 1)` would be `"number"` and would not.
+    traps("typeof 1 + 1");
+    traps("typeof 2 * 3");
+    // It nests, because its own result is a String and Strings have a type.
+    text("typeof typeof 1", "string");
+    // A non-empty String is truthy, so every `typeof` is.
+    boolean("!typeof undefined", false);
+    // The operand is an ordinary expression, evaluated first.
+    text("let n = 0; return typeof (n = \"s\");", "string");
+}
+
+/// DIVERGENCE: in JavaScript `typeof undeclared` is the one place a free name
+/// does not throw -- it evaluates to `"undefined"`. This engine has no global
+/// object for a name to be absent *from*, so an undeclared name is refused
+/// before `typeof` is reached, under every `Names` setting. Retire when the
+/// language grows a global scope.
+#[test]
+fn typeof_does_not_rescue_an_undeclared_name() {
+    let e = refuse_in("typeof nope;", Names::Unbound);
+    assert!(e.message.starts_with("this engine "), "{}", e.message);
+    assert!(e.message.contains("nope"), "{}", e.message);
+}
+
 // =========================================================================
 // The precedence ladder, rung by rung
 // =========================================================================
@@ -1362,7 +1426,6 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     ("let x = 1; x &&= 2; return x;", "logical assignment"),
     ("let x = 1; x **= 2; return x;", "assignment"),
     ("1, 2;", "the comma operator"),
-    ("typeof 1;", "the `typeof` operator"),
     // -- things that need a third binding -----------------------------------
     ("let o = {}; return 0;", "object literals"),
     ("let a = [1]; return 0;", "array literals"),

@@ -37,7 +37,7 @@ mod repr;
 mod runtime;
 
 use repr::{BlockType, HostVal, Ins, ValType};
-use runtime::{Ctx, FnBuild, Rt, StringPool};
+use runtime::{Ctx, FnBuild, Rt, StringPool, TypeNames};
 use tinyvm::{Limits, Val, WasmModule};
 
 // =========================================================================
@@ -63,13 +63,22 @@ struct Out {
 
 impl Prog {
     fn new() -> Self {
+        // `__typeof` answers with pool records, so the pool has to exist
+        // before the runtime is built and the five names have to be in it.
+        // Every program here carries them, which is the compiler's `typeof`
+        // case; the compiler's other case -- `type_names: None`, no `typeof`
+        // in the source, no five literals in the data segment -- is what the
+        // dispatch-order tests below build directly.
+        let mut pool = StringPool::default();
+        let type_names = Some(TypeNames::intern(&mut pool));
         Prog {
-            pool: StringPool::default(),
+            pool,
             // No imports in these modules, so the runtime starts at 0, and one
             // global, so the bump pointer is global 0.
             ctx: Ctx {
                 func_base: 0,
                 heap_global: 0,
+                type_names,
             },
             main: FnBuild::new(0),
             results: vec![ValType::I32, ValType::I64],
@@ -441,6 +450,7 @@ fn add_tests_number_before_string() {
     let ctx = Ctx {
         func_base: 0,
         heap_global: 0,
+        type_names: None,
     };
     let funcs = runtime::build(&ctx);
     let add = funcs
@@ -478,6 +488,7 @@ fn a_new_type_costs_nothing_at_a_site_that_never_sees_it() {
     let ctx = Ctx {
         func_base: 0,
         heap_global: 0,
+        type_names: None,
     };
     let arms: Vec<&'static str> = runtime::build(&ctx)
         .iter()
@@ -648,6 +659,49 @@ fn the_remainder_coerces_through_to_number() {
             .number()
             .is_nan()
     );
+}
+
+/// `__typeof` over every tag, and the one arm nobody guesses: 13.5.3 step 3
+/// gives the Null type the name `"object"`.
+#[test]
+fn typeof_answers_with_the_language_type_name() {
+    for (value, want) in [
+        (V::Num(1.0), "number"),
+        (V::Num(f64::NAN), "number"),
+        (V::Str("a"), "string"),
+        (V::Str(""), "string"),
+        (V::Bool(false), "boolean"),
+        (V::Undefined, "undefined"),
+        (V::Null, "object"),
+    ] {
+        assert_eq!(Prog::unary(Rt::TypeOf, value).string(), want);
+    }
+}
+
+/// A program with no `typeof` in it carries none of the five names: the pool
+/// is the data segment, and 64 bytes of guest memory per module is not a cost
+/// a script that never asks should pay.
+#[test]
+fn typeof_costs_nothing_in_a_program_that_never_asks() {
+    let mut asks = StringPool::default();
+    TypeNames::intern(&mut asks);
+    assert!(!asks.is_empty());
+    let quiet = StringPool::default();
+    assert!(quiet.is_empty());
+    assert!(quiet.heap_start() < asks.heap_start());
+
+    // And the emitted function is the trap that says nothing may call it.
+    let ctx = Ctx {
+        func_base: 0,
+        heap_global: 0,
+        type_names: None,
+    };
+    let built = runtime::build(&ctx);
+    let quiet_typeof = built
+        .iter()
+        .find(|f| f.name == "__typeof")
+        .expect("__typeof is in the set");
+    assert_eq!(quiet_typeof.body, vec![Ins::Unreachable]);
 }
 
 #[test]

@@ -1152,6 +1152,13 @@ pub(crate) mod m1 {
                     self.advance();
                     UnaryOp::Not
                 }
+                // 13.5.3. A keyword rather than punctuation, but the same
+                // rung of the ladder as `!`, `+` and `-`, so it parses here
+                // and its operand is a UnaryExpression.
+                TokenKind::Typeof => {
+                    self.advance();
+                    UnaryOp::TypeOf
+                }
                 TokenKind::PlusPlus | TokenKind::MinusMinus => {
                     let op = if token.kind == TokenKind::PlusPlus {
                         UpdateOp::Inc

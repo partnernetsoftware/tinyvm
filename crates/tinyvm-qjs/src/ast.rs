@@ -349,6 +349,10 @@ pub(crate) mod m1 {
         /// Unary `+`: ToNumber, not a no-op.
         Plus,
         Not,
+        /// `typeof`: the ECMA-262 13.5.3 name of the operand's language type,
+        /// as a String. The one unary operator whose result is not a Number
+        /// or a Boolean.
+        TypeOf,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]

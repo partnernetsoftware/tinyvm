@@ -288,12 +288,19 @@ pub(crate) mod m1 {
     }
 
     pub(crate) fn lower(program: &ast::Program) -> Result<ir::Module, CompileError> {
-        let hosts = collect_hosts(program)?;
+        let scan = scan(program)?;
+        let hosts = scan.hosts();
+        // The pool opens before the runtime is built, because `__typeof`
+        // answers with pool records and so has to know their addresses. The
+        // five names go in first when the program asks for them, and not at
+        // all when it does not.
+        let mut pool = StringPool::default();
         let ctx = Ctx {
             // Imported functions take the first indices, so the runtime
             // starts exactly where the import table ends.
             func_base: hosts.len() as u32,
             heap_global: HEAP_GLOBAL,
+            type_names: scan.type_of.then(|| runtime::TypeNames::intern(&mut pool)),
         };
         let user_base = ctx.func_base + runtime::SET.len() as u32;
 
@@ -318,7 +325,6 @@ pub(crate) mod m1 {
             ));
         }
 
-        let mut pool = StringPool::default();
         for (index, function) in program.functions.iter().enumerate() {
             let id = ast::FuncId(index as u32);
             let built = Lower::new(program, &ctx, &mut pool, &hosts, user_base, id).function()?;
@@ -526,60 +532,84 @@ pub(crate) mod m1 {
 
     // -- the import table ----------------------------------------------------
 
-    /// Every host name the program calls, sorted and deduplicated, with the
-    /// argument count it is called with.
+    /// What one walk of the program tells the module builder, before a single
+    /// instruction is emitted.
     ///
-    /// A wasm import has one signature, so a name used at two arities has no
-    /// single import to be. Overloading it would need a third world.
-    fn collect_hosts(program: &ast::Program) -> Result<Vec<Host>, CompileError> {
-        let mut seen: BTreeMap<String, u32> = BTreeMap::new();
+    /// One walk and not two: both facts are properties of every expression in
+    /// the program, and the second reader would be a second chance to
+    /// disagree with the first about which expressions those are.
+    #[derive(Debug, Default)]
+    struct Scan {
+        /// Every host name the program calls, sorted and deduplicated, with
+        /// the argument count it is called with.
+        ///
+        /// A wasm import has one signature, so a name used at two arities has
+        /// no single import to be. Overloading it would need a third world.
+        hosts: BTreeMap<String, u32>,
+        /// Whether the program writes `typeof` anywhere. The five strings
+        /// 13.5.3 answers with are data-segment literals, so a program that
+        /// never asks should not carry them -- see [`runtime::TypeNames`].
+        type_of: bool,
+    }
+
+    impl Scan {
+        fn hosts(&self) -> Vec<Host> {
+            self.hosts
+                .iter()
+                .map(|(name, arity)| Host {
+                    name: name.clone(),
+                    arity: *arity,
+                })
+                .collect()
+        }
+    }
+
+    fn scan(program: &ast::Program) -> Result<Scan, CompileError> {
+        let mut out = Scan::default();
         for function in &program.functions {
             for stmt in &function.body {
-                host_stmt(stmt, &mut seen)?;
+                host_stmt(stmt, &mut out)?;
             }
         }
-        Ok(seen
-            .into_iter()
-            .map(|(name, arity)| Host { name, arity })
-            .collect())
+        Ok(out)
     }
 
     fn note_host(
-        seen: &mut BTreeMap<String, u32>,
+        scan: &mut Scan,
         name: &str,
         arity: u32,
         span: ast::Span,
     ) -> Result<(), CompileError> {
-        match seen.get(name) {
+        match scan.hosts.get(name) {
             Some(known) if *known != arity => Err(unsupported(
                 Boundary::ThirdBinding,
                 &format!("calling the host name `{name}` with two different argument counts"),
                 span.offset(),
             )),
             _ => {
-                seen.insert(name.to_string(), arity);
+                scan.hosts.insert(name.to_string(), arity);
                 Ok(())
             }
         }
     }
 
-    fn host_stmt(stmt: &ast::Stmt, seen: &mut BTreeMap<String, u32>) -> Result<(), CompileError> {
+    fn host_stmt(stmt: &ast::Stmt, scan: &mut Scan) -> Result<(), CompileError> {
         match &stmt.kind {
             ast::StmtKind::Empty | ast::StmtKind::Func { .. } => Ok(()),
-            ast::StmtKind::Expr(e) => host_expr(e, seen),
+            ast::StmtKind::Expr(e) => host_expr(e, scan),
             ast::StmtKind::Decl(declarators) => declarators
                 .iter()
                 .filter_map(|d| d.init.as_ref())
-                .try_for_each(|e| host_expr(e, seen)),
-            ast::StmtKind::Block(stmts) => stmts.iter().try_for_each(|s| host_stmt(s, seen)),
+                .try_for_each(|e| host_expr(e, scan)),
+            ast::StmtKind::Block(stmts) => stmts.iter().try_for_each(|s| host_stmt(s, scan)),
             ast::StmtKind::If { test, then, alt } => {
-                host_expr(test, seen)?;
-                host_stmt(then, seen)?;
-                alt.iter().try_for_each(|s| host_stmt(s, seen))
+                host_expr(test, scan)?;
+                host_stmt(then, scan)?;
+                alt.iter().try_for_each(|s| host_stmt(s, scan))
             }
             ast::StmtKind::While { test, body } => {
-                host_expr(test, seen)?;
-                host_stmt(body, seen)
+                host_expr(test, scan)?;
+                host_stmt(body, scan)
             }
             ast::StmtKind::For {
                 init,
@@ -587,16 +617,16 @@ pub(crate) mod m1 {
                 update,
                 body,
             } => {
-                init.iter().try_for_each(|s| host_stmt(s, seen))?;
-                test.iter().try_for_each(|e| host_expr(e, seen))?;
-                update.iter().try_for_each(|e| host_expr(e, seen))?;
-                host_stmt(body, seen)
+                init.iter().try_for_each(|s| host_stmt(s, scan))?;
+                test.iter().try_for_each(|e| host_expr(e, scan))?;
+                update.iter().try_for_each(|e| host_expr(e, scan))?;
+                host_stmt(body, scan)
             }
-            ast::StmtKind::Return(value) => value.iter().try_for_each(|e| host_expr(e, seen)),
+            ast::StmtKind::Return(value) => value.iter().try_for_each(|e| host_expr(e, scan)),
         }
     }
 
-    fn host_expr(expr: &ast::Expr, seen: &mut BTreeMap<String, u32>) -> Result<(), CompileError> {
+    fn host_expr(expr: &ast::Expr, scan: &mut Scan) -> Result<(), CompileError> {
         match &expr.kind {
             ast::ExprKind::Int(_)
             | ast::ExprKind::Str(_)
@@ -607,7 +637,7 @@ pub(crate) mod m1 {
             | ast::ExprKind::Function(_) => Ok(()),
             // A bare host name is a zero-argument call, as it is at M0.
             ast::ExprKind::Name(name) => match &name.res {
-                ast::Res::Host(text) => note_host(seen, text, 0, expr.span),
+                ast::Res::Host(text) => note_host(scan, text, 0, expr.span),
                 _ => Ok(()),
             },
             ast::ExprKind::Call { callee, args } => {
@@ -616,23 +646,26 @@ pub(crate) mod m1 {
                 match &callee.kind {
                     ast::ExprKind::Name(name) => match &name.res {
                         ast::Res::Host(text) => {
-                            note_host(seen, text, args.len() as u32, expr.span)?;
+                            note_host(scan, text, args.len() as u32, expr.span)?;
                         }
-                        _ => host_expr(callee, seen)?,
+                        _ => host_expr(callee, scan)?,
                     },
-                    _ => host_expr(callee, seen)?,
+                    _ => host_expr(callee, scan)?,
                 }
-                args.iter().try_for_each(|a| host_expr(a, seen))
+                args.iter().try_for_each(|a| host_expr(a, scan))
             }
-            ast::ExprKind::Unary(_, operand) => host_expr(operand, seen),
-            ast::ExprKind::Update { target, .. } => host_expr(target, seen),
+            ast::ExprKind::Unary(op, operand) => {
+                scan.type_of |= *op == ast::UnaryOp::TypeOf;
+                host_expr(operand, scan)
+            }
+            ast::ExprKind::Update { target, .. } => host_expr(target, scan),
             ast::ExprKind::Binary(_, lhs, rhs) | ast::ExprKind::Logical(_, lhs, rhs) => {
-                host_expr(lhs, seen)?;
-                host_expr(rhs, seen)
+                host_expr(lhs, scan)?;
+                host_expr(rhs, scan)
             }
             ast::ExprKind::Assign { target, value, .. } => {
-                host_expr(target, seen)?;
-                host_expr(value, seen)
+                host_expr(target, scan)?;
+                host_expr(value, scan)
             }
         }
     }
@@ -1135,6 +1168,14 @@ pub(crate) mod m1 {
                         Ok(())
                     })?;
                     box_number(&inner, &mut self.f.body);
+                }
+                // 13.5.3, a String answer, so it goes through `__typeof`
+                // rather than being folded here: the operand's type is not
+                // known until it runs.
+                ast::UnaryOp::TypeOf => {
+                    self.expr(operand)?;
+                    let call = self.ctx.call(Rt::TypeOf);
+                    self.push(call);
                 }
                 ast::UnaryOp::Not => {
                     let truthy = self.ctx.call(Rt::Truthy);
