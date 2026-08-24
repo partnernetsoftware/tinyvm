@@ -53,6 +53,10 @@ tinyvm (35)                                      [~]
 │   │   ├── qjs2wasm names / ops / host-call subset       [x]
 │   │   ├── eval_qjs = eval_wasm(qjs2wasm, globals, locals) [x]
 │   │   ├── commissar demo (example commissar)            [x]
+│   │   ├── V1 values across the call boundary            [x]
+│   │   ├── declarations, functions, control flow         [x]
+│   │   ├── nesting bounded by a diagnostic, not an abort [x]
+│   │   ├── every rejection names the engine boundary     [x]
 │   │   └── full JS engine / AOT                          [–]
 │   ├── host                                              [x]
 │   ├── <100KiB>                                          [x]
@@ -309,6 +313,20 @@ as “almost approved” or “safe to ship externally.”
   `eval_qjs` is `eval_wasm(&qjs2wasm(src)?, globals, locals)`, and its world is
   only those two bindings. The commissar demo is
   `cargo run -p tinyvm-qjs --example commissar`.
+- `compile_qjs_m1` is the milestone above that skin, and the one the language
+  grows on: statements, `let`/`const`/`var`, `if`/`while`/`for`, functions with
+  parameters and `return`, strings, and the full operator ladder — every value
+  of it a V1 pair, `(tag: i32, payload: i64)`, chosen by the measured experiment
+  recorded in `design-value-representation-experiment.md`. Numbers are binary64,
+  so `1/0` is `Infinity` and `2147483647 + 1` does not wrap. Its `main` takes two
+  wasm parameters per JavaScript argument and returns two results; `Value` is the
+  host's door across that boundary. `compile_qjs` stays beside it only until its
+  `i32`-in/`i32`-out callers move.
+- Syntax nesting is bounded by a number the compiler keeps, not by the native
+  stack. Recursive descent overflows into a process abort, which for a host
+  compiling untrusted `.qjs` is the worst failure mode there is — no caller is
+  left to hear about it — so reaching the depth budget is an ordinary refusal
+  with an ordinary diagnostic.
 - The compiler moved *up* into this crate on 2026-08-24, from AgenTerm's
   `agenterm-qjswasm`, on one principle: generic dynamic-engine capability
   belongs in tinyvm, business belongs in the embedder. The 1113 lines that

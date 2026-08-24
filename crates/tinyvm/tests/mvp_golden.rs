@@ -638,7 +638,7 @@ fn parse_prd_x_leaves(prd: &str) -> Vec<String> {
 /// test must exist in this package's integration tests and assert something
 /// concrete — the point of naming it here is that a leaf can no longer be
 /// satisfied by a text row.
-const LEAF_TESTS: [(&str, &str); 169] = [
+const LEAF_TESTS: [(&str, &str); 173] = [
     ("eval(bytes)", "eval_bytes"),
     (
         "in-guest throughput gate",
@@ -675,6 +675,22 @@ const LEAF_TESTS: [(&str, &str); 169] = [
     (
         "commissar demo (example commissar)",
         "commissar_demo_eval_wasm_and_sugar",
+    ),
+    (
+        "V1 values across the call boundary",
+        "qjs_m1_moves_v1_values_across_the_call_boundary",
+    ),
+    (
+        "declarations, functions, control flow",
+        "qjs_m1_lowers_declarations_functions_and_control_flow",
+    ),
+    (
+        "nesting bounded by a diagnostic, not an abort",
+        "qjs_m1_bounds_nesting_with_a_diagnostic_not_an_abort",
+    ),
+    (
+        "every rejection names the engine boundary",
+        "qjs_m1_rejections_name_the_engine_boundary",
     ),
     ("iOS runtime boundary", "native_interpreter_boundary"),
     ("interpret wasm", "eval_bytes"),
