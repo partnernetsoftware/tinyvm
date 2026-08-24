@@ -1,5 +1,10 @@
 # tinyvm PRD
 
+Parent: [`~/repos/index.md`](~/repos/index.md) —— 跨仓记忆宫殿。本文是产品级宫殿；
+同一套纪律：一个事实一个归属、只链不抄、判断被推翻留撤销记录、`[x]` 是**有证据的
+承诺**而不是自我评价（本仓用 `prd_x_leaves_have_suite_edges` + `LEAF_TESTS` 执行这条，
+它是这条纪律的金丝雀）。
+
 便携可编程核。写一次，多平台，高性能。
 
 Execution plan: [tinyvm as an iOS game runtime foundation](../plan/goal-tinyvm-ios-game-runtime.md)
