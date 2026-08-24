@@ -590,13 +590,6 @@ fn a_host_name_used_at_two_arities_is_refused() {
 /// wrong. These are the ones the lowering itself raises.
 #[test]
 fn the_lowering_names_its_own_boundary() {
-    let rem = refuse("return 1 % 2;");
-    assert_eq!(
-        rem.message,
-        "this engine does not support the remainder operator `%` yet"
-    );
-    assert_eq!(rem.boundary, Boundary::Subset);
-
     let value = refuse("let f = function () { return 1; }; return 0;");
     assert!(
         value.message.starts_with("this engine does not support "),
@@ -620,7 +613,7 @@ fn a_capture_is_refused_rather_than_miscompiled() {
 #[test]
 fn every_refusal_speaks_for_the_engine() {
     for source in [
-        "return 1 % 2;",
+        "return 2 ** 3;",
         "let f = function () { return 1; }; return 0;",
         "function o() { let a = 1; function i() { return a; } return i(); }",
     ] {
@@ -923,17 +916,15 @@ fn leb(bytes: &[u8], at: usize) -> Option<(u32, usize)> {
 // More of the boundary, and the runtime's own
 // =========================================================================
 
-/// `%` is refused wherever it is written, including the compound form, and it
-/// is refused with the same sentence.
+/// `%` runs in both spellings, and `__rem` is one runtime function that the
+/// compound form reaches through the same lowering as the infix one.
 #[test]
-fn the_remainder_operator_is_refused_in_both_spellings() {
-    for source in ["return 1 % 2;", "let x = 5; x %= 2; return x;"] {
-        let e = refuse(source);
-        assert_eq!(
-            e.message, "this engine does not support the remainder operator `%` yet",
-            "{source:?}"
-        );
-    }
+fn the_remainder_operator_runs_in_both_spellings() {
+    assert_eq!(run("return -5 % 3;"), Out::Number(-2.0));
+    assert_eq!(run("let x = -5; x %= 3; return x;"), Out::Number(-2.0));
+    // The compound form's value is the value assigned, as every other
+    // compound assignment's is.
+    assert_eq!(run("let x = -5; return (x %= 3);"), Out::Number(-2.0));
 }
 
 /// The three conversions `runtime.rs` does not implement are reachable from

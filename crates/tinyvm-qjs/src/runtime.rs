@@ -68,6 +68,7 @@ pub(crate) enum Rt {
     Sub,
     Mul,
     Div,
+    Rem,
     Neg,
     Lt,
     Le,
@@ -91,6 +92,7 @@ pub(crate) const SET: &[Rt] = &[
     Rt::Sub,
     Rt::Mul,
     Rt::Div,
+    Rt::Rem,
     Rt::Neg,
     Rt::Lt,
     Rt::Le,
@@ -118,6 +120,7 @@ impl Rt {
             Rt::Sub => "__sub",
             Rt::Mul => "__mul",
             Rt::Div => "__div",
+            Rt::Rem => "__rem",
             Rt::Neg => "__neg",
             Rt::Lt => "__lt",
             Rt::Le => "__le",
@@ -183,6 +186,7 @@ fn one(ctx: &Ctx, rt: Rt) -> RtFunc {
         Rt::Sub => (values(2), values(1), arith(ctx, Ins::F64Sub)),
         Rt::Mul => (values(2), values(1), arith(ctx, Ins::F64Mul)),
         Rt::Div => (values(2), values(1), arith(ctx, Ins::F64Div)),
+        Rt::Rem => (values(2), values(1), remainder(ctx)),
         Rt::Neg => (values(1), values(1), negate(ctx)),
         Rt::Lt => (values(2), values(1), relational(ctx, Ins::F64Lt)),
         Rt::Le => (values(2), values(1), relational(ctx, Ins::F64Le)),
@@ -235,6 +239,147 @@ fn arith(ctx: &Ctx, op: Ins) -> FnBuild {
     to_number_of(ctx, WIDTH, &mut inner);
     inner.push(op);
     box_number(&inner, &mut f.body);
+    f
+}
+
+/// `%`: ECMA-262 13.15.3 over 6.1.6.1.6, Number::remainder.
+///
+/// # Why this is an algorithm and not three instructions
+///
+/// wasm has no `f64.rem`, and the obvious transcription of the spec's prose --
+/// `n - trunc(n / d) * d` -- is **not** what the spec says. 6.1.6.1.6 defines
+/// the result as `n - d * q`, where `q` is bounded by the magnitude of *the
+/// true mathematical quotient*. `n / d` in binary64 is the true quotient
+/// already rounded, so its truncation can be the wrong integer, and the
+/// subtraction then removes the wrong multiple. `4611686014132420608 % 1000`
+/// is 608; the transcription yields -512, which is not even a remainder.
+///
+/// So the reduction is done on exact terms instead. Scale `|d|` up by doubling
+/// until one more doubling would pass `|n|`, then walk back down halving,
+/// subtracting whenever the running value fits. Every step is exact: doubling
+/// and halving a binary64 by two only moves the exponent, and each subtraction
+/// happens with `m <= a < 2m`, where Sterbenz's lemma makes `a - m` exact. The
+/// loop is bounded by the exponent range, so it terminates in at most about
+/// 2100 turns of each half.
+///
+/// # The five special cases, in the order 6.1.6.1.6 lists them
+///
+/// NaN on either side, an infinite dividend, and a zero divisor are all NaN.
+/// An infinite divisor and a zero dividend both give the dividend back --
+/// and so does any dividend smaller in magnitude than the divisor, which is
+/// why those three collapse into the single `|n| < |d|` test below once the
+/// NaN and infinite-dividend cases are gone.
+///
+/// The sign is the *dividend's*, applied at the end with `f64.copysign`, which
+/// is what makes this a remainder and not a modulo: `-5 % 3` is `-2`, and
+/// `-6 % 3` is `-0`.
+fn remainder(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH);
+    let n = f.local(ValType::F64);
+    let d = f.local(ValType::F64);
+    let a = f.local(ValType::F64);
+    let m = f.local(ValType::F64);
+
+    to_number_of(ctx, 0, &mut f.body);
+    f.body.push(Ins::LocalSet(n));
+    to_number_of(ctx, WIDTH, &mut f.body);
+    f.body.push(Ins::LocalSet(d));
+
+    // NaN either side, |n| infinite, or d zero -- all NaN. `x != x` is the
+    // NaN test, and `d == 0` catches both zeros.
+    f.body.push(Ins::LocalGet(n));
+    f.body.push(Ins::LocalGet(n));
+    f.body.push(Ins::F64Ne);
+    f.body.push(Ins::LocalGet(d));
+    f.body.push(Ins::LocalGet(d));
+    f.body.push(Ins::F64Ne);
+    f.body.push(Ins::I32Or);
+    f.body.push(Ins::LocalGet(n));
+    f.body.push(Ins::F64Abs);
+    f.body.push(Ins::F64Const(f64::INFINITY));
+    f.body.push(Ins::F64Eq);
+    f.body.push(Ins::I32Or);
+    f.body.push(Ins::LocalGet(d));
+    f.body.push(Ins::F64Const(0.0));
+    f.body.push(Ins::F64Eq);
+    f.body.push(Ins::I32Or);
+    f.body.push(Ins::If(BlockType::Empty));
+    box_number(&[Ins::F64Const(f64::NAN)], &mut f.body);
+    f.body.push(Ins::Return);
+    f.body.push(Ins::End);
+
+    // Nothing to reduce: a zero dividend, an infinite divisor, or a dividend
+    // already smaller than the divisor. The answer is the dividend itself,
+    // sign and all.
+    f.body.push(Ins::LocalGet(n));
+    f.body.push(Ins::F64Abs);
+    f.body.push(Ins::LocalGet(d));
+    f.body.push(Ins::F64Abs);
+    f.body.push(Ins::F64Lt);
+    f.body.push(Ins::If(BlockType::Empty));
+    box_number(&[Ins::LocalGet(n)], &mut f.body);
+    f.body.push(Ins::Return);
+    f.body.push(Ins::End);
+
+    // From here both are finite, `d` is not zero, and `|n| >= |d|`. Work on
+    // magnitudes; `d` holds `|d|` for the rest of the function.
+    f.body.push(Ins::LocalGet(n));
+    f.body.push(Ins::F64Abs);
+    f.body.push(Ins::LocalSet(a));
+    f.body.push(Ins::LocalGet(d));
+    f.body.push(Ins::F64Abs);
+    f.body.push(Ins::LocalTee(d));
+    f.body.push(Ins::LocalSet(m));
+
+    // Scale up: the largest `|d| * 2^k` that does not pass `a`. `m + m`
+    // overflowing to infinity simply fails the test and ends the loop.
+    f.body.push(Ins::Block(BlockType::Empty));
+    f.body.push(Ins::Loop(BlockType::Empty));
+    f.body.push(Ins::LocalGet(m));
+    f.body.push(Ins::LocalGet(m));
+    f.body.push(Ins::F64Add);
+    f.body.push(Ins::LocalGet(a));
+    f.body.push(Ins::F64Le);
+    f.body.push(Ins::I32Eqz);
+    f.body.push(Ins::BrIf(1));
+    f.body.push(Ins::LocalGet(m));
+    f.body.push(Ins::LocalGet(m));
+    f.body.push(Ins::F64Add);
+    f.body.push(Ins::LocalSet(m));
+    f.body.push(Ins::Br(0));
+    f.body.push(Ins::End);
+    f.body.push(Ins::End);
+
+    // Walk back down. The invariant entering each turn is `a < 2m`, so every
+    // subtraction that happens is exact, and after the turn at `m == |d|` the
+    // remaining `a` is the answer.
+    f.body.push(Ins::Block(BlockType::Empty));
+    f.body.push(Ins::Loop(BlockType::Empty));
+    f.body.push(Ins::LocalGet(a));
+    f.body.push(Ins::LocalGet(m));
+    f.body.push(Ins::F64Ge);
+    f.body.push(Ins::If(BlockType::Empty));
+    f.body.push(Ins::LocalGet(a));
+    f.body.push(Ins::LocalGet(m));
+    f.body.push(Ins::F64Sub);
+    f.body.push(Ins::LocalSet(a));
+    f.body.push(Ins::End);
+    f.body.push(Ins::LocalGet(m));
+    f.body.push(Ins::LocalGet(d));
+    f.body.push(Ins::F64Eq);
+    f.body.push(Ins::BrIf(1));
+    f.body.push(Ins::LocalGet(m));
+    f.body.push(Ins::F64Const(0.5));
+    f.body.push(Ins::F64Mul);
+    f.body.push(Ins::LocalSet(m));
+    f.body.push(Ins::Br(0));
+    f.body.push(Ins::End);
+    f.body.push(Ins::End);
+
+    box_number(
+        &[Ins::LocalGet(a), Ins::LocalGet(n), Ins::F64Copysign],
+        &mut f.body,
+    );
     f
 }
 

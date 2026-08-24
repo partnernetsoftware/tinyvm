@@ -142,11 +142,13 @@ pub(crate) enum Ins {
     F64Gt,
     F64Le,
     F64Ge,
+    F64Abs,
     F64Neg,
     F64Add,
     F64Sub,
     F64Mul,
     F64Div,
+    F64Copysign,
     // conversions
     I32WrapI64,
     I64ExtendI32U,

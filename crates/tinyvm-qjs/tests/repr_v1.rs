@@ -293,11 +293,13 @@ fn ins_wat(ins: &Ins) -> String {
         Ins::F64Gt => "f64.gt".into(),
         Ins::F64Le => "f64.le".into(),
         Ins::F64Ge => "f64.ge".into(),
+        Ins::F64Abs => "f64.abs".into(),
         Ins::F64Neg => "f64.neg".into(),
         Ins::F64Add => "f64.add".into(),
         Ins::F64Sub => "f64.sub".into(),
         Ins::F64Mul => "f64.mul".into(),
         Ins::F64Div => "f64.div".into(),
+        Ins::F64Copysign => "f64.copysign".into(),
         Ins::I32WrapI64 => "i32.wrap_i64".into(),
         Ins::I64ExtendI32U => "i64.extend_i32_u".into(),
         Ins::F64ConvertI32S => "f64.convert_i32_s".into(),
@@ -576,6 +578,73 @@ fn subtraction_multiplication_and_division_go_through_to_number() {
     );
     assert!(
         Prog::binary(Rt::Div, V::Num(0.0), V::Num(0.0))
+            .number()
+            .is_nan()
+    );
+}
+
+/// `__rem` on its own, over the whole binary64 domain rather than the
+/// literals the front end can spell. Rust's `%` on `f64` is C's `fmod`, which
+/// is the operation ECMA-262 6.1.6.1.6 describes, so it is the oracle here.
+#[test]
+fn the_remainder_matches_fmod_over_the_whole_domain() {
+    let inf = f64::INFINITY;
+    let interesting: &[f64] = &[
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        2.0,
+        -2.0,
+        3.0,
+        -3.0,
+        5.5,
+        -5.5,
+        0.125,
+        1e-300,
+        1e300,
+        // The value a rounded quotient gets wrong: `x % 1000` is 608, and
+        // `x - trunc(x / 1000) * 1000` is -512.
+        2147483647.0 * 2147483647.0,
+        9007199254740993.0,
+        f64::MAX,
+        f64::MIN_POSITIVE,
+        inf,
+        -inf,
+        f64::NAN,
+    ];
+    for n in interesting {
+        for d in interesting {
+            let got = Prog::binary(Rt::Rem, V::Num(*n), V::Num(*d)).number();
+            let want = *n % *d;
+            assert!(
+                (got.is_nan() && want.is_nan()) || got.to_bits() == want.to_bits(),
+                "{n} % {d}: want {want}, got {got}"
+            );
+        }
+    }
+}
+
+/// `__rem` reaches `__to_number` for a non-Number operand, like every other
+/// arithmetic operator, rather than carrying its own coercion arms.
+#[test]
+fn the_remainder_coerces_through_to_number() {
+    assert_eq!(
+        Prog::binary(Rt::Rem, V::Num(5.0), V::Bool(true)).number(),
+        0.0
+    );
+    assert_eq!(
+        Prog::binary(Rt::Rem, V::Bool(true), V::Num(2.0)).number(),
+        1.0
+    );
+    assert!(
+        Prog::binary(Rt::Rem, V::Num(5.0), V::Undefined)
+            .number()
+            .is_nan()
+    );
+    // `null` is ToNumber 0, and a zero divisor is NaN.
+    assert!(
+        Prog::binary(Rt::Rem, V::Num(5.0), V::Null)
             .number()
             .is_nan()
     );

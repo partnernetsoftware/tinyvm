@@ -490,11 +490,13 @@ pub(crate) mod m1 {
                 Ins::F64Gt => ir::Ins::F64Gt,
                 Ins::F64Le => ir::Ins::F64Le,
                 Ins::F64Ge => ir::Ins::F64Ge,
+                Ins::F64Abs => ir::Ins::F64Abs,
                 Ins::F64Neg => ir::Ins::F64Neg,
                 Ins::F64Add => ir::Ins::F64Add,
                 Ins::F64Sub => ir::Ins::F64Sub,
                 Ins::F64Mul => ir::Ins::F64Mul,
                 Ins::F64Div => ir::Ins::F64Div,
+                Ins::F64Copysign => ir::Ins::F64Copysign,
                 Ins::I32WrapI64 => ir::Ins::I32WrapI64,
                 Ins::I64ExtendI32U => ir::Ins::I64ExtendI32U,
                 Ins::F64ConvertI32S => ir::Ins::F64ConvertI32S,
@@ -1022,7 +1024,7 @@ pub(crate) mod m1 {
                 ast::ExprKind::Binary(op, lhs, rhs) => {
                     self.expr(lhs)?;
                     self.expr(rhs)?;
-                    let call = self.ctx.call(binary(*op, rhs.span)?);
+                    let call = self.ctx.call(binary(*op));
                     self.push(call);
                     Ok(())
                 }
@@ -1194,7 +1196,7 @@ pub(crate) mod m1 {
                 Some(op) => {
                     self.load(place);
                     self.expr(value)?;
-                    let call = self.ctx.call(binary(op, target.span)?);
+                    let call = self.ctx.call(binary(op));
                     self.push(call);
                 }
             }
@@ -1267,22 +1269,13 @@ pub(crate) mod m1 {
     /// Which runtime function an operator is. Every one of them is a call:
     /// dispatching on the operand types is what a dynamic `+` means, and
     /// inlining it is an optimisation this compiler does not have.
-    fn binary(op: ast::BinaryOp, span: ast::Span) -> Result<Rt, CompileError> {
-        Ok(match op {
+    fn binary(op: ast::BinaryOp) -> Rt {
+        match op {
             ast::BinaryOp::Add => Rt::Add,
             ast::BinaryOp::Sub => Rt::Sub,
             ast::BinaryOp::Mul => Rt::Mul,
             ast::BinaryOp::Div => Rt::Div,
-            // The emitted runtime has no `__rem`. `f64` has no remainder
-            // instruction -- ECMA-262 6.1.6.1.6 is `x - trunc(x/y)*y` -- so it
-            // is a runtime function to be written, not a missing opcode.
-            ast::BinaryOp::Rem => {
-                return Err(unsupported(
-                    Boundary::Subset,
-                    "the remainder operator `%`",
-                    span.offset(),
-                ));
-            }
+            ast::BinaryOp::Rem => Rt::Rem,
             ast::BinaryOp::Lt => Rt::Lt,
             ast::BinaryOp::Le => Rt::Le,
             ast::BinaryOp::Gt => Rt::Gt,
@@ -1291,6 +1284,6 @@ pub(crate) mod m1 {
             ast::BinaryOp::Ne => Rt::Ne,
             ast::BinaryOp::StrictEq => Rt::StrictEq,
             ast::BinaryOp::StrictNe => Rt::StrictNe,
-        })
+        }
     }
 }

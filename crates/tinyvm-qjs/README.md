@@ -57,11 +57,14 @@ instance's linear memory, not text, and resolving it needs the instance.
   recursion and mutual recursion. Calls are direct: a callee has to be a name
   bound to a known function.
 - **Operators**: every rung the ladder has — assignment and its compound forms,
-  `||`, `&&`, `==`/`!=`/`===`/`!==`, `<` `<=` `>` `>=`, `+` `-`, `*` `/`, prefix
-  and postfix `++`/`--`, unary `+ - !`, and grouping. `&&` and `||`
-  short-circuit; `+` concatenates when either side is a string.
-  `%` and `typeof` are parsed and then named as boundaries — the ladder has the
-  rung, the runtime does not have the operation.
+  `||`, `&&`, `==`/`!=`/`===`/`!==`, `<` `<=` `>` `>=`, `+` `-`, `*` `/` `%`,
+  prefix and postfix `++`/`--`, unary `+ - !`, and grouping. `&&` and `||`
+  short-circuit; `+` concatenates when either side is a string. `%` is
+  ECMA-262's remainder, with the sign of the dividend and exact for operands a
+  rounded quotient would get wrong — `-6 % 3` is `-0` and
+  `2147483647 * 2147483647 % 1000` is `608`.
+  `typeof` is parsed and then named as a boundary — the ladder has the rung,
+  the runtime does not have the operation.
 - **ASI**: ECMA-262 12.10, split where the spec splits it. Rule 3 is a fact about
   the token stream and lives in the lexer; rules 1 and 2 need a parser and live
   in the parser; the `for`-header override lives where the grammar position is.
@@ -70,7 +73,7 @@ instance's linear memory, not text, and resolving it needs the instance.
 
 Objects, arrays, member access, closures that capture, function values, `class`,
 `throw`/`try`, `for…of`, `break`/`continue`, `switch`, template literals, the
-bitwise and shift levels, `?:`, the comma operator, `**`, `??`, BigInt, `%`,
+bitwise and shift levels, `?:`, the comma operator, `**`, `??`, BigInt,
 `typeof`, and the numeric literal forms above.
 
 Each rejection is a `CompileError` whose sentence names the *engine's* boundary

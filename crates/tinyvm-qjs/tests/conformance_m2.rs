@@ -287,20 +287,93 @@ fn the_integer_literal_range_is_the_signed_32_bit_one() {
     }
 }
 
-/// 6.1.6.1.6 defines `%` as `x - trunc(x / y) * y`, which is a runtime
-/// function nobody has written yet rather than a missing opcode.
-///
-/// DIVERGENCE: `1 % 2` is 1 in JavaScript. Retire when `__rem` lands.
+/// 6.1.6.1.6, Number::remainder. The result takes the sign of the *dividend*,
+/// which is what separates it from a modulo: `-5 % 3` is `-2`, not `1`.
 #[test]
-fn the_remainder_operator_is_the_one_arithmetic_hole() {
-    for source in ["1 % 2", "let x = 5; x %= 2; return x;"] {
-        let e = refuse(source);
-        assert_eq!(
-            e.message, "this engine does not support the remainder operator `%` yet",
-            "{source:?}"
+fn the_remainder_takes_the_sign_of_the_dividend() {
+    number("5 % 3", 2.0);
+    number("-5 % 3", -2.0);
+    number("5 % -3", 2.0);
+    number("-5 % -3", -2.0);
+    // A zero result keeps the dividend's sign too, which is the only way to
+    // see the difference between `6 % 3` and `-6 % 3`.
+    number("6 % 3", 0.0);
+    number("-6 % 3", -0.0);
+    number("1 / (-6 % 3)", f64::NEG_INFINITY);
+    // Fractional operands, spelled without a fractional literal.
+    number("11 / 2 % 2", 1.5);
+    number("-11 / 2 % 2", -1.5);
+    number("1 % (3 / 2)", 1.0);
+    number("let x = 5; x %= 2; return x;", 1.0);
+}
+
+/// The non-finite arms of 6.1.6.1.6, each of which is a named step rather
+/// than something the arithmetic falls into.
+#[test]
+fn the_remainder_has_the_five_special_cases_the_spec_names() {
+    // A zero divisor is NaN, not a trap: JavaScript has one numeric type and
+    // NaN is in it. (`/` and `%` diverge at M0, where there is no NaN to be.)
+    number("5 % 0", f64::NAN);
+    number("0 % 0", f64::NAN);
+    // An infinite dividend is NaN whatever the divisor is.
+    number("1 / 0 % 2", f64::NAN);
+    number("-1 / 0 % 2", f64::NAN);
+    // An infinite divisor gives back the dividend, sign and all.
+    number("5 % (1 / 0)", 5.0);
+    number("-5 % (1 / 0)", -5.0);
+    number("-5 % (-1 / 0)", -5.0);
+    // A zero dividend gives back the dividend, sign and all.
+    number("0 % 5", 0.0);
+    number("-0 % 5", -0.0);
+    number("1 / (-0 % 5)", f64::NEG_INFINITY);
+    // NaN on either side.
+    number("0 / 0 % 2", f64::NAN);
+    number("2 % (0 / 0)", f64::NAN);
+    // A dividend smaller in magnitude than the divisor is itself.
+    number("2 % 5", 2.0);
+    number("-2 % 5", -2.0);
+}
+
+/// 6.1.6.1.6's `q` is "an integer ... whose magnitude is as large as possible
+/// without exceeding the magnitude of the *true mathematical quotient*". That
+/// is an exact statement about real arithmetic, and the obvious transcription
+/// `x - trunc(x / y) * y` does not implement it: `x / y` is rounded first, so
+/// the subtraction is of the wrong multiple.
+///
+/// `2147483647 * 2147483647` is 4611686014132420608 as a double. Its true
+/// remainder by 1000 is 608; the transcription yields -512, which is not even
+/// in range. These three cases are the ones that make `__rem` a real
+/// algorithm rather than three instructions.
+#[test]
+fn the_remainder_is_exact_where_a_rounded_quotient_is_not() {
+    let big = 2147483647.0f64 * 2147483647.0f64;
+    for divisor in [1000.0f64, 10.0, 5.0, 7.0, 3.0] {
+        number(
+            &format!("2147483647 * 2147483647 % {divisor}"),
+            big % divisor,
         );
-        assert_eq!(e.boundary, Boundary::Subset);
     }
+    // Spelled out, so a reader can see the numbers the comment claims.
+    number("2147483647 * 2147483647 % 1000", 608.0);
+    number("2147483647 * 2147483647 % 10", 8.0);
+    number("2147483647 * 2147483647 % 5", 3.0);
+    // A tiny divisor against a huge dividend: the scaling loop's long path.
+    number("2147483647 * 2147483647 % (1 / 8)", big % 0.125);
+}
+
+/// `%` sits on the multiplicative rung with `*` and `/`, left associative
+/// (13.7), and above `+` (13.8).
+#[test]
+fn the_remainder_binds_where_the_multiplicative_rung_is() {
+    // `(7 % 5) % 3` is 2; `7 % (5 % 3)` is 1.
+    number("7 % 5 % 3", 2.0);
+    // `(10 % 4) * 3` is 6; `10 % (4 * 3)` is 10.
+    number("10 % 4 * 3", 6.0);
+    // `1 + (7 % 4)` is 4; `(1 + 7) % 4` is 0.
+    number("1 + 7 % 4", 4.0);
+    // Unary minus binds tighter than `%`: `(-7) % 4` is -3, `-(7 % 4)` is -3
+    // as well, so the readable claim is the divisor side: `7 % -4` is 3.
+    number("7 % -4", 3.0);
 }
 
 // =========================================================================
@@ -1275,7 +1348,6 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     ("0b101", "binary number literals"),
     ("2147483648", "integers outside the signed 32-bit range"),
     // -- operators ----------------------------------------------------------
-    ("1 % 2", "the remainder operator `%`"),
     ("2 ** 3", "exponentiation"),
     ("1 & 2", "bitwise operators"),
     ("1 | 2", "bitwise operators"),
@@ -1396,7 +1468,7 @@ fn no_diagnostic_blames_the_script() {
 #[test]
 fn a_diagnostic_points_at_the_construct_it_names() {
     assert_eq!(refuse("1 + 0x10").offset, 4);
-    assert_eq!(refuse("let x = 1; x % 2;").offset, 15);
+    assert_eq!(refuse("let x = 1; x ** 2;").offset, 13);
     assert_eq!(refuse("let a = 1;\nlet b = 1.5;").offset, 19);
 }
 
@@ -1404,7 +1476,6 @@ fn a_diagnostic_points_at_the_construct_it_names() {
 /// core gets the terse form of the same fact.
 #[test]
 fn the_boundary_is_classified_not_just_worded() {
-    assert_eq!(refuse("1 % 2").boundary, Boundary::Subset);
     assert_eq!(refuse("2 ** 3").boundary, Boundary::Subset);
     assert_eq!(
         refuse("let a = [1]; return 0;").boundary,

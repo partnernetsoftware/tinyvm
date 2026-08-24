@@ -46,9 +46,10 @@
 //! the world [`eval_qjs`] runs in.
 //!
 //! Everything else is rejected with a diagnostic that names the engine's
-//! boundary rather than blaming the script; see [`CompileError`]. `/` and `%`
-//! diverge from JavaScript on a zero divisor, deliberately and for a documented
-//! reason — see the `emit` module.
+//! boundary rather than blaming the script; see [`CompileError`]. At M0 `/` and
+//! `%` diverge from JavaScript on a zero divisor, deliberately and for a
+//! documented reason — see the `emit` module. At M1 they do not: there is a
+//! real `Infinity` and a real `NaN` for them to be.
 //!
 //! Full JS is not a converter and is not this crate — yet. The subset grows by
 //! real script demand, and every rejection says which construct is ahead of the
