@@ -1718,8 +1718,8 @@ boundary. A second aggregate ceiling admits at most 1,048,576 live locals,
 operand values and control frames across the current function plus every
 suspended caller. The runtime checks that ceiling before allocating a new wide
 activation and grows the activation/caller vectors fallibly, so a legal large
-locals declaration multiplied by recursion becomes a typed `call stack` trap
-rather than an allocator abort.
+locals declaration multiplied by recursion becomes a typed
+`Trap("activation slot limit")` rather than an allocator abort.
 
 This is an interpreter architecture invariant, not a game-specific behavior.
 It makes ordinary recursion, indirect dispatch, tail calls and versioned native

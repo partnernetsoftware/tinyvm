@@ -41,6 +41,7 @@ pub const WASM_MAX_DEPTH: usize = 512;
 /// Maximum aggregate value/control slots held by the active function and all
 /// suspended callers in one top-level invocation. This bounds guest call-stack
 /// heap independently of linear memory and instruction fuel.
+/// Exceeding it is a loud `Trap("activation slot limit")`.
 pub const WASM_MAX_ACTIVATION_SLOTS: usize = 1 << 20;
 /// Max executed instructions per top-level [`Module::invoke`].
 pub const WASM_MAX_STEPS: u64 = 16_000_000;
@@ -610,10 +611,10 @@ impl Store {
                         .ok_or(WasmError::Trap("call depth"))?;
                     let foreign_base_slots = call_base_slots
                         .checked_add(continuation.suspended_slots)
-                        .ok_or(WasmError::Trap("call stack"))?;
+                        .ok_or_else(slot_overflow)?;
                     suspended
                         .try_reserve(1)
-                        .map_err(|_| WasmError::Trap("call stack"))?;
+                        .map_err(|_| call_stack_allocation())?;
                     suspended.push((instance_id, continuation, call_base_depth, call_base_slots));
                     entry = StoreEntry::Call {
                         address,
@@ -818,11 +819,11 @@ impl Memory {
         }
         let size = min
             .checked_mul(WASM_PAGE_SIZE)
-            .ok_or(WasmError::Trap("memory size"))?;
+            .ok_or(WasmError::Trap("memory size overflow"))?;
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(size)
-            .map_err(|_| WasmError::Trap("memory size"))?;
+            .map_err(|_| WasmError::Trap("memory allocation"))?;
         bytes.resize(size, 0);
         Ok(Self {
             state: Rc::new(MemoryState {
@@ -875,7 +876,7 @@ impl Memory {
     fn grow_to(&self, new_pages: usize) -> Result<bool, WasmError> {
         let new_size = new_pages
             .checked_mul(WASM_PAGE_SIZE)
-            .ok_or(WasmError::Trap("memory size"))?;
+            .ok_or(WasmError::Trap("memory size overflow"))?;
         let mut bytes = self
             .state
             .bytes
@@ -883,7 +884,7 @@ impl Memory {
             .map_err(|_| WasmError::Trap("memory is already borrowed"))?;
         let extra = new_size
             .checked_sub(bytes.len())
-            .ok_or(WasmError::Trap("memory size"))?;
+            .ok_or(WasmError::Trap("memory size accounting"))?;
         if bytes.try_reserve(extra).is_err() {
             return Ok(false);
         }
@@ -996,10 +997,10 @@ impl MemorySlot {
             Self::Defined { bytes, .. } => {
                 let new_size = new_pages
                     .checked_mul(WASM_PAGE_SIZE)
-                    .ok_or(WasmError::Trap("memory size"))?;
+                    .ok_or(WasmError::Trap("memory size overflow"))?;
                 let extra = new_size
                     .checked_sub(bytes.len())
-                    .ok_or(WasmError::Trap("memory size"))?;
+                    .ok_or(WasmError::Trap("memory size accounting"))?;
                 if bytes.try_reserve(extra).is_err() {
                     return Ok(false);
                 }
@@ -1167,6 +1168,25 @@ impl Global {
 
 /// A decode-time or run-time WebAssembly fault. Messages are `&'static str`
 /// so the crate never pulls in the formatting machinery.
+///
+/// Without formatting, [`WasmError::message`] is the only thing an embedder can
+/// classify on, so conditions that call for different handling carry different
+/// literals rather than one shared word. The resource ceilings and the
+/// allocation/accounting faults next to them are:
+///
+/// | message | condition |
+/// | --- | --- |
+/// | `call depth` | `Limits::max_call_depth` reached |
+/// | `activation slot limit` | `Limits::max_activation_slots` reached |
+/// | `activation slot overflow` | slot accounting overflowed (internal invariant) |
+/// | `call stack allocation` | the allocator refused to grow the activation vectors |
+/// | `operand stack` | `WASM_STACK_LIMIT` reached, or the operand stack could not grow |
+/// | `control stack` | the control-frame vector could not grow |
+/// | `step budget` | `Limits::max_steps` reached |
+/// | `memory page limit` | declared or grown pages exceed `Limits::max_memory_pages` |
+/// | `memory allocation` | the allocator refused a linear-memory buffer |
+/// | `memory size overflow` | a page-to-byte size computation overflowed |
+/// | `memory size accounting` | a memory size went backwards (internal invariant) |
 #[cfg_attr(test, derive(Debug))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WasmError {
@@ -4514,7 +4534,7 @@ impl DefinedActivation {
             .len()
             .checked_add(self.stack.len())
             .and_then(|slots| slots.checked_add(self.control.len()))
-            .ok_or(WasmError::Trap("call stack"))
+            .ok_or_else(slot_overflow)
     }
 }
 
@@ -4816,10 +4836,10 @@ impl Module {
         let initial_pages = defined_memories.iter().try_fold(0usize, |total, memory| {
             total
                 .checked_add(memory.min)
-                .ok_or(WasmError::Trap("memory size"))
+                .ok_or(WasmError::Trap("memory size overflow"))
         })?;
         if initial_pages > limits.max_memory_pages {
-            return Err(WasmError::Trap("memory size"));
+            return Err(WasmError::Trap("memory page limit"));
         }
         for segment in &data {
             if let DataMode::Active { memory, offset } = &segment.mode {
@@ -4831,7 +4851,7 @@ impl Module {
                 let memory_bytes = memory
                     .min
                     .checked_mul(WASM_PAGE_SIZE)
-                    .ok_or(WasmError::Decode("memory size"))?;
+                    .ok_or(WasmError::Decode("memory size overflow"))?;
                 if !memory.imported
                     && let Some(Val::I32(offset)) = static_const_value(offset)?
                 {
@@ -5779,7 +5799,7 @@ impl Module {
             .exports
             .get(name)
             .copied()
-            .ok_or(WasmError::Trap("no exported function named `"))?;
+            .ok_or(WasmError::Trap("no exported function named"))?;
         self.invoke_val(idx, args)
     }
 
@@ -5834,7 +5854,7 @@ impl Module {
         let mut memories = Vec::new();
         memories
             .try_reserve_exact(self.memories.len())
-            .map_err(|_| WasmError::Trap("memory size"))?;
+            .map_err(|_| WasmError::Trap("memory allocation"))?;
         for descriptor in &self.memories {
             let memory = if descriptor.imported {
                 MemorySlot::Imported(
@@ -5847,11 +5867,11 @@ impl Module {
                 let size = descriptor
                     .min
                     .checked_mul(WASM_PAGE_SIZE)
-                    .ok_or(WasmError::Trap("memory size"))?;
+                    .ok_or(WasmError::Trap("memory size overflow"))?;
                 let mut bytes = Vec::new();
                 bytes
                     .try_reserve_exact(size)
-                    .map_err(|_| WasmError::Trap("memory size"))?;
+                    .map_err(|_| WasmError::Trap("memory allocation"))?;
                 bytes.resize(size, 0);
                 MemorySlot::Defined {
                     bytes,
@@ -5861,7 +5881,7 @@ impl Module {
             memories.push(memory);
         }
         if aggregate_memory_pages(&memories)? > self.limits.max_memory_pages {
-            return Err(WasmError::Trap("memory size"));
+            return Err(WasmError::Trap("memory page limit"));
         }
         for segment in &self.data {
             if let DataMode::Active { memory, offset } = &segment.mode {
@@ -6201,7 +6221,7 @@ impl Module {
             .filter(|&slots| slots <= available_slots)
             .is_none()
         {
-            return Err(WasmError::Trap("call stack"));
+            return Err(WasmError::Trap("activation slot limit"));
         }
         // The caller already built `args` as an owned, exactly-sized buffer.
         // Allocating a second buffer and copying the arguments across cost one
@@ -6480,12 +6500,12 @@ impl Module {
             let total_suspended_slots = context
                 .base_slots
                 .checked_add(suspended_slots)
-                .ok_or(WasmError::Trap("call stack"))?;
+                .ok_or_else(slot_overflow)?;
             let available_slots = self
                 .limits
                 .max_activation_slots
                 .checked_sub(total_suspended_slots)
-                .ok_or(WasmError::Trap("call stack"))?;
+                .ok_or(WasmError::Trap("activation slot limit"))?;
             let outcome = if let Some(values) = pending_values.take() {
                 DefinedOutcome::Values(values)
             } else if let Some(current) = activation.take() {
@@ -6515,21 +6535,24 @@ impl Module {
                         .checked_add(result_count)
                         .filter(|&slots| slots <= self.limits.max_activation_slots)
                         .is_none()
-                        || caller
-                            .stack
-                            .len()
-                            .checked_add(result_count)
-                            .filter(|&len| len <= WASM_STACK_LIMIT)
-                            .is_none()
                     {
-                        return Err(WasmError::Trap("call stack"));
+                        return Err(WasmError::Trap("activation slot limit"));
+                    }
+                    if caller
+                        .stack
+                        .len()
+                        .checked_add(result_count)
+                        .filter(|&len| len <= WASM_STACK_LIMIT)
+                        .is_none()
+                    {
+                        return Err(WasmError::Trap("operand stack"));
                     }
                     // Reserve the suspended destination before the host can
                     // mutate memory or embedding state.
                     caller
                         .stack
                         .try_reserve(result_count)
-                        .map_err(|_| WasmError::Trap("call stack"))?;
+                        .map_err(|_| WasmError::Trap("operand stack"))?;
                 }
                 if let HostBinding::Wasm { function, .. } = &self.hosts[index].binding {
                     let function_type = self.hosts[index]
@@ -6606,10 +6629,10 @@ impl Module {
                         let caller_slots = caller.live_slots()?;
                         suspended_slots = suspended_slots
                             .checked_sub(caller_slots)
-                            .ok_or(WasmError::Trap("call stack"))?;
+                            .ok_or_else(slot_overflow)?;
                         let resumed_slots = caller_slots
                             .checked_add(values.len())
-                            .ok_or(WasmError::Trap("call stack"))?;
+                            .ok_or_else(slot_overflow)?;
                         let available_slots = self
                             .limits
                             .max_activation_slots
@@ -6617,16 +6640,16 @@ impl Module {
                                 context
                                     .base_slots
                                     .checked_add(suspended_slots)
-                                    .ok_or(WasmError::Trap("call stack"))?,
+                                    .ok_or_else(slot_overflow)?,
                             )
-                            .ok_or(WasmError::Trap("call stack"))?;
+                            .ok_or(WasmError::Trap("activation slot limit"))?;
                         if resumed_slots > available_slots {
-                            return Err(WasmError::Trap("call stack"));
+                            return Err(WasmError::Trap("activation slot limit"));
                         }
                         caller
                             .stack
                             .try_reserve(values.len())
-                            .map_err(|_| WasmError::Trap("call stack"))?;
+                            .map_err(|_| WasmError::Trap("operand stack"))?;
                         values.append_to(&mut caller.stack);
                         activation = Some(caller);
                     } else {
@@ -6650,18 +6673,18 @@ impl Module {
                     }
                     callers
                         .try_reserve(1)
-                        .map_err(|_| WasmError::Trap("call stack"))?;
+                        .map_err(|_| call_stack_allocation())?;
                     let caller_slots = caller.live_slots()?;
                     suspended_slots = suspended_slots
                         .checked_add(caller_slots)
-                        .ok_or(WasmError::Trap("call stack"))?;
+                        .ok_or_else(slot_overflow)?;
                     if context
                         .base_slots
                         .checked_add(suspended_slots)
                         .filter(|&slots| slots <= self.limits.max_activation_slots)
                         .is_none()
                     {
-                        return Err(WasmError::Trap("call stack"));
+                        return Err(WasmError::Trap("activation slot limit"));
                     }
                     callers.push(caller);
                     index = next;
@@ -6689,18 +6712,18 @@ impl Module {
                     }
                     callers
                         .try_reserve(1)
-                        .map_err(|_| WasmError::Trap("call stack"))?;
+                        .map_err(|_| call_stack_allocation())?;
                     let caller_slots = caller.live_slots()?;
                     suspended_slots = suspended_slots
                         .checked_add(caller_slots)
-                        .ok_or(WasmError::Trap("call stack"))?;
+                        .ok_or_else(slot_overflow)?;
                     if context
                         .base_slots
                         .checked_add(suspended_slots)
                         .filter(|&slots| slots <= self.limits.max_activation_slots)
                         .is_none()
                     {
-                        return Err(WasmError::Trap("call stack"));
+                        return Err(WasmError::Trap("activation slot limit"));
                     }
                     callers.push(caller);
                     return Ok(CallBoundary::Foreign {
@@ -6755,7 +6778,7 @@ impl Module {
                 .len()
                 .checked_add(stack.len())
                 .and_then(|slots| slots.checked_add(control.len()))
-                .ok_or(WasmError::Trap("call stack"))?;
+                .ok_or_else(slot_overflow)?;
             *steps += 1;
             if *steps > self.limits.max_steps {
                 return Err(WasmError::Trap("step budget"));
@@ -6764,14 +6787,14 @@ impl Module {
                 return Err(WasmError::Trap("operand stack"));
             }
             if live_slots > resources.available_slots {
-                return Err(WasmError::Trap("call stack"));
+                return Err(WasmError::Trap("activation slot limit"));
             }
             resources.stats.observe(
                 resources.call_depth,
                 resources
                     .suspended_slots
                     .checked_add(live_slots)
-                    .ok_or(WasmError::Trap("call stack"))?,
+                    .ok_or_else(slot_overflow)?,
             );
             if pc >= func.code.len() {
                 return finish_defined(&mut stack, func.arity);
@@ -8439,7 +8462,7 @@ impl Instance {
             .exports
             .get(name)
             .copied()
-            .ok_or(WasmError::Trap("no exported function named `"))?;
+            .ok_or(WasmError::Trap("no exported function named"))?;
         self.invoke_val(idx, args)
     }
 
@@ -8848,7 +8871,7 @@ fn aggregate_memory_pages(memories: &[MemorySlot]) -> Result<usize, WasmError> {
         }
         total = total
             .checked_add(memory.pages())
-            .ok_or(WasmError::Trap("memory size"))?;
+            .ok_or(WasmError::Trap("memory size overflow"))?;
     }
     Ok(total)
 }
@@ -9509,6 +9532,26 @@ fn simd_int_binary(
     result
 }
 
+/// The allocator refused to grow one of the vectors that hold the guest call
+/// stack. Outlined and `#[cold]` so the activation trampoline's error paths
+/// stay one shared call instead of a materialised literal per site; inlining
+/// this literal costs measurably more static core than the call does.
+#[cold]
+#[inline(never)]
+fn call_stack_allocation() -> WasmError {
+    WasmError::Trap("call stack allocation")
+}
+
+/// Slot accounting over- or underflowed. Distinct from `activation slot limit`:
+/// the host budget was not reached, the running total stopped being
+/// representable, which no reachable guest should manage. Outlined for the same
+/// static-core reason as [`call_stack_allocation`]; it has ten call sites.
+#[cold]
+#[inline(never)]
+fn slot_overflow() -> WasmError {
+    WasmError::Trap("activation slot overflow")
+}
+
 fn i32_args_to_vals(args: &[i32]) -> Result<Vec<Val>, WasmError> {
     let mut values = Vec::new();
     values
@@ -9546,7 +9589,7 @@ fn push_operand(
     }
     // The dispatch loop already proved `live_slots <= available_slots`.
     if live_slots >= available_slots {
-        return Err(WasmError::Trap("call stack"));
+        return Err(WasmError::Trap("activation slot limit"));
     }
     if stack.len() == stack.capacity() {
         stack
@@ -9567,7 +9610,7 @@ fn reserve_control_growth(
     // loops add one live slot; `if` consumes its condition before pushing the
     // control frame and therefore remains count-neutral.
     if adds_live_slot && live_slots >= available_slots {
-        return Err(WasmError::Trap("call stack"));
+        return Err(WasmError::Trap("activation slot limit"));
     }
     control
         .try_reserve(1)
@@ -9632,6 +9675,25 @@ fn do_branch(stack: &mut Vec<Val>, control: &mut Vec<Frame>, l: u32) -> Result<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The guest call stack has four separable failure conditions. Two of them
+    // — allocator refusal and slot-accounting overflow — are raised through
+    // outlined cold constructors that no guest input can reach, so nothing else
+    // in the suite would notice if one silently took the other's message.
+    #[test]
+    fn call_stack_conditions_keep_separate_messages() {
+        let messages = [
+            call_stack_allocation().message(),
+            slot_overflow().message(),
+            "activation slot limit",
+            "operand stack",
+            "call depth",
+        ];
+        for (index, message) in messages.iter().enumerate() {
+            assert!(!message.is_empty());
+            assert!(!messages[..index].contains(message), "duplicate: {message}");
+        }
+    }
 
     // Acceptance 1: a real function body — (i32.const 40)(i32.const 2) i32.add.
     #[test]

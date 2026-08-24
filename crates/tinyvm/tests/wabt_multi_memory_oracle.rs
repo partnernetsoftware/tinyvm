@@ -44,7 +44,7 @@ fn wabt_compiled_multi_memory_matches_tinyvm() {
     };
     assert!(matches!(
         WasmModule::from_bytes_with(&bytes, one_page),
-        Err(WasmError::Trap("memory size"))
+        Err(WasmError::Trap("memory page limit"))
     ));
 
     let two_pages = Limits {

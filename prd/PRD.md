@@ -116,7 +116,8 @@ tinyvm (35)                                      [~]
 │       ├── explicit guest call stack                     [x]
 │       │   ├── host-owned call-depth ceiling             [x]
 │       │   ├── host-owned activation-slot ceiling        [x]
-│       │   └── fallible execution-stack growth           [x]
+│       │   ├── fallible execution-stack growth           [x]
+│       │   └── one trap message per ceiling              [x]
 │       ├── memory budget                                 [x]
 │       ├── table budget                                  [x]
 │       ├── deterministic execution stats                 [x]
@@ -326,6 +327,12 @@ as “almost approved” or “safe to ship externally.”
   never abort the process while attempting an infallible allocation.
 - Load-time type/structure errors fail before a module becomes invokable. Runtime traps
   remain local to the affected instance.
+- 核 fmt-free，`WasmError::message()` 是下游唯一能分类的通道，所以每一种要分开处理的条件
+  各占一句 `&'static str`，不共用一个含混词。上限一句一个：`call depth` /
+  `activation slot limit` / `operand stack` / `control stack` / `step budget` /
+  `memory page limit`；旁边的分配与记账失败也各自成句：`call stack allocation` /
+  `activation slot overflow` / `memory allocation` / `memory size overflow` /
+  `memory size accounting`。文案表在 `WasmError` 的文档注释里。
 
 ### 4. VM capability and TinyArcade profile are separate
 

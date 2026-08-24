@@ -1676,7 +1676,7 @@ fn host_profile_is_canonical_and_checks_exact_standard_imports() {
     );
     assert!(matches!(
         tight.inspect_cartridge(&two_page_wasm),
-        Err(WasmError::Trap("memory size"))
+        Err(WasmError::Trap("memory page limit"))
     ));
 
     let mut duplicate = encoded.clone();

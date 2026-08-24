@@ -3,6 +3,7 @@
 use tinyvm::wasm::WASM_MAX_DECODE_ITEMS;
 use tinyvm::wasm::WASM_MAX_DEPTH;
 use tinyvm::wasm::WASM_PAGE_SIZE;
+use tinyvm::wasm::WASM_STACK_LIMIT;
 use tinyvm::{Limits, Val, WasmError, WasmModule};
 
 // (global (mut i32) (i32.const 0))
@@ -136,7 +137,7 @@ fn memory_budget_rejects_initial_min_and_caps_grow() {
     };
     assert!(matches!(
         WasmModule::from_bytes_with(MEMORY_MIN_3, limits),
-        Err(WasmError::Trap("memory size"))
+        Err(WasmError::Trap("memory page limit"))
     ));
 
     let module = must_ok(
@@ -309,7 +310,7 @@ fn guest_call_stack_aggregate_slots_trap_before_next_activation_allocation() {
     let mut instance = must_ok(module.instantiate(), "instantiate wide countdown");
     assert!(matches!(
         instance.invoke_val(0, &[Val::I32(5)]),
-        Err(WasmError::Trap("call stack"))
+        Err(WasmError::Trap("activation slot limit"))
     ));
 }
 
@@ -359,7 +360,7 @@ fn call_stack_limits_are_host_owned_and_fail_at_exact_boundaries() {
     let mut instance = must_ok(module.instantiate(), "instantiate slot-bounded countdown");
     assert!(matches!(
         instance.invoke_val(countdown, &[Val::I32(2)]),
-        Err(WasmError::Trap("call stack"))
+        Err(WasmError::Trap("activation slot limit"))
     ));
     assert_eq!(instance.last_peak_activation_slots(), 5);
 }
@@ -379,7 +380,7 @@ fn operand_and_control_growth_are_preflighted_at_host_slot_boundary() {
     let mut operand = must_ok(operand.instantiate(), "instantiate one-push function");
     assert!(matches!(
         operand.invoke_val(function, &[]),
-        Err(WasmError::Trap("call stack"))
+        Err(WasmError::Trap("activation slot limit"))
     ));
     assert_eq!(operand.last_peak_activation_slots(), 1);
 
@@ -391,7 +392,142 @@ fn operand_and_control_growth_are_preflighted_at_host_slot_boundary() {
     let mut control = must_ok(control.instantiate(), "instantiate nested-block function");
     assert!(matches!(
         control.invoke_val(function, &[]),
-        Err(WasmError::Trap("call stack"))
+        Err(WasmError::Trap("activation slot limit"))
     ));
     assert_eq!(control.last_peak_activation_slots(), 1);
+}
+
+// A downstream embedder can only classify a fault by `WasmError::message`,
+// because the core is fmt-free. Every ceiling a guest can reach must therefore
+// carry its own literal: one opaque "call stack" for four different conditions
+// left the embedder unable to tell "raise the slot budget" from "this guest
+// pushes too deep an operand stack" from "the allocator said no".
+fn must_trap<T>(result: Result<T, WasmError>, context: &str) -> &'static str {
+    match result {
+        Ok(_value) => panic!("{context}: expected a trap"),
+        Err(error) => error.message(),
+    }
+}
+
+#[test]
+fn each_execution_ceiling_reports_its_own_message() {
+    fn countdown(limits: Limits) -> (WasmModule, usize) {
+        let mut module = WasmModule::new_with_limits(limits);
+        let function = must_ok(
+            module.add_function(
+                1,
+                0,
+                1,
+                &[
+                    0x20, 0x00, 0x45, 0x04, 0x7F, 0x41, 0x2A, 0x05, 0x20, 0x00, 0x41, 0x01, 0x6B,
+                    0x10, 0x00, 0x0B, 0x0B,
+                ],
+            ),
+            "add countdown",
+        );
+        (module, function)
+    }
+
+    // The same guest, driven into two different ceilings, must not report the
+    // same string.
+    let (module, countdown_idx) = countdown(Limits {
+        max_call_depth: 2,
+        ..Limits::default()
+    });
+    let mut depth_bound = must_ok(module.instantiate(), "instantiate depth-bounded countdown");
+    let depth = must_trap(
+        depth_bound.invoke_val(countdown_idx, &[Val::I32(8)]),
+        "call-depth ceiling",
+    );
+
+    let (module, countdown_idx) = countdown(Limits {
+        max_call_depth: WASM_MAX_DEPTH,
+        max_activation_slots: 6,
+        ..Limits::default()
+    });
+    let mut slot_bound = must_ok(module.instantiate(), "instantiate slot-bounded countdown");
+    let slots = must_trap(
+        slot_bound.invoke_val(countdown_idx, &[Val::I32(8)]),
+        "activation-slot ceiling",
+    );
+
+    assert_eq!(depth, "call depth");
+    assert_eq!(slots, "activation slot limit");
+    assert_ne!(depth, slots);
+
+    // One straightline push-only body, run twice. Under the default host slot
+    // budget the fixed operand-stack ceiling is the binding one; under a tight
+    // slot budget the aggregate ceiling is. Two ceilings, two messages.
+    let mut body = Vec::new();
+    for _ in 0..=WASM_STACK_LIMIT {
+        body.extend_from_slice(&[0x41, 0x2A]);
+    }
+    body.push(0x0B);
+
+    let mut wide = WasmModule::new();
+    let pusher = must_ok(wide.add_function(0, 0, 1, &body), "add push-only function");
+    let mut wide = must_ok(wide.instantiate(), "instantiate push-only function");
+    let operand = must_trap(wide.invoke_val(pusher, &[]), "fixed operand-stack ceiling");
+
+    let mut tight = WasmModule::new_with_limits(Limits {
+        max_activation_slots: 64,
+        ..Limits::default()
+    });
+    let pusher = must_ok(
+        tight.add_function(0, 0, 1, &body),
+        "add slot-bounded push-only function",
+    );
+    let mut tight = must_ok(
+        tight.instantiate(),
+        "instantiate slot-bounded push-only function",
+    );
+    let aggregate = must_trap(
+        tight.invoke_val(pusher, &[]),
+        "aggregate activation-slot ceiling",
+    );
+
+    assert_eq!(operand, "operand stack");
+    assert_eq!(aggregate, "activation slot limit");
+    assert_ne!(operand, aggregate);
+
+    // The host page cap is its own condition too, and must not read like an
+    // allocator refusal or a size-arithmetic fault.
+    let pages = must_trap(
+        WasmModule::from_bytes_with(
+            MEMORY_MIN_3,
+            Limits {
+                max_memory_pages: 2,
+                ..Limits::default()
+            },
+        ),
+        "host page cap",
+    );
+    assert_eq!(pages, "memory page limit");
+    for other in [
+        "memory allocation",
+        "memory size overflow",
+        "memory size accounting",
+    ] {
+        assert_ne!(pages, other);
+    }
+}
+
+// The message was a truncated "no exported function named `": a dangling
+// backtick that could never be followed by a name, because the core carries no
+// formatting machinery. It must be a complete phrase on both entry points.
+#[test]
+fn missing_export_reports_a_complete_phrase() {
+    let module = must_ok(WasmModule::from_bytes(COUNTER_MODULE), "load counter");
+    let from_module = must_trap(module.invoke_by_name("absent", &[]), "module export lookup");
+
+    let mut instance = must_ok(module.instantiate(), "instantiate counter");
+    let from_instance = must_trap(
+        instance.invoke_by_name("absent", &[]),
+        "instance export lookup",
+    );
+
+    assert_eq!(from_module, "no exported function named");
+    assert_eq!(from_instance, "no exported function named");
+    assert!(!from_module.contains('`'));
+    assert!(!from_instance.contains('`'));
 }
