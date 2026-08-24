@@ -95,8 +95,11 @@ fn table_budget_follows_host_not_crate_constant() {
         ..Limits::default()
     };
     match WasmModule::from_bytes_with(TABLE_MIN_16, tight) {
-        Err(WasmError::Trap(msg)) => assert_eq!(msg, "table size"),
-        Err(e) => panic!("tight budget must Trap(table size), got {}", e.message()),
+        Err(WasmError::Trap(msg)) => assert_eq!(msg, "table element limit"),
+        Err(e) => panic!(
+            "tight budget must Trap(table element limit), got {}",
+            e.message()
+        ),
         Ok(_) => panic!("table min=16 under host=8 must not instantiate"),
     }
     match WasmModule::from_bytes_with(TABLE_MIN_16, wide) {

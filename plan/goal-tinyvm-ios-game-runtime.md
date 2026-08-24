@@ -1769,7 +1769,7 @@ versioned host imports; no game-specific private bytecode enters the engine.
 Evidence on 2026-08-21:
 
 - Public black boxes set smaller host call limits and prove success at the exact
-  boundary, deterministic `call depth`/`call stack` traps on the next admitted
+  boundary, deterministic `call depth`/`activation slot limit` traps on the next admitted
   work, and peak telemetry that never reports a rejected transient activation.
 - TAH1 schema 2 round-trips custom limits; a hand-built legacy schema-1 profile
   and a real 40-byte C configuration prefix both retain historical defaults.

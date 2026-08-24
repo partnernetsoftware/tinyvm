@@ -143,7 +143,7 @@ fn wabt_compiled_imported_table_decodes_in_standard_index_space() {
                 ..Limits::default()
             }
         ),
-        Err(WasmError::Trap("table size"))
+        Err(WasmError::Trap("table element limit"))
     ));
 }
 

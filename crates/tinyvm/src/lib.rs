@@ -118,18 +118,19 @@ mod ios_c_api;
 mod ios_wasi_host;
 
 pub mod wasm;
+pub use wasm::{
+    Ceiling as WasmCeiling, FaultClass as WasmFaultClass, FeatureUsage as WasmFeatureUsage,
+    Function as WasmFunction, Global as WasmGlobal, GlobalImportDesc, HostGlobal, ImportDesc,
+    Instance as WasmInstance, Limits, Memory as WasmMemory, MemoryImportDesc,
+    MemoryView as WasmMemoryView, MemoryViewMut as WasmMemoryViewMut, Module as WasmModule,
+    Store as WasmStore, Table as WasmTable, TableImportDesc, Val, ValueType, WasmError, eval,
+    eval_wasm, eval_wasm_with, eval_with, guest_bytes, guest_bytes_mut, guest_str, guest_window,
+    guest_write,
+};
 #[cfg(not(all(feature = "staticcore", not(feature = "std"))))]
 pub use wasm::{
     ExternReference as WasmExternReference, FunctionReference as WasmFunctionReference,
     HostMemories as WasmHostMemories,
-};
-pub use wasm::{
-    FeatureUsage as WasmFeatureUsage, Function as WasmFunction, Global as WasmGlobal,
-    GlobalImportDesc, HostGlobal, ImportDesc, Instance as WasmInstance, Limits,
-    Memory as WasmMemory, MemoryImportDesc, MemoryView as WasmMemoryView,
-    MemoryViewMut as WasmMemoryViewMut, Module as WasmModule, Store as WasmStore,
-    Table as WasmTable, TableImportDesc, Val, ValueType, WasmError, eval, eval_wasm,
-    eval_wasm_with, eval_with, guest_bytes, guest_bytes_mut, guest_str, guest_window, guest_write,
 };
 
 /// One bytecode instruction.

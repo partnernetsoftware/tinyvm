@@ -288,7 +288,7 @@ impl Store {
         let mut elements = Vec::new();
         elements
             .try_reserve_exact(min)
-            .map_err(|_| WasmError::Trap("table size"))?;
+            .map_err(|_| table_allocation())?;
         let null = match element_type {
             ValueType::FuncRef => TableElement::Func(None),
             ValueType::ExternRef => TableElement::Extern(None),
@@ -302,7 +302,7 @@ impl Store {
         state
             .tables
             .try_reserve(1)
-            .map_err(|_| WasmError::Trap("table size"))?;
+            .map_err(|_| table_allocation())?;
         let index = state.tables.len();
         state.tables.push(SharedTableState { elements });
         Ok(Table {
@@ -328,7 +328,7 @@ impl Store {
         state
             .tables
             .try_reserve(1)
-            .map_err(|_| WasmError::Trap("table size"))?;
+            .map_err(|_| table_allocation())?;
         let index = state.tables.len();
         state.tables.push(SharedTableState {
             elements: core::mem::take(elements),
@@ -1190,6 +1190,15 @@ impl Global {
 /// | `memory allocation` | the allocator refused a linear-memory buffer |
 /// | `memory size overflow` | a page-to-byte size computation overflowed |
 /// | `memory size accounting` | a memory size went backwards (internal invariant) |
+/// | `table element limit` | declared or grown elements exceed `Limits::max_table_elems` |
+/// | `table allocation` | the allocator refused a table buffer |
+/// | `table size overflow` | a table element total overflowed |
+///
+/// Downstream must not reproduce this table. [`WasmError::class`] and
+/// [`WasmError::ceiling`] answer "which kind of fault" and "which budget" from
+/// inside the crate, so the wording can change without silently changing an
+/// embedder's behaviour — which is what happened the first time these messages
+/// were split.
 #[cfg_attr(test, derive(Debug))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WasmError {
@@ -1228,12 +1237,127 @@ fn reserve_exact<T>(values: &mut Vec<T>, count: usize) -> Result<(), WasmError> 
         .map_err(|_| WasmError::Decode("module allocation"))
 }
 
+/// One host-configured execution ceiling, named without matching on text.
+///
+/// Each variant is exactly one field of [`Limits`]: an embedder that gets one
+/// back knows which number to raise, and keeps knowing it if the message
+/// wording changes.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Ceiling {
+    /// [`Limits::max_steps`].
+    Steps,
+    /// [`Limits::max_call_depth`].
+    CallDepth,
+    /// [`Limits::max_activation_slots`].
+    ActivationSlots,
+    /// [`Limits::max_memory_pages`].
+    MemoryPages,
+    /// [`Limits::max_table_elems`].
+    TableElems,
+}
+
+/// What kind of fault a [`WasmError`] is, for a caller that must react
+/// differently to each and cannot afford to match on message text.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FaultClass {
+    /// The module was rejected before it could ever run. Nothing about the
+    /// embedding's configuration will make this module load.
+    Load,
+    /// A bounded-execution ceiling was reached. [`WasmError::ceiling`] names
+    /// the [`Limits`] field when the ceiling is one the embedder configured;
+    /// it returns `None` for the VM's own fixed operand-stack bound.
+    ResourceCeiling,
+    /// The allocator refused. The VM stayed loud instead of aborting, and the
+    /// same work may succeed once the host has memory again.
+    Allocation,
+    /// An ordinary guest fault: out-of-bounds access, division by zero,
+    /// `unreachable`, a host-door type mismatch. The guest's own program is
+    /// responsible, and another guest is unaffected.
+    Guest,
+    /// An invariant or accounting guard that no reachable guest input should
+    /// trip. Seeing one means a VM bug — or a host whose `usize` is too narrow
+    /// to express a total the module asked for.
+    Internal,
+}
+
 impl WasmError {
     /// The static message for this fault (no formatting).
+    ///
+    /// The core is fmt-free, so this is the only text a fault carries. Use it
+    /// for logs; use [`Self::class`] and [`Self::ceiling`] to decide what to
+    /// do, so a reworded message cannot silently change an embedder's
+    /// behaviour.
     pub fn message(&self) -> &'static str {
         match self {
             Self::Decode(m) | Self::Trap(m) => m,
         }
+    }
+
+    /// Which host-configured ceiling this fault reached, if any.
+    ///
+    /// `None` means the fault is not a configured ceiling — including the
+    /// VM's own fixed `operand stack` bound, which no [`Limits`] field
+    /// controls.
+    pub fn ceiling(&self) -> Option<Ceiling> {
+        Some(match self.message() {
+            "step budget" => Ceiling::Steps,
+            "call depth" => Ceiling::CallDepth,
+            "activation slot limit" => Ceiling::ActivationSlots,
+            "memory page limit" => Ceiling::MemoryPages,
+            "table element limit" => Ceiling::TableElems,
+            _ => return None,
+        })
+    }
+
+    /// This fault's category.
+    ///
+    /// Derived from the message taxonomy documented on this type. Every
+    /// allocation refusal in the crate ends its message with `allocation`,
+    /// which is a naming rule the suite enforces, not a coincidence; the
+    /// remaining bounded-execution conditions are named one by one. Anything
+    /// else is an ordinary guest fault, or a load rejection when it came from
+    /// decoding.
+    pub fn class(&self) -> FaultClass {
+        let message = self.message();
+        if self.ceiling().is_some() {
+            return FaultClass::ResourceCeiling;
+        }
+        match message {
+            // The fixed operand-stack bound: a ceiling, but not one the
+            // embedder set.
+            "operand stack" => FaultClass::ResourceCeiling,
+            // The control-frame vector could not grow. Named before the
+            // `allocation` suffix rule because its wording predates it.
+            "control stack" => FaultClass::Allocation,
+            "activation slot overflow"
+            | "memory size overflow"
+            | "memory size accounting"
+            | "table size overflow" => FaultClass::Internal,
+            _ if message.ends_with("allocation") => FaultClass::Allocation,
+            _ => match self {
+                Self::Decode(_) => FaultClass::Load,
+                Self::Trap(_) => FaultClass::Guest,
+            },
+        }
+    }
+
+    /// Whether a bounded-execution ceiling was reached. See [`Self::ceiling`]
+    /// for which one.
+    pub fn is_resource_ceiling(&self) -> bool {
+        matches!(self.class(), FaultClass::ResourceCeiling)
+    }
+
+    /// Whether the allocator refused.
+    pub fn is_allocation(&self) -> bool {
+        matches!(self.class(), FaultClass::Allocation)
+    }
+
+    /// Whether this is an internal invariant rather than anything the guest or
+    /// the embedding did.
+    pub fn is_internal(&self) -> bool {
+        matches!(self.class(), FaultClass::Internal)
     }
 }
 
@@ -4970,7 +5094,7 @@ impl Module {
             .iter()
             .map(|(_, min, _)| *min)
             .try_fold(0usize, |total, min| {
-                total.checked_add(min).ok_or(WasmError::Trap("table size"))
+                total.checked_add(min).ok_or_else(table_size_overflow)
             })?;
         if defined_table_size > limits.max_table_elems
             || module.tables.iter().any(|table| {
@@ -4979,17 +5103,17 @@ impl Module {
                     .is_none_or(|size| size > limits.max_table_elems)
             })
         {
-            return Err(WasmError::Trap("table size"));
+            return Err(WasmError::Trap("table element limit"));
         }
         module
             .tables
             .try_reserve_exact(table_limits.len())
-            .map_err(|_| WasmError::Trap("table size"))?;
+            .map_err(|_| table_allocation())?;
         for (element_type, table_size, table_max) in table_limits {
             let mut elements = Vec::new();
             elements
                 .try_reserve_exact(table_size)
-                .map_err(|_| WasmError::Trap("table size"))?;
+                .map_err(|_| table_allocation())?;
             let null = match element_type {
                 ValueType::FuncRef => Val::FuncRef(None),
                 ValueType::ExternRef => Val::ExternRef(None),
@@ -5088,23 +5212,21 @@ impl Module {
         let current = self.tables.iter().try_fold(0usize, |total, table| {
             total
                 .checked_add(table.elements.len())
-                .ok_or(WasmError::Trap("table size"))
+                .ok_or_else(table_size_overflow)
         })?;
         if current
             .checked_add(size)
             .filter(|&total| total <= self.limits.max_table_elems)
             .is_none()
         {
-            return Err(WasmError::Trap("table size"));
+            return Err(WasmError::Trap("table element limit"));
         }
         let mut elements = Vec::new();
         elements
             .try_reserve_exact(size)
-            .map_err(|_| WasmError::Trap("table size"))?;
+            .map_err(|_| table_allocation())?;
         elements.resize(size, Val::FuncRef(None));
-        self.tables
-            .try_reserve(1)
-            .map_err(|_| WasmError::Trap("table size"))?;
+        self.tables.try_reserve(1).map_err(|_| table_allocation())?;
         let index = self.tables.len();
         self.tables.push(TableDesc {
             elements,
@@ -6014,7 +6136,7 @@ impl Module {
         let mut tables = Vec::new();
         tables
             .try_reserve_exact(self.tables.len())
-            .map_err(|_| WasmError::Trap("table size"))?;
+            .map_err(|_| table_allocation())?;
         for template in &self.tables {
             if template.imported {
                 let table = template
@@ -6035,7 +6157,7 @@ impl Module {
             let mut elements = Vec::new();
             elements
                 .try_reserve_exact(template.elements.len())
-                .map_err(|_| WasmError::Trap("table size"))?;
+                .map_err(|_| table_allocation())?;
             for value in &template.elements {
                 elements.push(table_element_from_instance_value(
                     *value,
@@ -6059,11 +6181,11 @@ impl Module {
             {
                 total_size = total_size
                     .checked_add(table.len())
-                    .ok_or(WasmError::Trap("table size"))?;
+                    .ok_or_else(table_size_overflow)?;
             }
         }
         if total_size > self.limits.max_table_elems {
-            return Err(WasmError::Trap("table size"));
+            return Err(WasmError::Trap("table element limit"));
         }
 
         for segment in &self.elems {
@@ -7837,7 +7959,7 @@ impl Module {
                         {
                             total_size = total_size
                                 .checked_add(table.len())
-                                .ok_or(WasmError::Trap("table size"))?;
+                                .ok_or_else(table_size_overflow)?;
                         }
                     }
                     let new_size = old_size.checked_add(delta).filter(|&size| size <= cap);
@@ -9553,6 +9675,24 @@ fn call_stack_allocation() -> WasmError {
 #[inline(never)]
 fn slot_overflow() -> WasmError {
     WasmError::Trap("activation slot overflow")
+}
+
+/// The allocator refused a table or table-metadata vector. Outlined and
+/// `#[cold]` for the same reason as [`call_stack_allocation`]: nine load- and
+/// instantiate-time sites share one call instead of nine materialised literals.
+#[cold]
+#[inline(never)]
+fn table_allocation() -> WasmError {
+    WasmError::Trap("table allocation")
+}
+
+/// A table element total stopped being representable. Distinct from
+/// `table element limit`: the host budget was not reached, the arithmetic ran
+/// out of `usize`, which no reachable module should manage.
+#[cold]
+#[inline(never)]
+fn table_size_overflow() -> WasmError {
+    WasmError::Trap("table size overflow")
 }
 
 fn i32_args_to_vals(args: &[i32]) -> Result<Vec<Val>, WasmError> {

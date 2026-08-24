@@ -134,7 +134,8 @@ tinyvm (35)                                      [~]
 │   │   ├── indexed guest-memory callback context          [x]
 │   │   ├── domain + generation guest resource handles     [x]
 │   │   ├── bounds-checked guest memory windows            [x]
-│   │   └── two-pass variable-length host result           [x]
+│   │   ├── two-pass variable-length host result           [x]
+│   │   └── string-free fault classification               [x]
 │   ├── standard resource imports                        [~]
 │   │   ├── standard imported globals                     [x]
 │   │   ├── standard imported linear memories             [x]
@@ -343,9 +344,16 @@ as “almost approved” or “safe to ship externally.”
 - 核 fmt-free，`WasmError::message()` 是下游唯一能分类的通道，所以每一种要分开处理的条件
   各占一句 `&'static str`，不共用一个含混词。上限一句一个：`call depth` /
   `activation slot limit` / `operand stack` / `control stack` / `step budget` /
-  `memory page limit`；旁边的分配与记账失败也各自成句：`call stack allocation` /
-  `activation slot overflow` / `memory allocation` / `memory size overflow` /
-  `memory size accounting`。文案表在 `WasmError` 的文档注释里。
+  `memory page limit` / `table element limit`；旁边的分配与记账失败也各自成句：
+  `call stack allocation` / `activation slot overflow` / `memory allocation` /
+  `memory size overflow` / `memory size accounting` / `table allocation` /
+  `table size overflow`。文案表在 `WasmError` 的文档注释里。
+- 但下游不该复制那张表：按字符串分类，文案一改就悄悄失配（这已经真实发生过一次）。
+  分类由核给：`WasmError::class()` 返回 `FaultClass`（Load / ResourceCeiling /
+  Allocation / Guest / Internal），`WasmError::ceiling()` 直接点名是哪一条 `Limits`
+  ——`max_steps` / `max_call_depth` / `max_activation_slots` / `max_memory_pages` /
+  `max_table_elems`，宿主知道该抬哪个数。`WasmError` 的类型形状不变，没有新变体。
+  分类只靠一条命名规则：分配失败的文案一律以 `allocation` 结尾，这条规则由测试扫源码守着。
 
 ### 4. VM capability and TinyArcade profile are separate
 

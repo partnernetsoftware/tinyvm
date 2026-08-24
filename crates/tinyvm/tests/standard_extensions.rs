@@ -870,7 +870,7 @@ fn standard_imported_tables_decode_before_store_binding_exists() {
                 ..Limits::default()
             }
         ),
-        Err(WasmError::Trap("table size"))
+        Err(WasmError::Trap("table element limit"))
     ));
 }
 
