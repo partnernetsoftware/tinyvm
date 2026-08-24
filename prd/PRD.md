@@ -132,7 +132,8 @@ tinyvm (35)                                      [~]
 │   │   ├── typed standard function imports               [x]
 │   │   ├── bounded in-place host dispatch                [x]
 │   │   ├── indexed guest-memory callback context          [x]
-│   │   └── domain + generation guest resource handles     [x]
+│   │   ├── domain + generation guest resource handles     [x]
+│   │   └── bounds-checked guest memory windows            [x]
 │   ├── standard resource imports                        [~]
 │   │   ├── standard imported globals                     [x]
 │   │   ├── standard imported linear memories             [x]
@@ -327,6 +328,12 @@ as “almost approved” or “safe to ship externally.”
   never abort the process while attempting an infallible allocation.
 - Load-time type/structure errors fail before a module becomes invokable. Runtime traps
   remain local to the affected instance.
+- 宿主回调拿到的是裸 `&mut [u8]`，把客户机给的 `(ptr, len)` 变成切片是嵌入方唯一一处
+  算错就读写宿主内存的算术。核自带这道门：`guest_window` / `guest_bytes` /
+  `guest_bytes_mut` / `guest_str` / `guest_write`。i32 地址按标准 Wasm 当无符号解释，
+  越界或求和溢出一律返回 `WasmError`，不夹取、不截断、不 panic；坏指针
+  (`guest memory window`)、坏文本 (`guest memory utf-8`) 与客户机缓冲区过小
+  (`guest memory window too small`) 各占一句。
 - 核 fmt-free，`WasmError::message()` 是下游唯一能分类的通道，所以每一种要分开处理的条件
   各占一句 `&'static str`，不共用一个含混词。上限一句一个：`call depth` /
   `activation slot limit` / `operand stack` / `control stack` / `step budget` /

@@ -23,11 +23,23 @@ case "$(uname -s)" in
     strip -s "$TD/tinycore"
     ;;
 esac
+# On failure, a bare file size hides why it moved. Mach-O rounds __TEXT up to a
+# 16 KiB page, so a few bytes of new code can make the file jump 16384 at once;
+# the breakdown says which segment/section actually grew and whether the jump is
+# real code or page padding.
+core_breakdown() {
+  echo "--- segment/section breakdown ---"
+  case "$(uname -s)" in
+    Darwin) size -m "$TD/tinycore" 2>/dev/null || size "$TD/tinycore" 2>/dev/null || true ;;
+    *) size -A "$TD/tinycore" 2>/dev/null || size "$TD/tinycore" 2>/dev/null || true ;;
+  esac
+  echo "--- end breakdown ---"
+}
 SIZE=$(stat -c%s "$TD/tinycore" 2>/dev/null || stat -f%z "$TD/tinycore")
 RC=0; "$TD/tinycore" || RC=$?
 echo "static core: ${SIZE} bytes; selftest rc=${RC}"
-[ "$SIZE" -lt "$MAX_BYTES" ] || { echo "FAIL: core >= $LIMIT_LABEL"; exit 1; }
-[ "$RC" -eq 42 ] || { echo "FAIL: selftest != 42"; exit 1; }
+[ "$SIZE" -lt "$MAX_BYTES" ] || { echo "FAIL: core >= $LIMIT_LABEL"; core_breakdown; exit 1; }
+[ "$RC" -eq 42 ] || { echo "FAIL: selftest != 42"; core_breakdown; exit 1; }
 if [ "$MAX_BYTES" -eq 102400 ]; then
   echo "OK: < 100 KiB and selftest==42"
 else

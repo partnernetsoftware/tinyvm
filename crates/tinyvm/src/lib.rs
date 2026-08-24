@@ -126,7 +126,7 @@ pub use wasm::{
     Memory as WasmMemory, MemoryImportDesc, MemoryView as WasmMemoryView,
     MemoryViewMut as WasmMemoryViewMut, Module as WasmModule, Store as WasmStore,
     Table as WasmTable, TableImportDesc, Val, ValueType, WasmError, eval, eval_wasm,
-    eval_wasm_with, eval_with,
+    eval_wasm_with, eval_with, guest_bytes, guest_bytes_mut, guest_str, guest_window, guest_write,
 };
 
 /// One bytecode instruction.

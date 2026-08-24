@@ -30,7 +30,10 @@ use core::ops::{Deref, DerefMut};
 #[cfg(not(all(feature = "staticcore", not(feature = "std"))))]
 use core::sync::atomic::{AtomicU64, Ordering};
 
+mod guest_memory;
 mod validate;
+
+pub use guest_memory::{guest_bytes, guest_bytes_mut, guest_str, guest_window, guest_write};
 
 /// Maximum simultaneously live guest-defined call activations.
 ///
