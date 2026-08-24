@@ -244,11 +244,35 @@ pub(crate) mod m1 {
     pub(crate) const ENTRY: &str = super::ENTRY;
     pub(crate) const HOST_MODULE: &str = super::HOST_MODULE;
 
-    /// One page to start with, sixteen at most. The same shape the value
-    /// representation's own suite runs the emitted runtime under, and a
-    /// ceiling the host's [`tinyvm::Limits`] narrows further if it wants to.
-    const MEMORY_MIN_PAGES: u32 = 1;
-    const MEMORY_MAX_PAGES: u32 = 16;
+    /// Linear memory's page size, and wasm's own ceiling on how many pages a
+    /// module may declare.
+    const PAGE_BYTES: u32 = 65_536;
+    const WASM_MAX_PAGES: u32 = 65_536;
+
+    /// At least one page, and enough of them to hold the string literal pool.
+    ///
+    /// The declared *minimum* is what tinyvm checks an active data segment
+    /// against at load time, so a module whose literals spill past what it
+    /// declares is a module this compiler already decided was wasm and the load
+    /// gate then refuses -- a successful compile whose output cannot be loaded,
+    /// which is the one outcome the pipeline must never produce.
+    ///
+    /// No declared maximum. A ceiling written here would cap every guest at the
+    /// same size whatever the embedder configured, and the bound belongs to the
+    /// host's [`tinyvm::Limits`] -- which is what `runtime`'s allocator says it
+    /// is relying on.
+    fn memory_pages(pool: &StringPool) -> Result<u32, CompileError> {
+        let bytes = pool.heap_start() as u32;
+        let pages = bytes.div_ceil(PAGE_BYTES).max(1);
+        if pages > WASM_MAX_PAGES {
+            return Err(unsupported(
+                Boundary::Subset,
+                "a script whose string literals need more than 4 GiB of guest memory",
+                0,
+            ));
+        }
+        Ok(pages)
+    }
 
     /// Global 0 is the bump-allocation pointer, which is what
     /// [`Ctx::heap_global`] names; the script's bindings take two globals each
@@ -348,8 +372,8 @@ pub(crate) mod m1 {
             types,
             imports,
             memory: Some(ir::Memory {
-                min: MEMORY_MIN_PAGES,
-                max: Some(MEMORY_MAX_PAGES),
+                min: memory_pages(&pool)?,
+                max: None,
             }),
             globals,
             funcs,

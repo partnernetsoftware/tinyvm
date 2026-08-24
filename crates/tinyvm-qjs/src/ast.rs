@@ -160,6 +160,18 @@ pub(crate) mod m1 {
         /// Where the declaration is, for a diagnostic that has to point back
         /// at it ("...already bound at byte N").
         pub(crate) span: Span,
+        /// Where this binding stops being in its temporal dead zone, in bytes
+        /// from the start of the source, or `None` for a binding that already
+        /// holds a value when its scope is entered.
+        ///
+        /// ECMA-262 8.2.4: a `let` or `const` exists from the top of its scope
+        /// but is *uninitialised* until its declarator finishes, and reading it
+        /// before then is a ReferenceError. A `var`, a parameter and a hoisted
+        /// `function f(){}` are initialised on entry -- to `undefined`, to the
+        /// argument, to the function -- so they have no dead zone and this is
+        /// `None`. See `parse::m1::Parser::classify`, which is where the
+        /// comparison is made.
+        pub(crate) initialised: Option<usize>,
         /// The function that owns the storage.
         pub(crate) func: FuncId,
         /// Position in that function's [`Function::bindings`]. What a wasm

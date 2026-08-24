@@ -32,10 +32,11 @@ pub(crate) struct Token {
     /// written directly, or inside a multi-line comment, which ECMA-262 12.4
     /// says counts the same. This is the raw fact all of ASI is built on.
     pub(crate) newline_before: bool,
-    /// This `;` was inserted by ASI rather than written. Nothing downstream has
-    /// to care -- an inserted semicolon *is* a semicolon -- but a diagnostic
-    /// that points at one can say so instead of pointing at absent text.
-    #[allow(dead_code, reason = "for the parser, which reaches statements next")]
+    /// This `;` was inserted by ASI rather than written. Mostly nothing
+    /// downstream has to care -- an inserted semicolon *is* a semicolon -- but
+    /// a `for` header is the one place ECMA-262 12.10 says an inserted one does
+    /// not count, and a diagnostic that points at one can say so instead of
+    /// pointing at absent text.
     pub(crate) inserted: bool,
 }
 
@@ -388,6 +389,18 @@ impl Lexer<'_> {
                 self.eat_while(|b| b.is_ascii_alphanumeric() || b == b'_');
                 return subset(phrase);
             }
+            // ECMA-262 12.9.3: a `0` followed by another digit is a
+            // LegacyOctalIntegerLiteral (`0777` is 511) or, once an `8` or a
+            // `9` is in it, a NonOctalDecimalIntegerLiteral. Both are
+            // strict-mode SyntaxErrors, and this subset is strict mode. The
+            // digits are consumed whole so the token spans the literal, and
+            // the boundary is named rather than the run being read as the
+            // decimal it is not.
+            if matches!(self.peek_at(1), Some(b'0'..=b'9')) {
+                self.pos += 1;
+                self.eat_while(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.');
+                return subset("number literals written with a leading zero");
+            }
         }
         self.eat_while(|b| b.is_ascii_digit());
         // The suffixes that turn a decimal integer into something else. Each
@@ -396,10 +409,17 @@ impl Lexer<'_> {
             Some(b'.') => Some("fractional numbers"),
             Some(b'e' | b'E') => Some("numbers with an exponent"),
             Some(b'n') => Some("BigInt literals"),
+            // ES2021 NumericLiteralSeparator. Named here because the digit run
+            // ends at the `_`, so without this the rest of the literal lexes
+            // as an identifier and the author is told the statement needs a
+            // `;` -- a sentence about a mistake they did not make.
+            Some(b'_') => Some("numeric separators in number literals"),
             _ => None,
         };
         if let Some(phrase) = phrase {
-            self.eat_while(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'+' || b == b'-');
+            self.eat_while(|b| {
+                b.is_ascii_alphanumeric() || b == b'.' || b == b'+' || b == b'-' || b == b'_'
+            });
             return subset(phrase);
         }
         match self.src[start..self.pos].parse::<u64>() {
@@ -914,7 +934,6 @@ fn ends_lhs(kind: &TokenKind) -> bool {
 /// The parser must have established the rest of rule 1 first -- that no
 /// production of the grammar accepts this token here -- because that is the
 /// part no lexer can see.
-#[allow(dead_code, reason = "for the parser, which reaches statements next")]
 pub(crate) fn semicolon_is_implied(tokens: &[Token], pos: usize) -> bool {
     let token = &tokens[pos];
     // Rule 1(a), rule 1(b), and rule 2, in that order.

@@ -682,17 +682,43 @@ fn a_function_declared_in_a_block_is_the_blocks() {
     );
 }
 
-/// DIVERGENCE: 8.2.4 / 9.1.1.1 put a `let` or `const` in a temporal dead zone
-/// from the top of its scope until its declaration is evaluated, and reading
-/// one there is a ReferenceError. This engine has no `throw`, so the binding
-/// simply reads as `undefined`. Retire when exceptions land -- the storage
-/// already exists, only the poison value and the throw are missing.
+/// 8.2.4 / 9.1.1.1 put a `let` or `const` in a temporal dead zone from the top
+/// of its scope until its declaration is evaluated, and reading one there is a
+/// ReferenceError. This engine has no `throw`, so what it has instead is a
+/// refusal -- and a refusal can only speak for the cases the text settles on
+/// its own: the read stands in the very function that declares the binding, and
+/// it stands before the declarator. Those are refused. A fabricated `undefined`
+/// is not offered for any of them.
 #[test]
-fn a_temporal_dead_zone_read_yields_undefined_instead_of_throwing() {
-    undefined("let y = x; let x = 1; return y;");
-    undefined("function f() { let y = x; let x = 1; return y; } return f();");
-    // `var` is *not* a divergence: 14.3.2 really does say `undefined` here.
+fn a_temporal_dead_zone_read_is_refused() {
+    for source in [
+        "let y = x; let x = 1; return y;",
+        "function f() { let y = x; let x = 1; return y; } return f();",
+        // The self-reading initialiser, which is a dead-zone read in every
+        // JavaScript there has ever been.
+        "let x = x; return x;",
+        "const c = c; return c;",
+    ] {
+        let e = refuse(source);
+        assert!(
+            e.message.contains("before the declaration"),
+            "{source:?}: {}",
+            e.message
+        );
+    }
+    // `var` is *not* a dead zone: 14.3.2 really does say `undefined` here.
     undefined("var y = v; var v = 1; return y;");
+}
+
+/// DIVERGENCE: the half of the dead zone no compiler can settle from the text.
+/// The read is inside another function, so whether it happens before the
+/// declarator is a question about what *runs*; here the storage is a zeroed
+/// global and `TAG_UNDEFINED` is 0, so the read yields `undefined` where
+/// ECMA-262 throws. Retire when exceptions land -- the storage already exists,
+/// only the poison value and the throw are missing.
+#[test]
+fn a_dead_zone_read_from_another_function_yields_undefined() {
+    undefined("function f() { return x; } let y = f(); let x = 1; return y;");
 }
 
 // =========================================================================

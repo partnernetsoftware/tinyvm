@@ -311,6 +311,30 @@ pub(crate) mod m1 {
     /// that is bound to something other than a known function.
     const CALL_TARGET: &str = "calling a value that is not a known function";
 
+    /// How much native stack one script's syntax may spend, counted in frames
+    /// of recursive descent.
+    ///
+    /// Recursive descent runs on the native stack, and a stack overflow is not
+    /// a `Result`: the runtime aborts the whole process. For a host compiling
+    /// untrusted `.qjs` that is the worst failure mode there is -- worse than a
+    /// wrong answer, because no caller is left to hear about it. So the depth
+    /// has to be a number the parser keeps, and it has to be checked before the
+    /// frame is pushed rather than after.
+    ///
+    /// Counted in *frames* and not in nesting levels because the two are not
+    /// proportional: one `(` costs four frames of descent, one prefix `!` two,
+    /// one `{` two, and one operator in a left-associative chain costs none
+    /// here but one in every consumer that walks the tree afterwards. A limit
+    /// expressed in levels would have to be tuned to whichever shape happens to
+    /// be deepest and would be far too generous for the rest.
+    ///
+    /// The number is measured, not guessed. At this budget the worst shape --
+    /// forty nested function expressions -- reaches about 1 MiB of native
+    /// stack in an unoptimised build, against the 2 MiB Rust gives a thread by
+    /// default; every other shape is under that. The budget is deliberately
+    /// about the *engine*, not about the script, and the diagnostic says so.
+    const MAX_FRAMES: u32 = 448;
+
     pub(crate) fn parse(tokens: &[Token], options: Options) -> Result<Program, CompileError> {
         let mut parser = Parser {
             tokens,
@@ -323,6 +347,7 @@ pub(crate) mod m1 {
             funcs: Vec::new(),
             pending: Vec::new(),
             arg_count: 0,
+            frames: 0,
         };
         parser.script()
     }
@@ -345,6 +370,9 @@ pub(crate) mod m1 {
         funcs: Vec<FuncId>,
         pending: Vec<Pending>,
         arg_count: u32,
+        /// Frames of recursive descent currently on the native stack, plus the
+        /// depth of the tree built so far -- see [`MAX_FRAMES`].
+        frames: u32,
     }
 
     struct Scope {
@@ -448,6 +476,57 @@ pub(crate) mod m1 {
             Err(self.cannot_use("needs a `;` to end the statement"))
         }
 
+        /// A `;` that was written rather than inserted.
+        ///
+        /// ECMA-262 12.10: "a semicolon is never inserted automatically if the
+        /// semicolon would then be parsed as one of the two semicolons in the
+        /// header of a `for` statement". The lexer applies rule 3 to the whole
+        /// token stream and says in its own header that this override is a
+        /// grammar position and belongs to the caller. This is the caller.
+        fn at_written_semi(&self) -> bool {
+            self.at(&TokenKind::Semi) && !self.peek().inserted
+        }
+
+        /// One of the two `;` in a `for` header. An inserted one is not one of
+        /// these, so the header is short a semicolon and the statement is not
+        /// a `for` at all -- which is a very different thing from a `for` whose
+        /// parts the engine read differently.
+        fn header_semicolon(&mut self, what: &str) -> Result<(), CompileError> {
+            if self.at(&TokenKind::Semi) && self.peek().inserted {
+                return Err(malformed(
+                    &format!(
+                        "{what}; the line break here does not supply one, because ECMA-262 12.10 never inserts a `for` header's semicolons"
+                    ),
+                    self.peek().offset,
+                ));
+            }
+            self.expect(&TokenKind::Semi, what)
+        }
+
+        // -- native stack ----------------------------------------------------
+
+        /// Charge `frames` of descent against [`MAX_FRAMES`], refusing when the
+        /// budget runs out. Paired with [`Parser::shallower`].
+        ///
+        /// A failing path does not have to restore the count: the first error
+        /// ends the whole parse, and there is nothing left to charge against
+        /// it. Only the success paths give their frames back.
+        fn deeper(&mut self, frames: u32) -> Result<(), CompileError> {
+            self.frames += frames;
+            if self.frames > MAX_FRAMES {
+                return Err(unsupported(
+                    Boundary::Subset,
+                    &format!("syntax nested deeper than this engine's {MAX_FRAMES}-frame budget"),
+                    self.peek().offset,
+                ));
+            }
+            Ok(())
+        }
+
+        fn shallower(&mut self, frames: u32) {
+            self.frames -= frames;
+        }
+
         // -- scopes ----------------------------------------------------------
 
         fn scope(&self) -> usize {
@@ -520,6 +599,9 @@ pub(crate) mod m1 {
                 name: name.to_string(),
                 kind,
                 span,
+                // Filled in by `declaration` for the two forms that have a
+                // dead zone; everything else is initialised on scope entry.
+                initialised: None,
                 func,
                 slot,
             });
@@ -611,6 +693,7 @@ pub(crate) mod m1 {
             end: &TokenKind,
             opened: &str,
         ) -> Result<Vec<Stmt>, CompileError> {
+            self.deeper(1)?;
             let mut body = Vec::new();
             while !self.at(end) {
                 if self.at(&TokenKind::Eof) {
@@ -619,10 +702,15 @@ pub(crate) mod m1 {
                 body.push(self.statement()?);
             }
             self.advance();
+            self.shallower(1);
             Ok(body)
         }
 
         fn statement(&mut self) -> Result<Stmt, CompileError> {
+            // Two, for one frame: this is the parser's largest, holding the
+            // whole statement match and the diagnostics it formats, and a
+            // nested block spends it on every level.
+            self.deeper(2)?;
             let span = Span(self.peek().offset);
             let kind = match self.kind().clone() {
                 TokenKind::Semi => {
@@ -669,10 +757,39 @@ pub(crate) mod m1 {
                     StmtKind::Expr(expr)
                 }
             };
+            self.shallower(2);
             Ok(Stmt { kind, span })
         }
 
+        /// The `Statement` a body position takes: the `then` and `else` of an
+        /// `if`, and the body of a `while` or a `for`.
+        ///
+        /// ECMA-262 14.6 and 14.7 spell those positions `Statement`, and a
+        /// `Declaration` is not one. `if (c) let x = 1;` would bind a name that
+        /// nothing could ever read, and `while (c) function f() {}` is Annex B
+        /// sloppy-mode grammar -- this subset is strict mode, where it is not
+        /// grammar at all. `var` is a `VariableStatement` and stays allowed.
+        fn body_statement(&mut self, position: &str) -> Result<Stmt, CompileError> {
+            let declaration = match self.kind() {
+                TokenKind::Let | TokenKind::Const => "a lexical declaration",
+                TokenKind::Function => "a function declaration",
+                _ => {
+                    self.deeper(1)?;
+                    let out = self.statement();
+                    self.shallower(1);
+                    return out;
+                }
+            };
+            Err(malformed(
+                &format!(
+                    "cannot read {declaration} as the body of {position}; only a statement belongs there, and a declaration needs a block of its own"
+                ),
+                self.peek().offset,
+            ))
+        }
+
         fn if_statement(&mut self) -> Result<StmtKind, CompileError> {
+            self.deeper(1)?;
             self.advance();
             self.expect(&TokenKind::LParen, "needs a `(` after `if`")?;
             let test = self.expression(0)?;
@@ -680,19 +797,21 @@ pub(crate) mod m1 {
                 &TokenKind::RParen,
                 "needs a `)` to close the `if` condition",
             )?;
-            let then = Box::new(self.statement()?);
+            let then = Box::new(self.body_statement("an `if`")?);
             // The dangling `else` binds to the nearest `if`, which is what
             // taking it here -- before returning to the outer statement --
             // means.
             let alt = if self.eat(&TokenKind::Else) {
-                Some(Box::new(self.statement()?))
+                Some(Box::new(self.body_statement("an `else`")?))
             } else {
                 None
             };
+            self.shallower(1);
             Ok(StmtKind::If { test, then, alt })
         }
 
         fn while_statement(&mut self) -> Result<StmtKind, CompileError> {
+            self.deeper(1)?;
             self.advance();
             self.expect(&TokenKind::LParen, "needs a `(` after `while`")?;
             let test = self.expression(0)?;
@@ -700,7 +819,8 @@ pub(crate) mod m1 {
                 &TokenKind::RParen,
                 "needs a `)` to close the `while` condition",
             )?;
-            let body = Box::new(self.statement()?);
+            let body = Box::new(self.body_statement("a `while`")?);
+            self.shallower(1);
             Ok(StmtKind::While { test, body })
         }
 
@@ -712,17 +832,21 @@ pub(crate) mod m1 {
         /// it is why this reads them itself instead of calling
         /// [`Parser::semicolon`].
         fn for_statement(&mut self) -> Result<StmtKind, CompileError> {
+            // Two, for this frame and `for_parts`.
+            self.deeper(2)?;
             self.advance();
             self.expect(&TokenKind::LParen, "needs a `(` after `for`")?;
             self.enter(false, self.func());
             let parts = self.for_parts();
             self.leave();
+            self.shallower(2);
             parts
         }
 
         fn for_parts(&mut self) -> Result<StmtKind, CompileError> {
             let span = Span(self.peek().offset);
-            let init = if self.eat(&TokenKind::Semi) {
+            let init = if self.at_written_semi() {
+                self.advance();
                 None
             } else {
                 let kind = match self.kind() {
@@ -731,20 +855,15 @@ pub(crate) mod m1 {
                     }
                     _ => StmtKind::Expr(self.expression(0)?),
                 };
-                self.expect(
-                    &TokenKind::Semi,
-                    "needs a `;` after the first part of the `for` header",
-                )?;
+                self.header_semicolon("needs a `;` after the first part of the `for` header")?;
                 Some(Box::new(Stmt { kind, span }))
             };
-            let test = if self.eat(&TokenKind::Semi) {
+            let test = if self.at_written_semi() {
+                self.advance();
                 None
             } else {
                 let test = self.expression(0)?;
-                self.expect(
-                    &TokenKind::Semi,
-                    "needs a `;` after the condition of the `for` header",
-                )?;
+                self.header_semicolon("needs a `;` after the condition of the `for` header")?;
                 Some(test)
             };
             let update = if self.at(&TokenKind::RParen) {
@@ -753,7 +872,7 @@ pub(crate) mod m1 {
                 Some(self.expression(0)?)
             };
             self.expect(&TokenKind::RParen, "needs a `)` to close the `for` header")?;
-            let body = Box::new(self.statement()?);
+            let body = Box::new(self.body_statement("a `for`")?);
             Ok(StmtKind::For {
                 init,
                 test,
@@ -775,6 +894,9 @@ pub(crate) mod m1 {
                 TokenKind::Const => BindingKind::Const,
                 _ => BindingKind::Var,
             };
+            // `var` is initialised to `undefined` when its scope is entered;
+            // the other two are not initialised until their declarator runs.
+            let lexical = kind != BindingKind::Var;
             let word = keyword.name();
             self.advance();
             let mut out = Vec::new();
@@ -814,6 +936,15 @@ pub(crate) mod m1 {
                     _ => kind,
                 };
                 let binding = self.declare(&text, kind, span)?;
+                // ECMA-262 8.2.4 and 13.1.3: a `let` or `const` exists from
+                // the top of its scope but holds no value until its declarator
+                // finishes, and every read before that point is a
+                // ReferenceError. The cursor is exactly at that point now, so
+                // this is where the dead zone ends; `classify` compares an
+                // occurrence against it.
+                if lexical {
+                    self.bindings[binding.0 as usize].initialised = Some(self.peek().offset);
+                }
                 out.push(Declarator {
                     binding,
                     init,
@@ -895,9 +1026,6 @@ pub(crate) mod m1 {
             func: FuncId,
             self_name: Option<(String, Span)>,
         ) -> Result<(), CompileError> {
-            if let Some((name, at)) = self_name {
-                self.declare(&name, BindingKind::Function(func), at)?;
-            }
             self.expect(&TokenKind::LParen, "needs a `(` to open the parameter list")?;
             let mut params = Vec::new();
             while !self.eat(&TokenKind::RParen) {
@@ -914,6 +1042,18 @@ pub(crate) mod m1 {
                     )?;
                     break;
                 }
+            }
+            // The function expression's own name, after the parameters and
+            // never before them. ECMA-262 15.2.5 puts that binding in a
+            // function environment the parameter list *shadows*, so a
+            // parameter of the same name wins and is not a collision; and the
+            // lowering reads a parameter out of the local its slot names, so a
+            // self-name holding slot 0 would shift every parameter by one and
+            // silently read the wrong argument.
+            if let Some((name, at)) = self_name
+                && self.lookup(self.scope(), &name).is_none()
+            {
+                self.declare(&name, BindingKind::Function(func), at)?;
             }
             let open = self.peek().offset;
             self.expect(&TokenKind::LBrace, "needs a `{` to open the function body")?;
@@ -932,11 +1072,20 @@ pub(crate) mod m1 {
         /// One expression, consuming infix operators whose left binding power
         /// is at least `min_bp`.
         fn expression(&mut self, min_bp: u8) -> Result<Expr, CompileError> {
+            self.deeper(1)?;
             let mut lhs = self.unary()?;
+            // A left-associative chain costs no frame *here* -- it is this
+            // loop and not recursion -- but it builds a tree that leans one
+            // node deeper to the left per operator, and every consumer of that
+            // tree walks it recursively. So the chain is charged too, and the
+            // charge is released with this frame's.
+            let mut chain = 0;
             while let Some((what, lbp, rbp)) = infix(self.kind()) {
                 if lbp < min_bp {
                     break;
                 }
+                self.deeper(1)?;
+                chain += 1;
                 let at = self.peek().offset;
                 self.advance();
                 let rhs = self.expression(rbp)?;
@@ -960,10 +1109,12 @@ pub(crate) mod m1 {
                 };
                 lhs = Expr { kind, span };
             }
+            self.shallower(1 + chain);
             Ok(lhs)
         }
 
         fn unary(&mut self) -> Result<Expr, CompileError> {
+            self.deeper(1)?;
             let token = self.peek().clone();
             let span = Span(token.offset);
             let op = match token.kind {
@@ -976,10 +1127,9 @@ pub(crate) mod m1 {
                     if let TokenKind::Int(magnitude) = self.kind().clone() {
                         let at = self.peek().offset;
                         self.advance();
-                        return Ok(Expr {
-                            kind: int_literal(magnitude, true, at)?,
-                            span,
-                        });
+                        let kind = int_literal(magnitude, true, at)?;
+                        self.shallower(1);
+                        return Ok(Expr { kind, span });
                     }
                     UnaryOp::Neg
                 }
@@ -999,11 +1149,18 @@ pub(crate) mod m1 {
                     };
                     self.advance();
                     let target = self.unary()?;
-                    return self.update(op, true, target, span);
+                    let out = self.update(op, true, target, span);
+                    self.shallower(1);
+                    return out;
                 }
-                _ => return self.postfix(),
+                _ => {
+                    let out = self.postfix();
+                    self.shallower(1);
+                    return out;
+                }
             };
             let operand = self.expression(BP_PREFIX)?;
+            self.shallower(1);
             Ok(Expr {
                 kind: ExprKind::Unary(op, Box::new(operand)),
                 span,
@@ -1039,6 +1196,7 @@ pub(crate) mod m1 {
         /// has no token to parse; the loop simply ends there and the statement
         /// that wanted a `;` names the boundary.
         fn postfix(&mut self) -> Result<Expr, CompileError> {
+            self.deeper(1)?;
             let mut expr = self.primary()?;
             loop {
                 match self.kind() {
@@ -1074,10 +1232,12 @@ pub(crate) mod m1 {
                     _ => break,
                 }
             }
+            self.shallower(1);
             Ok(expr)
         }
 
         fn arguments(&mut self) -> Result<Vec<Expr>, CompileError> {
+            self.deeper(1)?;
             let open = self.peek().offset;
             self.advance();
             let mut args = Vec::new();
@@ -1093,10 +1253,12 @@ pub(crate) mod m1 {
                     break;
                 }
             }
+            self.shallower(1);
             Ok(args)
         }
 
         fn primary(&mut self) -> Result<Expr, CompileError> {
+            self.deeper(1)?;
             let token = self.peek().clone();
             let span = Span(token.offset);
             let kind = match token.kind {
@@ -1160,6 +1322,7 @@ pub(crate) mod m1 {
                             token.offset
                         ),
                     )?;
+                    self.shallower(1);
                     return Ok(inner);
                 }
                 // In statement position a `{` opens a block, and `statement`
@@ -1174,6 +1337,7 @@ pub(crate) mod m1 {
                 }
                 _ => return Err(self.cannot_use("needs an operand here")),
             };
+            self.shallower(1);
             Ok(Expr { kind, span })
         }
 
@@ -1213,6 +1377,30 @@ pub(crate) mod m1 {
 
         fn classify(&self, p: &Pending, id: BindingId) -> Result<Res, CompileError> {
             let binding = &self.bindings[id.0 as usize];
+            // The temporal dead zone, in the one shape a compiler can settle
+            // without running the program: the occurrence is in the very
+            // function that declares the binding, and it is written before the
+            // declarator that initialises it. An occurrence inside a *nested*
+            // function is not decided here -- `function f() { return x; } let
+            // x = 1; f();` is legal, because the call is what runs, not the
+            // text -- so this deliberately catches only the definite cases and
+            // leaves the rest reading `undefined` until there is a runtime
+            // flag to test. Storage is a zeroed local or global and
+            // `TAG_UNDEFINED` is 0, which is why the value would otherwise be
+            // a fabricated `undefined` rather than an error.
+            if let Some(at) = binding.initialised
+                && binding.func == p.func
+                && p.offset < at
+            {
+                return Err(malformed(
+                    &format!(
+                        "reads `{}` before the declaration at byte {} initialises it; a `let` or `const` binding holds no value until its declarator has run",
+                        binding.name,
+                        binding.span.offset()
+                    ),
+                    p.offset,
+                ));
+            }
             match (p.role, binding.kind) {
                 // A call to a known function names a function index rather
                 // than storage, so it reaches out of any depth: no capture.
