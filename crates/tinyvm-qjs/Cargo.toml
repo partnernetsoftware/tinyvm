@@ -3,9 +3,15 @@ name = "tinyvm-qjs"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
-description = "Expression-subset qjs2wasm + eval_qjs over tinyvm eval_wasm (not agenterm-qjs / rquickjs)"
+description = "Pure-Rust .qjs -> .wasm compiler plus the eval_qjs skin over tinyvm eval_wasm (not rquickjs, not a QuickJS C binding)"
 license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
 tinyvm = { path = "../tinyvm" }
+
+[dev-dependencies]
+# Test-only cross-check: the acceptance suite compares this crate's hand-written
+# encoder against a reference assembler, so "canonical wasm" is measured rather
+# than asserted. Never a runtime dependency -- owning the encoding is the point.
+wat = "1"

@@ -13,7 +13,8 @@ Execution plan: [tinyvm as an iOS game runtime foundation](../plan/goal-tinyvm-i
 便携可编程核。超级应用「跑程序」必须经此：`eval_wasm(data, globals, locals)`，装载期校验，宿主资源上限，无 JIT 也能活（含 iOS）。
 对齐 JVM（校验+上限+同语义），不对齐 V8（JIT+完整 JS）。qjs 糖是皮，wasm 是核。
 
-语言皮在 `tinyvm-qjs`：`eval_qjs = qjs2wasm + eval_wasm`。完整 JS / 容器 / 市场后加。
+语言层在 `tinyvm-qjs`：`.qjs -> .wasm` 纯 Rust 编译器 + 皮 `eval_qjs = qjs2wasm + eval_wasm`。
+容器 / 市场后加。
 
 ## 纪律
 
@@ -299,11 +300,27 @@ as “almost approved” or “safe to ship externally.”
   WebAssembly binary module (`\0asm`). `globals` bind the import table at the host
   door; `locals` are this call's arguments. `eval` / `eval_with` remain empty-gate
   aliases. WAT is a development source format, not a runtime input.
-- `tinyvm-qjs` is a language skin, not a JS engine: `qjs2wasm` lowers a
-  name / arithmetic / zero-arg host-call subset to MVP wasm; `eval_qjs` is
-  `eval_wasm(&qjs2wasm(src)?, globals, locals)`. The world is only those two
-  bindings. Full JS / AOT is excluded. The commissar demo is
+- `tinyvm-qjs` is the language layer: a staged `.qjs` -> `.wasm` compiler
+  (lex -> parse -> AST -> IR -> encode) plus the skin that runs what it emits.
+  `compile_qjs` is compile-only and generic — it knows nothing about any
+  embedder's host door — and returns a `CompileError` naming the capability
+  boundary and its byte offset. `qjs2wasm` is that compiler under
+  `Names::HostImport`, where a bare name is a zero-argument `js.<name>` import;
+  `eval_qjs` is `eval_wasm(&qjs2wasm(src)?, globals, locals)`, and its world is
+  only those two bindings. The commissar demo is
   `cargo run -p tinyvm-qjs --example commissar`.
+- The compiler moved *up* into this crate on 2026-08-24, from AgenTerm's
+  `agenterm-qjswasm`, on one principle: generic dynamic-engine capability
+  belongs in tinyvm, business belongs in the embedder. The 1113 lines that
+  moved contain no embedder vocabulary; the host door and slot policy that do
+  stayed behind. AgenTerm now consumes `tinyvm-qjs` by git revision instead of
+  carrying its own copy.
+- **Open, not decided here:** the non-goal tree below still reads `full JS
+  engine in tinyvm-qjs [–]`. That line was written when this crate was a demo
+  skin. It is now the compiler an embedder's language roadmap runs on, and that
+  embedder's own PRD treats JS coverage as scheduling rather than exclusion.
+  The two statements cannot both stay true forever. Left standing rather than
+  silently flipped: reconciling them is the owner's call, not a migration's.
 - TinyArcade metadata lives in a standard custom section. Host capability use remains
   ordinary versioned function imports.
 - `tinyvm module validate FILE.wasm` validates an ordinary module without requiring a

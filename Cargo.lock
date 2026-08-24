@@ -386,6 +386,7 @@ name = "tinyvm-qjs"
 version = "0.1.0"
 dependencies = [
  "tinyvm",
+ "wat",
 ]
 
 [[package]]
