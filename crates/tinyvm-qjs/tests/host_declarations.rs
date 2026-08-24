@@ -499,6 +499,29 @@ fn a_void_declaration_evaluates_to_undefined() {
     );
 }
 
+/// A declared call is an ordinary expression: it works inside a nested
+/// function, inside a loop, and many times in one frame. The scratch locals a
+/// call needs are per-frame and recycled, so the tenth call costs what the
+/// first did.
+#[test]
+fn a_declared_call_works_wherever_an_expression_does() {
+    let seen = Rc::new(RefCell::new(Seen::default()));
+    seen.borrow_mut().reply = b"r".to_vec();
+    assert_eq!(
+        run(
+            "function shout(s) { log(s); return invoke(s, reply()); }
+             let n = 0;
+             for (let i = 0; i < 3; i++) { n = n + shout(\"x\"); }
+             return n;",
+            &seen
+        ),
+        Out::Number(0.0)
+    );
+    let seen = seen.borrow();
+    assert_eq!(seen.logged, vec!["x".to_string(); 3]);
+    assert_eq!(seen.invoked, vec![("x".to_string(), "r".to_string()); 3]);
+}
+
 // =========================================================================
 // A wrong type is a clean typed failure
 // =========================================================================
