@@ -133,7 +133,8 @@ tinyvm (35)                                      [~]
 │   │   ├── bounded in-place host dispatch                [x]
 │   │   ├── indexed guest-memory callback context          [x]
 │   │   ├── domain + generation guest resource handles     [x]
-│   │   └── bounds-checked guest memory windows            [x]
+│   │   ├── bounds-checked guest memory windows            [x]
+│   │   └── two-pass variable-length host result           [x]
 │   ├── standard resource imports                        [~]
 │   │   ├── standard imported globals                     [x]
 │   │   ├── standard imported linear memories             [x]
@@ -334,6 +335,11 @@ as “almost approved” or “safe to ship externally.”
   越界或求和溢出一律返回 `WasmError`，不夹取、不截断、不 panic；坏指针
   (`guest memory window`)、坏文本 (`guest memory utf-8`) 与客户机缓冲区过小
   (`guest memory window too small`) 各占一句。
+- 宿主回调整段持有客户机内存的 `&mut`，无法回身调用客户机导出的分配器；要交回变长结果
+  只能两趟：先返回长度，客户机自己分配，再回来取字节。这是本 VM 的结构性约束，不是某个
+  embedder 的口味，所以核提供机制本身 `PendingResult`：有上限、fallible 增长、只交付一次；
+  目的缓冲区不够是自成一句的条件 (`pending result destination`) 且不丢暂存结果，客户机可以
+  重分配再取。核不定义任何 import 名或状态码，那是 embedder 的 ABI。
 - 核 fmt-free，`WasmError::message()` 是下游唯一能分类的通道，所以每一种要分开处理的条件
   各占一句 `&'static str`，不共用一个含混词。上限一句一个：`call depth` /
   `activation slot limit` / `operand stack` / `control stack` / `step budget` /

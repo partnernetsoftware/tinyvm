@@ -638,7 +638,7 @@ fn parse_prd_x_leaves(prd: &str) -> Vec<String> {
 /// test must exist in this package's integration tests and assert something
 /// concrete — the point of naming it here is that a leaf can no longer be
 /// satisfied by a text row.
-const LEAF_TESTS: [(&str, &str); 167] = [
+const LEAF_TESTS: [(&str, &str); 168] = [
     ("eval(bytes)", "eval_bytes"),
     (
         "in-guest throughput gate",
@@ -894,6 +894,10 @@ const LEAF_TESTS: [(&str, &str); 167] = [
     (
         "bounds-checked guest memory windows",
         "guest_windows_are_bounds_checked_over_the_whole_boundary",
+    ),
+    (
+        "two-pass variable-length host result",
+        "a_guest_collects_a_variable_length_host_result_in_two_passes",
     ),
     ("start once", "instance_runs_start_exactly_once"),
     (

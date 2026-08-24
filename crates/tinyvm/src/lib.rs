@@ -65,6 +65,9 @@ pub use host::{
     HostHandle, HostLimits, HostResult, OpenOptions, SeekWhence,
 };
 
+pub mod pending_result;
+pub use pending_result::{PendingResult, PendingResultError};
+
 pub mod resource_table;
 pub use resource_table::{
     GuestResourceHandle, HostResourceTable, MAX_RESOURCE_DOMAINS, MAX_RESOURCE_GENERATION,
