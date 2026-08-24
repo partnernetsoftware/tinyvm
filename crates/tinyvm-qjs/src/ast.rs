@@ -46,3 +46,350 @@ pub(crate) enum BinaryOp {
     Div,
     Rem,
 }
+
+/// The M1 tree: statements, functions, and names already resolved to bindings.
+///
+/// Nested rather than replacing the items above because [`super::emit`] still
+/// consumes the M0 tree and lives in another lane. Integration is one move:
+/// delete the M0 items, un-nest this module.
+///
+/// Three things distinguish it from an ordinary hand-rolled JavaScript AST, and
+/// each is load-bearing:
+///
+/// * every node carries a [`m1::Span`], because M1 is the first milestone whose
+///   diagnostics are raised *after* parsing (an unresolved name), where no
+///   token offset is in hand;
+/// * `&&`/`||` are [`m1::ExprKind::Logical`] and not [`m1::ExprKind::Binary`],
+///   because
+///   they are control flow -- see that variant;
+/// * a name is a [`m1::Res`], not a string. wasm locals are indexed, so the
+///   name-to-index question has to be answered somewhere; it is answered here,
+///   once, by the parser's resolution pass, and lowering never sees a name it
+///   has to look up.
+///
+/// The whole compilation unit is [`m1::Program::SCRIPT`], an ordinary
+/// [`m1::Function`]
+/// with no name. That is not a convenience: `$N` already means "this call's
+/// arguments", so the unit *is* a function body, and `return` in it returns.
+#[allow(
+    dead_code,
+    reason = "the M1 tree is complete before the lowering lane consumes it"
+)]
+pub(crate) mod m1 {
+    /// Where a node starts, in bytes from the start of the source.
+    ///
+    /// One offset and not a range: [`crate::diag::CompileError`] carries one
+    /// offset, and a [`crate::lex::Token`] carries no length, so an end would
+    /// have to be invented rather than measured. A newtype anyway, so that the
+    /// day a token knows its length `end` is a field here instead of a second
+    /// argument at every call site.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct Span(pub(crate) usize);
+
+    impl Span {
+        pub(crate) fn offset(self) -> usize {
+            self.0
+        }
+    }
+
+    /// Index into [`Program::functions`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub(crate) struct FuncId(pub(crate) u32);
+
+    /// Index into [`Program::bindings`]: one declared name, program-wide.
+    ///
+    /// Flat rather than a `(function, slot)` pair so that a [`Res`] is one
+    /// number and the two views a consumer wants -- "which binding is this"
+    /// and "where does it live" -- do not have to agree by construction.
+    /// [`Binding::func`] and [`Binding::slot`] are the second view.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub(crate) struct BindingId(pub(crate) u32);
+
+    /// A whole compilation unit: every function it defines and every name it
+    /// binds, with the statements hanging off [`Program::SCRIPT`].
+    #[derive(Debug, Clone, PartialEq)]
+    pub(crate) struct Program {
+        pub(crate) functions: Vec<Function>,
+        pub(crate) bindings: Vec<Binding>,
+        /// How many `$N` the script names: one past the highest index used, so
+        /// `$2` alone still means three and a source naming none means zero.
+        pub(crate) arg_count: u32,
+    }
+
+    impl Program {
+        /// The compilation unit itself. Always the first function, so a
+        /// consumer can tell "module storage" from "frame slot" by comparing
+        /// [`Binding::func`] against it.
+        pub(crate) const SCRIPT: FuncId = FuncId(0);
+
+        pub(crate) fn script(&self) -> &Function {
+            self.func(Self::SCRIPT)
+        }
+
+        pub(crate) fn func(&self, id: FuncId) -> &Function {
+            &self.functions[id.0 as usize]
+        }
+
+        pub(crate) fn binding(&self, id: BindingId) -> &Binding {
+            &self.bindings[id.0 as usize]
+        }
+    }
+
+    /// One function: the script, a declaration, or a function expression.
+    #[derive(Debug, Clone, PartialEq)]
+    pub(crate) struct Function {
+        /// The declared name, or `None` for the script and for an anonymous
+        /// function expression.
+        pub(crate) name: Option<String>,
+        /// Parameters in order. Also the first entries of `bindings`.
+        pub(crate) params: Vec<BindingId>,
+        /// Every binding whose storage this function owns, parameters first
+        /// and then in declaration order across every block. Block structure
+        /// is deliberately gone by here: a wasm local is function-scoped, and
+        /// two `let x` in sibling blocks are already two distinct bindings.
+        pub(crate) bindings: Vec<BindingId>,
+        pub(crate) body: Vec<Stmt>,
+        pub(crate) span: Span,
+    }
+
+    /// One declared name.
+    #[derive(Debug, Clone, PartialEq)]
+    pub(crate) struct Binding {
+        pub(crate) name: String,
+        pub(crate) kind: BindingKind,
+        /// Where the declaration is, for a diagnostic that has to point back
+        /// at it ("...already bound at byte N").
+        pub(crate) span: Span,
+        /// The function that owns the storage.
+        pub(crate) func: FuncId,
+        /// Position in that function's [`Function::bindings`]. What a wasm
+        /// local index is computed *from*; not the index itself, because how
+        /// many wasm locals one binding costs is the representation's business
+        /// and not the front end's.
+        pub(crate) slot: u32,
+    }
+
+    /// How a name was declared. The distinction outlives scoping: `Const` says
+    /// the binding can never be written, and `Function` says its value is a
+    /// known function, which is what makes a direct call possible in a
+    /// milestone with no function values.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum BindingKind {
+        Param,
+        Var,
+        Let,
+        Const,
+        /// A `function f(){}` declaration, or a `const f = function(){}`. Both
+        /// are a name that holds one known function and can never be
+        /// reassigned; nothing else in this milestone is callable.
+        Function(FuncId),
+    }
+
+    /// What a name occurrence turned out to mean.
+    #[derive(Debug, Clone, PartialEq)]
+    pub(crate) enum Res {
+        /// The parser has not run its resolution pass over this occurrence
+        /// yet. Never present in a [`Program`] the parser returned.
+        Unresolved,
+        /// A binding of the very function this occurrence appears in.
+        Local(BindingId),
+        /// A binding of the script, read from inside a function. Its storage
+        /// has to outlive a frame; which module-level storage that is, is the
+        /// lowering's choice.
+        Global(BindingId),
+        /// The callee of a call, bound to a known function. It names a
+        /// function index rather than storage, which is why it resolves from
+        /// any depth: a direct call captures nothing. Always a binding whose
+        /// kind is [`BindingKind::Function`].
+        Callee(BindingId),
+        /// A free name, resolved against the host import table. Only produced
+        /// under [`crate::Names::HostImport`].
+        Host(String),
+    }
+
+    /// One occurrence of a name.
+    #[derive(Debug, Clone, PartialEq)]
+    pub(crate) struct Name {
+        pub(crate) text: String,
+        pub(crate) res: Res,
+        /// Which occurrence this is, counting from the start of the source.
+        ///
+        /// The parser records every occurrence in one list and resolves that
+        /// list only after the whole program is read -- hoisting means a name
+        /// can bind to a declaration nobody has parsed yet -- then writes the
+        /// answers back through this index. Of no use downstream.
+        pub(crate) occurrence: u32,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub(crate) struct Stmt {
+        pub(crate) kind: StmtKind,
+        pub(crate) span: Span,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub(crate) enum StmtKind {
+        /// A lone `;`. Kept rather than dropped so a statement list's length
+        /// is the source's, which is what a span-based diagnostic assumes.
+        Empty,
+        Expr(Expr),
+        /// `let`/`const`/`var`, one [`Declarator`] per name. Which of the three
+        /// it was is on the [`Binding`], where the question is asked from.
+        Decl(Vec<Declarator>),
+        Block(Vec<Stmt>),
+        If {
+            test: Expr,
+            then: Box<Stmt>,
+            alt: Option<Box<Stmt>>,
+        },
+        While {
+            test: Expr,
+            body: Box<Stmt>,
+        },
+        /// A three-part `for`. `init` is a [`StmtKind::Decl`] or a
+        /// [`StmtKind::Expr`] -- reusing `Stmt` rather than a second enum,
+        /// because those are exactly the two shapes and both already exist.
+        For {
+            init: Option<Box<Stmt>>,
+            test: Option<Expr>,
+            update: Option<Expr>,
+            body: Box<Stmt>,
+        },
+        Return(Option<Expr>),
+        /// A hoisted `function f(){}`. It appears in the list where it was
+        /// written, but its binding is in scope from the top of the enclosing
+        /// scope, so nothing has to *run* here.
+        Func {
+            binding: BindingId,
+            func: FuncId,
+        },
+    }
+
+    /// One name of a declaration, with its initialiser if it has one.
+    #[derive(Debug, Clone, PartialEq)]
+    pub(crate) struct Declarator {
+        pub(crate) binding: BindingId,
+        pub(crate) init: Option<Expr>,
+        pub(crate) span: Span,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub(crate) struct Expr {
+        pub(crate) kind: ExprKind,
+        pub(crate) span: Span,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub(crate) enum ExprKind {
+        /// An integer literal. Still `i32` at M1: the parser has applied any
+        /// leading minus and checked the range, so lowering cannot meet an
+        /// unrepresentable one.
+        Int(i32),
+        /// A string literal, escapes already resolved by the lexer.
+        Str(String),
+        Bool(bool),
+        Null,
+        Undefined,
+        /// `$N` -- the Nth argument of this call. A parameter of the script,
+        /// which is why it may not appear inside a nested function.
+        Arg(u32),
+        Name(Name),
+        /// A function expression.
+        Function(FuncId),
+        Call {
+            callee: Box<Expr>,
+            args: Vec<Expr>,
+        },
+        Unary(UnaryOp, Box<Expr>),
+        /// `++`/`--`, written before or after its target. The distinction is
+        /// the *value* of the expression, not the effect, so it cannot be
+        /// desugared away here.
+        Update {
+            op: UpdateOp,
+            prefix: bool,
+            target: Box<Expr>,
+        },
+        Binary(BinaryOp, Box<Expr>, Box<Expr>),
+        /// `&&` and `||`.
+        ///
+        /// A separate node from [`ExprKind::Binary`] on purpose, and this is
+        /// the one AST decision that is a semantic requirement rather than a
+        /// taste. Every `Binary` evaluates both operands and then applies an
+        /// operator; these two evaluate the right operand only if the left
+        /// says so, and their value is one of the *operands*, not a boolean.
+        /// Folding them into `Binary` is precisely how an engine loses
+        /// short-circuiting, because the lowering that walks `Binary` is
+        /// post-order by construction.
+        Logical(LogicalOp, Box<Expr>, Box<Expr>),
+        /// `=` and the compound forms. `op` is `None` for a plain `=`;
+        /// `Some(Add)` is `+=`, which reads the target, applies the operator,
+        /// and writes back.
+        Assign {
+            op: Option<BinaryOp>,
+            target: Box<Expr>,
+            value: Box<Expr>,
+        },
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum UnaryOp {
+        Neg,
+        /// Unary `+`: ToNumber, not a no-op.
+        Plus,
+        Not,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum UpdateOp {
+        Inc,
+        Dec,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum BinaryOp {
+        Add,
+        Sub,
+        Mul,
+        Div,
+        Rem,
+        Lt,
+        Le,
+        Gt,
+        Ge,
+        /// `==`, which converts. [`BinaryOp::StrictEq`] is `===`, which does
+        /// not; they are different operators and not a flag on one.
+        Eq,
+        Ne,
+        StrictEq,
+        StrictNe,
+    }
+
+    impl BinaryOp {
+        /// How the operator is written. For diagnostics and for tests that
+        /// assert a tree *shape*, which is the readable way to state a
+        /// precedence claim.
+        pub(crate) fn symbol(self) -> &'static str {
+            match self {
+                Self::Add => "+",
+                Self::Sub => "-",
+                Self::Mul => "*",
+                Self::Div => "/",
+                Self::Rem => "%",
+                Self::Lt => "<",
+                Self::Le => "<=",
+                Self::Gt => ">",
+                Self::Ge => ">=",
+                Self::Eq => "==",
+                Self::Ne => "!=",
+                Self::StrictEq => "===",
+                Self::StrictNe => "!==",
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum LogicalOp {
+        And,
+        Or,
+    }
+}

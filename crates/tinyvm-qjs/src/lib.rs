@@ -21,10 +21,23 @@
 //!
 //! # What it compiles
 //!
-//! Decimal integer literals, `+ - * / %`, unary minus, parentheses, and `$N`
-//! for the Nth argument of this call. The result is an ordinary wasm module
-//! exporting one function named `main`, taking one `i32` parameter per argument
-//! the source names and returning `i32`.
+//! There are two entry points, and for one milestone only.
+//!
+//! [`compile_qjs`] is M0: decimal integer literals, `+ - * / %`, unary minus,
+//! parentheses, and `$N` for the Nth argument of this call. The result is an
+//! ordinary wasm module exporting one function named `main`, taking one `i32`
+//! parameter per argument the source names and returning `i32`.
+//!
+//! [`compile_qjs_m1`] is M1: statements, `let`/`const`/`var`, `if`/`while`/
+//! `for`, functions with parameters and `return`, strings, and the full
+//! operator ladder -- all of it over the V1 value representation, where one
+//! JavaScript value is a `(tag: i32, payload: i64)` pair. Its `main` therefore
+//! takes *two* wasm parameters per argument and returns two results; [`Value`]
+//! is the door.
+//!
+//! The two exist side by side because M0 has callers that are green on `i32`
+//! in and `i32` out, and a representation change is not something to do to a
+//! caller silently. When they move, M1 takes the name and this paragraph goes.
 //!
 //! A bare name is the one thing the two callers disagree about, so it is the
 //! one thing [`Options`] chooses — see [`Names`]. Under the default the
@@ -39,7 +52,11 @@
 //!
 //! Full JS is not a converter and is not this crate — yet. The subset grows by
 //! real script demand, and every rejection says which construct is ahead of the
-//! engine so the boundary is visible instead of guessed at.
+//! engine so the boundary is visible instead of guessed at. M1 adds two more
+//! stages to the list above, both of them internal: `repr` is the value
+//! representation and `runtime` is the guest-side code every compiled module
+//! carries, because an operator that dispatches on its operands' types is a
+//! call and not an opcode.
 //!
 //! Commissar demo: `cargo run -p tinyvm-qjs --example commissar`
 
@@ -53,9 +70,73 @@ mod ir;
 mod lex;
 mod parse;
 mod qjs2wasm;
+mod repr;
+mod runtime;
 
 pub use diag::{Boundary, CompileError};
 pub use qjs2wasm::qjs2wasm;
+
+/// A JavaScript value as a host sees it at the call boundary.
+///
+/// The M1 entry point ([`compile_qjs_m1`]) compiles to the V1 representation,
+/// where one JS value is two wasm values, so a host cannot hand one over as a
+/// single [`Val`]. This is the door: [`Value::args`] on the way in,
+/// [`Value::returned`] on the way out.
+///
+/// `String` is a guest pointer into the instance's linear memory, not text.
+/// Resolving it needs the instance, which is the caller's to hold.
+///
+/// A separate type from `repr::HostVal`, which is the same five cases: that
+/// one is the compiler's internal vocabulary and this one is public API, and a
+/// public re-export would freeze the internal one. The conversion is below and
+/// is the only place they meet.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Value {
+    Undefined,
+    Null,
+    Number(f64),
+    Bool(bool),
+    String(i32),
+}
+
+impl Value {
+    /// Flatten JS values into the wasm arguments a compiled entry point takes.
+    pub fn args(values: &[Value]) -> Vec<Val> {
+        values
+            .iter()
+            .flat_map(|v| repr::host_encode(repr::HostVal::from(*v)))
+            .collect()
+    }
+
+    /// Read back what a compiled entry point returned.
+    pub fn returned(vals: &[Val]) -> Result<Value, String> {
+        repr::host_decode(vals).map(Value::from)
+    }
+}
+
+impl From<Value> for repr::HostVal {
+    fn from(value: Value) -> Self {
+        match value {
+            Value::Undefined => repr::HostVal::Undefined,
+            Value::Null => repr::HostVal::Null,
+            Value::Number(x) => repr::HostVal::Number(x),
+            Value::Bool(b) => repr::HostVal::Bool(b),
+            Value::String(p) => repr::HostVal::String(p),
+        }
+    }
+}
+
+impl From<repr::HostVal> for Value {
+    fn from(value: repr::HostVal) -> Self {
+        match value {
+            repr::HostVal::Undefined => Value::Undefined,
+            repr::HostVal::Null => Value::Null,
+            repr::HostVal::Number(x) => Value::Number(x),
+            repr::HostVal::Bool(b) => Value::Bool(b),
+            repr::HostVal::String(p) => Value::String(p),
+        }
+    }
+}
 
 /// What a bare name in the source resolves to.
 ///
@@ -102,6 +183,53 @@ pub fn compile_qjs_with(source: &str, options: Options) -> Result<Vec<u8>, Compi
     let program = parse::parse(&tokens, options)?;
     let module = emit::lower(&program);
     Ok(encode::encode(&module))
+}
+
+/// Compile `.qjs` source through the M1 front end and the V1 value
+/// representation. Compile-only: never executes.
+///
+/// The milestone the rest of the crate is moving to, and a second entry point
+/// only until it is: [`compile_qjs`] is M0 -- one integer expression, `i32` in
+/// and `i32` out -- and its callers are green on exactly those terms. This one
+/// compiles statements, declarations, control flow, functions and strings, and
+/// every value it moves is a V1 pair, so its `main` takes two wasm parameters
+/// per JavaScript argument and returns two wasm results. Use [`Value`] to
+/// cross that boundary.
+///
+/// When the M0 path is deleted this becomes `compile_qjs`.
+///
+/// ```
+/// use tinyvm::{Limits, WasmModule};
+/// use tinyvm_qjs::{Value, compile_qjs_m1};
+///
+/// let wasm = compile_qjs_m1("return $0 * 2;").expect("compiles");
+/// // `WasmError` has no `Debug` -- the core is fmt-free -- so `ok()` first.
+/// let module = WasmModule::from_bytes_with(&wasm, Limits::default())
+///     .ok()
+///     .expect("clears the load gate");
+/// let mut instance = module.instantiate().ok().expect("instantiates");
+/// let out = instance
+///     .invoke_by_name("main", &Value::args(&[Value::Number(21.0)]))
+///     .ok()
+///     .expect("runs");
+/// assert_eq!(Value::returned(&out), Ok(Value::Number(42.0)));
+/// ```
+pub fn compile_qjs_m1(source: &str) -> Result<Vec<u8>, CompileError> {
+    compile_qjs_m1_with(source, Options::default())
+}
+
+/// [`compile_qjs_m1`] with the caller's [`Options`].
+///
+/// Under [`Names::HostImport`] a free name is an import `js.<name>`, called
+/// with the JS values written at the call site and returning one. That is a
+/// wider door than M0's zero-argument `i32` one, and it is not the door
+/// [`eval_wasm`]'s [`HostGlobal`] fits through -- bind it with
+/// `Module::bind_import_typed`.
+pub fn compile_qjs_m1_with(source: &str, options: Options) -> Result<Vec<u8>, CompileError> {
+    let tokens = lex::tokenize(source)?;
+    let program = parse::m1::parse(&tokens, options)?;
+    let module = emit::m1::lower(&program)?;
+    Ok(ir::m1::assemble(&module))
 }
 
 /// [`qjs2wasm`] then [`eval_wasm`]: `eval_wasm(&qjs2wasm(source)?, globals, locals)`.
