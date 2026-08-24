@@ -1124,7 +1124,18 @@ pub(crate) mod m1 {
                     // `i32::MIN` has no positive counterpart, so
                     // `-2147483648` is only representable if the sign reaches
                     // the literal.
-                    if let TokenKind::Int(magnitude) = self.kind().clone() {
+                    //
+                    // A zero magnitude is the one case the fold must decline.
+                    // The folded literal is an `i32` and `i32` has one zero,
+                    // so folding would hand the lowering `Int(0)` and `-0`
+                    // would come out as `+0` -- a Number ECMA-262 6.1.6.1
+                    // distinguishes from `0`, and the only Number whose
+                    // reciprocal is `-Infinity`. Left unfolded it is
+                    // `Unary(Neg, Int(0))`, and 13.5.5's sign flip on a
+                    // Number is exactly what produces `-0`.
+                    if let TokenKind::Int(magnitude) = self.kind().clone()
+                        && magnitude != 0
+                    {
                         let at = self.peek().offset;
                         self.advance();
                         let kind = int_literal(magnitude, true, at)?;

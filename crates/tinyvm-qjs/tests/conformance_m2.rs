@@ -232,6 +232,26 @@ fn negative_zero_exists_and_is_not_positive_zero() {
     number("1 / 0", f64::INFINITY);
     // Unary minus is a sign flip (13.5.5), not a subtraction from zero.
     number("-(1 - 1)", -0.0);
+    // The literal spelling, which is the one place the sign is easy to lose:
+    // the parser folds a leading minus onto the magnitude so that
+    // `-2147483648` is representable, and a zero magnitude has no negative
+    // `i32` to be folded onto. `-0` is a Number the spec names, and the only
+    // way to see it is to divide by it.
+    number("-0", -0.0);
+    number("1 / -0", f64::NEG_INFINITY);
+    boolean("-0 === 0", true);
+    boolean("-0 < 0", false);
+    // The sign survives storage and a call, not just the expression that made
+    // it: a fold that lost it would lose it here too.
+    number("let z = -0; return 1 / z;", f64::NEG_INFINITY);
+    number(
+        "function f() { return -0; } return 1 / f();",
+        f64::NEG_INFINITY,
+    );
+    // And `+0` stays `+0`: the fix must not flip the sign the other way.
+    number("0", 0.0);
+    number("1 / 0", f64::INFINITY);
+    number("-(-0)", 0.0);
 }
 
 /// The literal grammar this engine reads is a strict subset of 12.9.3: plain
