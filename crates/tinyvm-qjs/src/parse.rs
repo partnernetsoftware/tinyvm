@@ -7,9 +7,9 @@
 //! level here is one row in [`infix`].
 
 use super::ast::{BinaryOp, Expr, Program, UnaryOp};
-use super::diag::{Boundary, CompileError, malformed, unsupported};
+use super::diag::{Boundary, CompileError, host_table, malformed, unsupported};
 use super::lex::{OUT_OF_I32_RANGE, TOO_MANY_ARGUMENTS, Token, TokenKind};
-use crate::{Names, Options};
+use crate::opts::{Names, Options};
 
 /// Binding power of the unary minus. Above every infix level, so `-2 * 3` is
 /// `(-2) * 3` and not `-(2 * 3)` -- indistinguishable here, but not once `**`
@@ -190,8 +190,20 @@ impl Parser<'_> {
     /// table -- the `eval_wasm` `globals` -- so there a name is a host import,
     /// and `g` and `g()` mean the same call.
     fn name(&mut self, name: &str, offset: usize) -> Result<Expr, CompileError> {
-        if self.options.names == Names::Unbound {
-            return Err(unsupported(Boundary::Subset, "variable references", offset));
+        match &self.options.names {
+            Names::Unbound => {
+                return Err(unsupported(Boundary::Subset, "variable references", offset));
+            }
+            // A declared table's parameters are pointers into linear memory
+            // and its arguments are JavaScript values. This pipeline has
+            // neither: it is one `i32` expression in and one `i32` out.
+            Names::Declared(_) => {
+                return Err(host_table(
+                    "cannot reach a declared host table from this pipeline, which compiles one `i32` expression; `compile_qjs_m1_with` is the entry point that can",
+                    offset,
+                ));
+            }
+            Names::HostImport => {}
         }
         if self.peek().kind == TokenKind::LParen {
             self.advance();
@@ -287,7 +299,7 @@ pub(crate) mod m1 {
     use crate::lex::{
         OUT_OF_I32_RANGE, TOO_MANY_ARGUMENTS, Token, TokenKind, semicolon_is_implied,
     };
-    use crate::{Names, Options};
+    use crate::opts::{Names, Options};
 
     /// The binding-power ladder, loosest first, spaced by two so that a
     /// left-associative row can spell `right = left + 1` and a
@@ -1374,11 +1386,18 @@ pub(crate) mod m1 {
                 }
                 scope = self.scopes[id].parent;
             }
-            match self.options.names {
+            match &self.options.names {
+                // Either host table resolves a free name the same way. Which
+                // *shape* the call takes -- V1 pairs into `js.<name>`, or the
+                // raw signature an embedder declared -- is the lowering's
+                // question, not resolution's, and `emit` is where the
+                // declaration is checked against the call.
+                Names::HostImport | Names::Declared(_) if p.role != Role::Write => {
+                    Ok(Res::Host(p.name.clone()))
+                }
                 // The host table is a table of imports, and an import is not
                 // a place a value can be put.
-                Names::HostImport if p.role != Role::Write => Ok(Res::Host(p.name.clone())),
-                Names::HostImport => Err(unsupported(
+                Names::HostImport | Names::Declared(_) => Err(unsupported(
                     Boundary::ThirdBinding,
                     "assigning to a host name",
                     p.offset,

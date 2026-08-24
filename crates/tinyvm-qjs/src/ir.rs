@@ -182,7 +182,9 @@ pub(crate) mod m1 {
         F64Mul,
         F64Div,
         F64Copysign,
+        F64Trunc,
         // conversions
+        I32TruncF64S,
         I32WrapI64,
         I64ExtendI32U,
         F64ConvertI32S,
@@ -487,6 +489,8 @@ pub(crate) mod m1 {
             Ins::F64Mul => encode::op(out, Op::F64Mul),
             Ins::F64Div => encode::op(out, Op::F64Div),
             Ins::F64Copysign => encode::op(out, Op::F64Copysign),
+            Ins::F64Trunc => encode::op(out, Op::F64Trunc),
+            Ins::I32TruncF64S => encode::op(out, Op::I32TruncF64S),
             Ins::I32WrapI64 => encode::op(out, Op::I32WrapI64),
             Ins::I64ExtendI32U => encode::op(out, Op::I64ExtendI32U),
             Ins::F64ConvertI32S => encode::op(out, Op::F64ConvertI32S),

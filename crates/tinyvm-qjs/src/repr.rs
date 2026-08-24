@@ -149,7 +149,9 @@ pub(crate) enum Ins {
     F64Mul,
     F64Div,
     F64Copysign,
+    F64Trunc,
     // conversions
+    I32TruncF64S,
     I32WrapI64,
     I64ExtendI32U,
     F64ConvertI32S,

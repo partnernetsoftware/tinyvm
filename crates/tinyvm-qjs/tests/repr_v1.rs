@@ -309,6 +309,8 @@ fn ins_wat(ins: &Ins) -> String {
         Ins::F64Mul => "f64.mul".into(),
         Ins::F64Div => "f64.div".into(),
         Ins::F64Copysign => "f64.copysign".into(),
+        Ins::F64Trunc => "f64.trunc".into(),
+        Ins::I32TruncF64S => "i32.trunc_f64_s".into(),
         Ins::I32WrapI64 => "i32.wrap_i64".into(),
         Ins::I64ExtendI32U => "i64.extend_i32_u".into(),
         Ins::F64ConvertI32S => "f64.convert_i32_s".into(),

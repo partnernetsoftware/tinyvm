@@ -98,6 +98,29 @@ pub(crate) fn unsupported(boundary: Boundary, construct: &str, offset: usize) ->
     }
 }
 
+/// "this engine {what}" -- against the host table an embedder declared.
+///
+/// A third constructor because these rejections are neither of the other two.
+/// [`unsupported`] says a construct is ahead of the engine, and nothing here
+/// is: `log(1)` is a call this engine can lower, to a door that does not take
+/// a Number. [`malformed`] says the source cannot be read to the end, and it
+/// reads fine. What went wrong is that the script asked the embedder's host
+/// table for something it does not contain, or asked for it in a shape it
+/// cannot take -- or that the table itself cannot be an import table.
+///
+/// Still the engine's voice, and always [`Boundary::ThirdBinding`], because
+/// the host table is exactly the third world that boundary names.
+///
+/// `what` is a verb phrase completing "this engine {what}", e.g. ``"has no
+/// host function named `x`"``.
+pub(crate) fn host_table(what: &str, offset: usize) -> CompileError {
+    CompileError {
+        message: format!("this engine {what}"),
+        offset,
+        boundary: Boundary::ThirdBinding,
+    }
+}
+
 /// "this engine {what}" -- for input the engine cannot finish reading.
 ///
 /// `what` is a verb phrase completing that sentence, e.g. `"needs an operand

@@ -638,7 +638,7 @@ fn parse_prd_x_leaves(prd: &str) -> Vec<String> {
 /// test must exist in this package's integration tests and assert something
 /// concrete — the point of naming it here is that a leaf can no longer be
 /// satisfied by a text row.
-const LEAF_TESTS: [(&str, &str); 173] = [
+const LEAF_TESTS: [(&str, &str); 174] = [
     ("eval(bytes)", "eval_bytes"),
     (
         "in-guest throughput gate",
@@ -683,6 +683,10 @@ const LEAF_TESTS: [(&str, &str); 173] = [
     (
         "declarations, functions, control flow",
         "qjs_m1_lowers_declarations_functions_and_control_flow",
+    ),
+    (
+        "host calls with declared raw signatures",
+        "qjs_m1_reaches_a_declared_host_door_with_arguments",
     ),
     (
         "nesting bounded by a diagnostic, not an abort",

@@ -91,6 +91,66 @@ Two bounds are the engine's rather than the language's, and say so the same way:
 syntax nested past the compiler's frame budget (a stack overflow is a process
 abort, so the depth is a number the compiler keeps), and more than 64 `$N`.
 
+## Reaching a host, with arguments
+
+A script that can only compute is not much use, so `Names::Declared` is the
+door out. An embedder declares the raw wasm functions it has, and how a
+JavaScript argument maps onto their parameters:
+
+```rust
+use tinyvm_qjs::{HostFn, HostParam, HostResult, Names, Options, compile_qjs_m1_with};
+
+let table = vec![
+    // sys.call(op_ptr, op_len, args_ptr, args_len) -> i32
+    HostFn {
+        name: "call".into(), module: "sys".into(), field: "call".into(),
+        params: vec![HostParam::StrPtrLen, HostParam::StrPtrLen],
+        result: HostResult::I32,
+    },
+    // sys.result_len() -> i32  and  sys.result(dst, cap) -> i32,
+    // written `result()` in a script and answering with a String.
+    HostFn {
+        name: "result".into(), module: "sys".into(), field: "result".into(),
+        params: vec![],
+        result: HostResult::Bytes { length: "result_len".into() },
+    },
+    // sys.print(ptr, len) -> ()
+    HostFn {
+        name: "print".into(), module: "sys".into(), field: "print".into(),
+        params: vec![HostParam::StrPtrLen],
+        result: HostResult::Void,
+    },
+];
+let wasm = compile_qjs_m1_with(
+    r#"if (call("spawn", "{}") === 0) { print(result()); } return 0;"#,
+    Options { names: Names::Declared(table) },
+)?;
+```
+
+**The compiler unwraps; the door does not learn about JavaScript values.** The
+emitted module imports `sys.call(i32,i32,i32,i32)->i32`,
+`sys.result_len()->i32`, `sys.result(i32,i32)->i32` and `sys.print(i32,i32)`,
+and nothing else — the same import table a hand-written `.wasm` guest would
+present. That direction is the whole design: a door speaking `(tag, payload)`
+would break every hand-written guest and leak one language's value
+representation into a boundary meant to serve any guest. So this crate owns the
+*mechanism* and names nobody's host function; the vocabulary is the embedder's.
+
+- A **String** argument lowers to `(ptr, len)` — the UTF-8 bytes in linear
+  memory, valid for the call only, since the guest heap is a bump allocator.
+- A **Number** lowers to `i32` or `f64` as the declaration says. `i32` means
+  the Number has to *be* one: a fractional value, a NaN, an infinity or
+  anything out of range traps rather than being rounded.
+- A **`Bytes`** result is the two-pass read: ask the length, bump-allocate a
+  string record on the guest's own heap, ask for the copy, and check that the
+  copy wrote what the length promised. A short or negative write traps instead
+  of producing a String with a fabricated tail.
+- A **wrong type** is a compile diagnostic where the compiler can settle it
+  (`print(1)`), and a trap where only the run can (`print(x)`).
+- Only the declarations a script mentions become imports, in **declaration
+  order**, so an embedder can predict its import table without reading the
+  script.
+
 ## The M0 skin
 
 ```rust
@@ -104,8 +164,8 @@ tinyvm_qjs::eval_qjs("g()+$0", &globals, &locals)     // = eval_wasm(&qjs2wasm(s
 
 The difference is one field of `Options` — see `Names`. The world of the skin is
 only the two `eval_wasm` bindings: `globals` is the import table a name resolves
-against, `locals` are this call's `$N`. A host call takes no arguments; that
-would need a third world.
+against, `locals` are this call's `$N`. A host call there takes no arguments;
+the declared table above is the third world that gives it some.
 
 `CompileError` carries a `String`; `WasmError` carries a `&'static str` because
 the core is fmt-free. `qjs2wasm` narrows one to the other by declared

@@ -19,6 +19,11 @@ mod ast;
 mod diag;
 #[path = "../src/lex.rs"]
 mod lex;
+/// `src/parse.rs` reads `Names` and `Options` from `crate::opts`. Under
+/// `#[path]` the crate root is this file, so the real module is pulled in here
+/// too -- one file, rather than the hand-copied twin this shim used to be.
+#[path = "../src/opts.rs"]
+mod opts;
 #[path = "../src/parse.rs"]
 mod parse;
 
@@ -27,21 +32,7 @@ use ast::m1::{
 };
 use diag::CompileError;
 
-/// `src/parse.rs` reads these from the crate root. Under `#[path]` the crate
-/// root is this file, so the two public choices are declared here as well.
-/// They must stay identical to `src/lib.rs`; the day `parse` is reachable as a
-/// module of the library, this shim goes.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Names {
-    #[default]
-    Unbound,
-    HostImport,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Options {
-    pub names: Names,
-}
+use opts::{Names, Options};
 
 // -- harness -----------------------------------------------------------------
 

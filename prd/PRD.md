@@ -55,6 +55,7 @@ tinyvm (35)                                      [~]
 │   │   ├── commissar demo (example commissar)            [x]
 │   │   ├── V1 values across the call boundary            [x]
 │   │   ├── declarations, functions, control flow         [x]
+│   │   ├── host calls with declared raw signatures       [x]
 │   │   ├── nesting bounded by a diagnostic, not an abort [x]
 │   │   ├── every rejection names the engine boundary     [x]
 │   │   └── full JS engine / AOT                          [–]
@@ -322,6 +323,20 @@ as “almost approved” or “safe to ship externally.”
   wasm parameters per JavaScript argument and returns two results; `Value` is the
   host's door across that boundary. `compile_qjs` stays beside it only until its
   `i32`-in/`i32`-out callers move.
+- A compiled `.qjs` reaches a host capability *with arguments* through
+  `Names::Declared`: the embedder declares raw wasm functions — module, field,
+  signature — and how each JavaScript argument maps onto their parameters, and
+  the compiler unwraps. A String argument becomes `(ptr, len)` into linear
+  memory; a variable-length byte result becomes a String again through a
+  two-pass read onto the guest's own bump heap. **The door stays raw.** It never
+  learns what a JavaScript value is, so the same host stands behind a
+  hand-written `.wasm` guest and a compiled `.qjs` one, through one import
+  table. Making the door speak `(tag, payload)` would break every hand-written
+  guest and would leak one language's value representation into a boundary meant
+  to serve any guest. `tinyvm-qjs` therefore owns the mechanism and names
+  nobody's host function; the vocabulary belongs to the embedder. A wrong
+  argument type is a compile diagnostic where the compiler can settle it and a
+  trap where only the run can — never a silent coercion.
 - Syntax nesting is bounded by a number the compiler keeps, not by the native
   stack. Recursive descent overflows into a process abort, which for a host
   compiling untrusted `.qjs` is the worst failure mode there is — no caller is

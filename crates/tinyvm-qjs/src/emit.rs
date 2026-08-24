@@ -232,11 +232,13 @@ pub(crate) mod m1 {
     use std::collections::BTreeMap;
 
     use crate::ast::m1 as ast;
-    use crate::diag::{Boundary, CompileError, unsupported};
+    use crate::diag::{Boundary, CompileError, host_table, unsupported};
     use crate::ir::m1 as ir;
+    use crate::opts::{HostFn, HostParam, HostResult, Names, Options};
     use crate::repr::{
-        self, BlockType, Ins, ValType, WIDTH, box_bool, box_number, const_bool, const_null,
-        const_number, const_string, const_undefined, drop_value, load_local, store_local,
+        self, BlockType, Ins, ValType, WIDTH, box_bool, box_number, box_string, const_bool,
+        const_null, const_number, const_string, const_undefined, drop_value, load_local,
+        store_local, unbox_number, unbox_string,
     };
     use crate::runtime::{self, Ctx, FnBuild, Rt, StringPool};
 
@@ -274,6 +276,10 @@ pub(crate) mod m1 {
         Ok(pages)
     }
 
+    /// The `[len: i32][utf8 bytes]` record's header, in bytes. A host reading
+    /// a string wants the bytes, which start after it.
+    const STRING_HEADER: i32 = 4;
+
     /// Global 0 is the bump-allocation pointer, which is what
     /// [`Ctx::heap_global`] names; the script's bindings take two globals each
     /// after it.
@@ -287,9 +293,54 @@ pub(crate) mod m1 {
         arity: u32,
     }
 
-    pub(crate) fn lower(program: &ast::Program) -> Result<ir::Module, CompileError> {
+    /// One declaration the script uses, with the function indices its imports
+    /// took. A `Bytes` result is two imports, so there are two indices.
+    #[derive(Debug, Clone)]
+    struct Bound {
+        decl: HostFn,
+        /// The length import of a [`HostResult::Bytes`] result.
+        length: Option<u32>,
+        /// The declaration's own import.
+        index: u32,
+    }
+
+    /// What a host call in the tree resolves against.
+    ///
+    /// Two worlds, and the lowering of a call is genuinely different in each,
+    /// which is why this is an enum and not a flag. Under
+    /// [`Names::HostImport`] the import speaks this engine's V1 pairs and the
+    /// call is a straight forward of the arguments. Under [`Names::Declared`]
+    /// the import speaks raw wasm and the call has to unwrap every argument
+    /// onto it and rewrap what comes back.
+    #[derive(Debug, Clone)]
+    enum Table {
+        Pairs(Vec<Host>),
+        Raw(Vec<Bound>),
+    }
+
+    impl Table {
+        /// How many wasm imports the module has. Under `Raw` a declaration may
+        /// be more than one.
+        fn imports(&self) -> u32 {
+            match self {
+                Self::Pairs(hosts) => hosts.len() as u32,
+                Self::Raw(bound) => bound
+                    .iter()
+                    .map(|b| 1 + u32::from(b.length.is_some()))
+                    .sum(),
+            }
+        }
+    }
+
+    pub(crate) fn lower(
+        program: &ast::Program,
+        options: &Options,
+    ) -> Result<ir::Module, CompileError> {
         let scan = scan(program)?;
-        let hosts = scan.hosts();
+        let table = match &options.names {
+            Names::Declared(decls) => Table::Raw(bind(decls, &scan)?),
+            _ => Table::Pairs(scan.hosts()),
+        };
         // The pool opens before the runtime is built, because `__typeof`
         // answers with pool records and so has to know their addresses. The
         // five names go in first when the program asks for them, and not at
@@ -298,21 +349,24 @@ pub(crate) mod m1 {
         let ctx = Ctx {
             // Imported functions take the first indices, so the runtime
             // starts exactly where the import table ends.
-            func_base: hosts.len() as u32,
+            func_base: table.imports(),
             heap_global: HEAP_GLOBAL,
             type_names: scan.type_of.then(|| runtime::TypeNames::intern(&mut pool)),
         };
         let user_base = ctx.func_base + runtime::SET.len() as u32;
 
         let mut types: Vec<ir::FuncType> = Vec::new();
-        let imports: Vec<ir::Import> = hosts
-            .iter()
-            .map(|host| ir::Import {
-                module: HOST_MODULE.to_string(),
-                name: host.name.clone(),
-                type_index: intern(&mut types, values(host.arity), values(1)),
-            })
-            .collect();
+        let imports: Vec<ir::Import> = match &table {
+            Table::Pairs(hosts) => hosts
+                .iter()
+                .map(|host| ir::Import {
+                    module: HOST_MODULE.to_string(),
+                    name: host.name.clone(),
+                    type_index: intern(&mut types, values(host.arity), values(1)),
+                })
+                .collect(),
+            Table::Raw(bound) => raw_imports(bound, &mut types),
+        };
 
         let mut funcs: Vec<ir::Func> = Vec::new();
         for built in runtime::build(&ctx) {
@@ -327,7 +381,7 @@ pub(crate) mod m1 {
 
         for (index, function) in program.functions.iter().enumerate() {
             let id = ast::FuncId(index as u32);
-            let built = Lower::new(program, &ctx, &mut pool, &hosts, user_base, id).function()?;
+            let built = Lower::new(program, &ctx, &mut pool, &table, user_base, id).function()?;
             let arity = if id == ast::Program::SCRIPT {
                 program.arg_count
             } else {
@@ -503,6 +557,8 @@ pub(crate) mod m1 {
                 Ins::F64Mul => ir::Ins::F64Mul,
                 Ins::F64Div => ir::Ins::F64Div,
                 Ins::F64Copysign => ir::Ins::F64Copysign,
+                Ins::F64Trunc => ir::Ins::F64Trunc,
+                Ins::I32TruncF64S => ir::Ins::I32TruncF64S,
                 Ins::I32WrapI64 => ir::Ins::I32WrapI64,
                 Ins::I64ExtendI32U => ir::Ins::I64ExtendI32U,
                 Ins::F64ConvertI32S => ir::Ins::F64ConvertI32S,
@@ -532,6 +588,143 @@ pub(crate) mod m1 {
 
     // -- the import table ----------------------------------------------------
 
+    // -- the declared host table ---------------------------------------------
+
+    /// Resolve every host name the script uses against the embedder's
+    /// declarations, in **declaration order**.
+    ///
+    /// Declaration order and not use order: an embedder reading its own table
+    /// can then predict the import list without reading the script. Only the
+    /// declarations a script actually uses become imports, so a host is never
+    /// asked to bind a capability the guest cannot reach.
+    ///
+    /// Everything this checks is a mismatch between a script and a table, or
+    /// inside a table, so every rejection is a [`host_table`] one.
+    fn bind(decls: &[HostFn], scan: &Scan) -> Result<Vec<Bound>, CompileError> {
+        for (position, decl) in decls.iter().enumerate() {
+            if decls[..position].iter().any(|d| d.name == decl.name) {
+                return Err(host_table(
+                    &format!("was given two host functions both named `{}`", decl.name),
+                    0,
+                ));
+            }
+            if let HostResult::Bytes { length } = &decl.result
+                && *length == decl.field
+            {
+                return Err(host_table(
+                    &format!(
+                        "cannot import `{}.{}` as both the length pass and the read pass of `{}`; the two have different signatures, so they cannot be one import",
+                        decl.module, decl.field, decl.name
+                    ),
+                    0,
+                ));
+            }
+        }
+
+        // Every name the script used has to be one of them, with the arity
+        // the declaration names. `scan` already refused a name used at two
+        // arities, so one number per name is the whole story.
+        for (name, use_) in &scan.hosts {
+            let Some(decl) = decls.iter().find(|d| d.name == *name) else {
+                let known: Vec<&str> = decls.iter().map(|d| d.name.as_str()).collect();
+                return Err(host_table(
+                    &format!(
+                        "has no host function named `{name}`; this embedder declares {}",
+                        list(&known)
+                    ),
+                    scan.at(name),
+                ));
+            };
+            let want = decl.params.len() as u32;
+            if use_.arity != want {
+                return Err(host_table(
+                    &format!(
+                        "was given the host function `{name}` with {want} argument(s), and this call passes {}",
+                        use_.arity
+                    ),
+                    scan.at(name),
+                ));
+            }
+        }
+
+        let mut next = 0u32;
+        let mut bound = Vec::new();
+        for decl in decls {
+            if !scan.hosts.contains_key(&decl.name) {
+                continue;
+            }
+            // The length import comes first, so a reader of the import table
+            // meets the two passes of a `Bytes` door in the order the
+            // lowering calls them.
+            let length = matches!(decl.result, HostResult::Bytes { .. }).then(|| {
+                let at = next;
+                next += 1;
+                at
+            });
+            let index = next;
+            next += 1;
+            bound.push(Bound {
+                decl: decl.clone(),
+                length,
+                index,
+            });
+        }
+        Ok(bound)
+    }
+
+    /// `` `a`, `b` and `c` `` -- or "no host functions at all", which is the
+    /// answer a reader of an empty table most needs.
+    fn list(names: &[&str]) -> String {
+        match names {
+            [] => "no host functions at all".to_string(),
+            [only] => format!("`{only}`"),
+            [rest @ .., last] => {
+                let rest: Vec<String> = rest.iter().map(|n| format!("`{n}`")).collect();
+                format!("{} and `{last}`", rest.join(", "))
+            }
+        }
+    }
+
+    /// The import entries a declared table produces, in the order [`bind`]
+    /// assigned their indices.
+    fn raw_imports(bound: &[Bound], types: &mut Vec<ir::FuncType>) -> Vec<ir::Import> {
+        let mut out = Vec::new();
+        for b in bound {
+            let params: Vec<ValType> = b
+                .decl
+                .params
+                .iter()
+                .flat_map(|p| match p {
+                    HostParam::StrPtrLen => vec![ValType::I32, ValType::I32],
+                    HostParam::I32 => vec![ValType::I32],
+                    HostParam::F64 => vec![ValType::F64],
+                })
+                .collect();
+            if let HostResult::Bytes { length } = &b.decl.result {
+                out.push(ir::Import {
+                    module: b.decl.module.clone(),
+                    name: length.clone(),
+                    type_index: intern(types, params.clone(), vec![ValType::I32]),
+                });
+            }
+            let (extra, results) = match &b.decl.result {
+                HostResult::Void => (Vec::new(), Vec::new()),
+                HostResult::I32 => (Vec::new(), vec![ValType::I32]),
+                HostResult::F64 => (Vec::new(), vec![ValType::F64]),
+                // The read pass takes the destination and its capacity after
+                // whatever the declaration names, and answers with how many
+                // bytes it wrote.
+                HostResult::Bytes { .. } => (vec![ValType::I32, ValType::I32], vec![ValType::I32]),
+            };
+            out.push(ir::Import {
+                module: b.decl.module.clone(),
+                name: b.decl.field.clone(),
+                type_index: intern(types, [params, extra].concat(), results),
+            });
+        }
+        out
+    }
+
     /// What one walk of the program tells the module builder, before a single
     /// instruction is emitted.
     ///
@@ -540,27 +733,40 @@ pub(crate) mod m1 {
     /// disagree with the first about which expressions those are.
     #[derive(Debug, Default)]
     struct Scan {
-        /// Every host name the program calls, sorted and deduplicated, with
-        /// the argument count it is called with.
+        /// Every host name the program calls, sorted and deduplicated.
         ///
         /// A wasm import has one signature, so a name used at two arities has
         /// no single import to be. Overloading it would need a third world.
-        hosts: BTreeMap<String, u32>,
+        hosts: BTreeMap<String, Use>,
         /// Whether the program writes `typeof` anywhere. The five strings
         /// 13.5.3 answers with are data-segment literals, so a program that
         /// never asks should not carry them -- see [`runtime::TypeNames`].
         type_of: bool,
     }
 
+    /// How one host name is used: the argument count every occurrence agrees
+    /// on, and where the first of them is, so a diagnostic about the name can
+    /// point at the script rather than at byte 0.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Use {
+        arity: u32,
+        at: usize,
+    }
+
     impl Scan {
         fn hosts(&self) -> Vec<Host> {
             self.hosts
                 .iter()
-                .map(|(name, arity)| Host {
+                .map(|(name, use_)| Host {
                     name: name.clone(),
-                    arity: *arity,
+                    arity: use_.arity,
                 })
                 .collect()
+        }
+
+        /// Where this name is first used, for a diagnostic about it.
+        fn at(&self, name: &str) -> usize {
+            self.hosts.get(name).map_or(0, |use_| use_.at)
         }
     }
 
@@ -581,13 +787,22 @@ pub(crate) mod m1 {
         span: ast::Span,
     ) -> Result<(), CompileError> {
         match scan.hosts.get(name) {
-            Some(known) if *known != arity => Err(unsupported(
+            Some(known) if known.arity != arity => Err(unsupported(
                 Boundary::ThirdBinding,
                 &format!("calling the host name `{name}` with two different argument counts"),
                 span.offset(),
             )),
-            _ => {
-                scan.hosts.insert(name.to_string(), arity);
+            // The *first* occurrence is the one a diagnostic points at, so a
+            // repeat does not move it.
+            Some(_) => Ok(()),
+            None => {
+                scan.hosts.insert(
+                    name.to_string(),
+                    Use {
+                        arity,
+                        at: span.offset(),
+                    },
+                );
                 Ok(())
             }
         }
@@ -685,7 +900,7 @@ pub(crate) mod m1 {
         program: &'a ast::Program,
         ctx: &'a Ctx,
         pool: &'a mut StringPool,
-        hosts: &'a [Host],
+        table: &'a Table,
         user_base: u32,
         id: ast::FuncId,
         f: FnBuild,
@@ -696,6 +911,10 @@ pub(crate) mod m1 {
         /// nests, so taking and giving back is a stack and one local can serve
         /// many sites.
         free: Vec<u32>,
+        /// The same, for the bare `i32` locals a declared host call needs.
+        /// Separate because a JS value is two words and these are one, so one
+        /// pool cannot serve both.
+        free_raw: Vec<u32>,
     }
 
     impl<'a> Lower<'a> {
@@ -703,7 +922,7 @@ pub(crate) mod m1 {
             program: &'a ast::Program,
             ctx: &'a Ctx,
             pool: &'a mut StringPool,
-            hosts: &'a [Host],
+            table: &'a Table,
             user_base: u32,
             id: ast::FuncId,
         ) -> Self {
@@ -744,12 +963,13 @@ pub(crate) mod m1 {
                 program,
                 ctx,
                 pool,
-                hosts,
+                table,
                 user_base,
                 id,
                 f,
                 completion,
                 free: Vec::new(),
+                free_raw: Vec::new(),
             }
         }
 
@@ -776,6 +996,16 @@ pub(crate) mod m1 {
 
         fn give(&mut self, base: u32) {
             self.free.push(base);
+        }
+
+        fn take_raw(&mut self) -> u32 {
+            self.free_raw
+                .pop()
+                .unwrap_or_else(|| self.f.local(ValType::I32))
+        }
+
+        fn give_raw(&mut self, index: u32) {
+            self.free_raw.push(index);
         }
 
         fn push(&mut self, ins: Ins) {
@@ -1123,15 +1353,188 @@ pub(crate) mod m1 {
         }
 
         fn host_call(&mut self, name: &str, args: &[ast::Expr]) -> Result<(), CompileError> {
-            let index = self
-                .hosts
-                .iter()
-                .position(|host| host.name == name)
-                .expect("every host name in the tree was collected");
-            let arity = self.hosts[index].arity;
-            self.arguments(args, arity)?;
-            self.push(Ins::Call(index as u32));
+            match self.table {
+                Table::Pairs(hosts) => {
+                    let index = hosts
+                        .iter()
+                        .position(|host| host.name == name)
+                        .expect("every host name in the tree was collected");
+                    let arity = hosts[index].arity;
+                    self.arguments(args, arity)?;
+                    self.push(Ins::Call(index as u32));
+                    Ok(())
+                }
+                Table::Raw(bound) => {
+                    let b = bound
+                        .iter()
+                        .find(|b| b.decl.name == name)
+                        .expect("`bind` refused every name it could not resolve");
+                    self.declared_call(&b.clone(), args)
+                }
+            }
+        }
+
+        /// A call across the raw door an embedder declared.
+        ///
+        /// ```text
+        /// <evaluate each JS argument into a scratch pair, left to right>
+        /// <unwrap the pairs onto the declared raw parameters>
+        /// call the import
+        /// <rewrap the raw result as a JS value>
+        /// ```
+        ///
+        /// The arguments are evaluated *first*, all of them, and only then
+        /// unwrapped. That is not a convenience: an argument can assign or
+        /// call, JavaScript evaluates them left to right, and a
+        /// [`HostResult::Bytes`] result pushes the raw parameters twice.
+        /// Evaluating in place would reorder the first and repeat the second.
+        fn declared_call(&mut self, b: &Bound, args: &[ast::Expr]) -> Result<(), CompileError> {
+            debug_assert_eq!(
+                args.len(),
+                b.decl.params.len(),
+                "`bind` checked the arity of every host name"
+            );
+            for (position, (arg, param)) in args.iter().zip(&b.decl.params).enumerate() {
+                if let Some(got) = static_type(arg)
+                    && got != param.wants()
+                {
+                    return Err(host_table(
+                        &format!(
+                            "cannot pass {got} to argument {} of the host function `{}`, which is declared to take {}",
+                            position + 1,
+                            b.decl.name,
+                            param.wants()
+                        ),
+                        arg.span.offset(),
+                    ));
+                }
+            }
+
+            let mut slots = Vec::with_capacity(args.len());
+            for arg in args {
+                let slot = self.take();
+                self.expr(arg)?;
+                store_local(slot, &mut self.f.body);
+                slots.push(slot);
+            }
+
+            match &b.decl.result {
+                HostResult::Void => {
+                    self.unwrap_args(&slots, &b.decl.params);
+                    self.push(Ins::Call(b.index));
+                    const_undefined(&mut self.f.body);
+                }
+                HostResult::I32 | HostResult::F64 => {
+                    let widen = matches!(b.decl.result, HostResult::I32);
+                    let params = b.decl.params.clone();
+                    let index = b.index;
+                    let inner = self.detached(|me| {
+                        me.unwrap_args(&slots, &params);
+                        me.push(Ins::Call(index));
+                        if widen {
+                            me.push(Ins::F64ConvertI32S);
+                        }
+                        Ok(())
+                    })?;
+                    box_number(&inner, &mut self.f.body);
+                }
+                HostResult::Bytes { .. } => self.two_pass_string(b, &slots),
+            }
+
+            for slot in slots.into_iter().rev() {
+                self.give(slot);
+            }
             Ok(())
+        }
+
+        /// Push the raw parameters the declaration names, reading each JS
+        /// argument out of the scratch pair it was evaluated into.
+        ///
+        /// The type tests here are [`super::repr`]'s accessors, so a value of
+        /// the wrong type traps rather than being reinterpreted. That is the
+        /// runtime half of the policy whose compile-time half is
+        /// [`static_type`] above: a dynamic language cannot settle every
+        /// argument's type before it runs, and must not pretend to.
+        fn unwrap_args(&mut self, slots: &[u32], params: &[HostParam]) {
+            for (slot, param) in slots.iter().zip(params) {
+                match param {
+                    // The bytes, not the record: a host reading `(ptr, len)`
+                    // wants the text, and the 4-byte length header in front of
+                    // it is this engine's business.
+                    HostParam::StrPtrLen => {
+                        unbox_string(*slot, &mut self.f.body);
+                        self.push(Ins::I32Const(STRING_HEADER));
+                        self.push(Ins::I32Add);
+                        unbox_string(*slot, &mut self.f.body);
+                        self.push(Ins::I32Load(2, 0));
+                    }
+                    // The Number has to *be* an `i32`. `f64.trunc` rejects a
+                    // fractional value and `i32.trunc_f64_s` rejects a NaN, an
+                    // infinity and anything out of range -- so the host either
+                    // receives the number the script wrote or nothing at all.
+                    // Rounding here would hand a host a number no line of the
+                    // script contains.
+                    HostParam::I32 => {
+                        let scratch = self.f.local(ValType::F64);
+                        unbox_number(*slot, &mut self.f.body);
+                        self.push(Ins::LocalTee(scratch));
+                        self.push(Ins::F64Trunc);
+                        self.push(Ins::LocalGet(scratch));
+                        self.push(Ins::F64Ne);
+                        self.push(Ins::If(BlockType::Empty));
+                        self.push(Ins::Unreachable);
+                        self.push(Ins::End);
+                        self.push(Ins::LocalGet(scratch));
+                        self.push(Ins::I32TruncF64S);
+                    }
+                    HostParam::F64 => unbox_number(*slot, &mut self.f.body),
+                }
+            }
+        }
+
+        /// [`HostResult::Bytes`]: ask the length, allocate a string record of
+        /// that size on the engine's own heap, ask for the copy, and check it.
+        ///
+        /// The check is the point. A host that reports one length and writes
+        /// another -- or answers with the negative "your buffer is too small"
+        /// a raw contract gives -- would otherwise produce a String with a
+        /// fabricated tail, which is indistinguishable from a real one. It
+        /// traps instead.
+        fn two_pass_string(&mut self, b: &Bound, slots: &[u32]) {
+            let length = b.length.expect("a Bytes result binds a length import");
+            let n = self.take_raw();
+            let p = self.take_raw();
+            let params = b.decl.params.clone();
+
+            self.unwrap_args(slots, &params);
+            self.push(Ins::Call(length));
+            self.push(Ins::LocalSet(n));
+
+            self.push(Ins::LocalGet(n));
+            self.push(Ins::I32Const(STRING_HEADER));
+            self.push(Ins::I32Add);
+            let alloc = self.ctx.call(Rt::Alloc);
+            self.push(alloc);
+            self.push(Ins::LocalSet(p));
+            self.push(Ins::LocalGet(p));
+            self.push(Ins::LocalGet(n));
+            self.push(Ins::I32Store(2, 0));
+
+            self.unwrap_args(slots, &params);
+            self.push(Ins::LocalGet(p));
+            self.push(Ins::I32Const(STRING_HEADER));
+            self.push(Ins::I32Add);
+            self.push(Ins::LocalGet(n));
+            self.push(Ins::Call(b.index));
+            self.push(Ins::LocalGet(n));
+            self.push(Ins::I32Ne);
+            self.push(Ins::If(BlockType::Empty));
+            self.push(Ins::Unreachable);
+            self.push(Ins::End);
+
+            box_string(&[Ins::LocalGet(p)], &mut self.f.body);
+            self.give_raw(p);
+            self.give_raw(n);
         }
 
         /// Reconcile a JavaScript argument list with a wasm one.
@@ -1305,6 +1708,41 @@ pub(crate) mod m1 {
                 _ => unreachable!("the parser refuses every other assignment target"),
             }
         }
+    }
+
+    /// The ECMA-262 language type an expression is known to have without
+    /// running it, named as it reads inside a diagnostic, or `None` when the
+    /// compiler cannot settle it.
+    ///
+    /// `None` for most of the language, and that is correct rather than
+    /// unfinished: in a dynamic language a name's type is a property of the
+    /// run, not of the text. This settles the cases where the text *is* the
+    /// answer -- a literal, and the unary operators whose result type does
+    /// not depend on their operand -- so that `log(1)` is a diagnostic with a
+    /// byte offset instead of a trap the author has to reproduce. Everything
+    /// else is checked where the type is known, which is at run time; see
+    /// [`Lower::unwrap_args`].
+    ///
+    /// Widening this is safe in one direction only. A new arm must be one
+    /// whose answer is certain, because a wrong `Some` refuses a script that
+    /// would have run.
+    fn static_type(expr: &ast::Expr) -> Option<&'static str> {
+        Some(match &expr.kind {
+            ast::ExprKind::Int(_) => "a Number",
+            ast::ExprKind::Str(_) => "a String",
+            ast::ExprKind::Bool(_) => "a Boolean",
+            ast::ExprKind::Null => "Null",
+            ast::ExprKind::Undefined => "Undefined",
+            // 13.5.4 and 13.5.5: both are ToNumber of the operand.
+            ast::ExprKind::Unary(ast::UnaryOp::Plus | ast::UnaryOp::Neg, _) => "a Number",
+            // 13.5.7: ToBoolean, negated.
+            ast::ExprKind::Unary(ast::UnaryOp::Not, _) => "a Boolean",
+            // 13.5.3: always one of five strings.
+            ast::ExprKind::Unary(ast::UnaryOp::TypeOf, _) => "a String",
+            // 13.4: ToNumeric, and this engine has no BigInt.
+            ast::ExprKind::Update { .. } => "a Number",
+            _ => return None,
+        })
     }
 
     /// Which runtime function an operator is. Every one of them is a call:

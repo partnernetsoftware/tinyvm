@@ -39,11 +39,31 @@
 //! in and `i32` out, and a representation change is not something to do to a
 //! caller silently. When they move, M1 takes the name and this paragraph goes.
 //!
-//! A bare name is the one thing the two callers disagree about, so it is the
-//! one thing [`Options`] chooses — see [`Names`]. Under the default the
+//! A bare name is the one thing this compiler's callers disagree about, so it
+//! is the one thing [`Options`] chooses — see [`Names`]. Under the default the
 //! language has nothing to resolve a name against and says so; under
-//! [`Names::HostImport`] a name is a zero-argument `js.<name>` import, which is
-//! the world [`eval_qjs`] runs in.
+//! [`Names::HostImport`] a name is a `js.<name>` import in this engine's own
+//! value representation, which is the world [`eval_qjs`] runs in; under
+//! [`Names::Declared`] a name is one of the embedder's own host functions,
+//! reached through an ordinary wasm import with an ordinary wasm signature.
+//!
+//! # The host door stays raw
+//!
+//! [`Names::Declared`] is how a compiled `.qjs` script reaches a host
+//! capability *with arguments*, and the shape of it is a decision worth
+//! reading before using it. An embedder declares raw wasm functions — module,
+//! field, signature — and says how each JavaScript argument maps onto raw
+//! parameters ([`HostFn`], [`HostParam`], [`HostResult`]). **The compiler
+//! unwraps; the door does not learn about JavaScript values.** A String
+//! argument becomes a `(ptr, len)` pair into linear memory; a byte result
+//! becomes a String again through a two-pass read onto the guest's own heap.
+//!
+//! That direction is the point. A door that spoke `(tag: i32, payload: i64)`
+//! would break every hand-written `.wasm` guest that already stands behind it,
+//! and would leak one language's value representation into a boundary meant to
+//! serve any guest. So the language layer's job is the *mechanism*, and the
+//! embedder declares what exists: nothing in this crate names anybody's host
+//! function, and nothing in it should.
 //!
 //! Everything else is rejected with a diagnostic that names the engine's
 //! boundary rather than blaming the script; see [`CompileError`]. At M0 `/` and
@@ -69,12 +89,14 @@ mod emit;
 mod encode;
 mod ir;
 mod lex;
+mod opts;
 mod parse;
 mod qjs2wasm;
 mod repr;
 mod runtime;
 
 pub use diag::{Boundary, CompileError};
+pub use opts::{HostFn, HostParam, HostResult, Names, Options};
 pub use qjs2wasm::qjs2wasm;
 
 /// A JavaScript value as a host sees it at the call boundary.
@@ -139,31 +161,6 @@ impl From<repr::HostVal> for Value {
     }
 }
 
-/// What a bare name in the source resolves to.
-///
-/// The language and the [`eval_wasm`] skin genuinely disagree here, and the
-/// disagreement is not a matter of strictness. The language has no bindings
-/// yet, so a name resolves to nothing and the honest answer is a capability
-/// diagnostic. The skin has exactly one binding table — `eval_wasm`'s
-/// `globals` — so there a name *does* mean something, and pretending otherwise
-/// would delete the skin's only vocabulary.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Names {
-    /// Rejected: "this engine does not support variable references yet".
-    #[default]
-    Unbound,
-    /// `g` and `g()` both call the zero-argument import `js.g`. Host calls take
-    /// no arguments — that would need a third world beyond the two bindings.
-    HostImport,
-}
-
-/// How to compile. One field today; the type exists so the next choice is an
-/// added field rather than an added function.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Options {
-    pub names: Names,
-}
-
 /// Compile `.qjs` source to standard wasm bytes. Compile-only: never executes.
 ///
 /// The bytes are an ordinary module. They go through tinyvm's load gate on the
@@ -226,10 +223,53 @@ pub fn compile_qjs_m1(source: &str) -> Result<Vec<u8>, CompileError> {
 /// wider door than M0's zero-argument `i32` one, and it is not the door
 /// [`eval_wasm`]'s [`HostGlobal`] fits through -- bind it with
 /// `Module::bind_import_typed`.
+///
+/// Under [`Names::Declared`] a free name is one of the embedder's [`HostFn`]
+/// declarations, and the import is the raw wasm function that declaration
+/// names -- no V1 pairs at the boundary at all. Only the declarations a script
+/// mentions become imports, and they appear in declaration order, so an
+/// embedder can predict its own import table without reading the script.
+///
+/// ```
+/// use tinyvm::{Limits, WasmModule};
+/// use tinyvm_qjs::{HostFn, HostParam, HostResult, Names, Options, compile_qjs_m1_with};
+///
+/// let table = vec![
+///     // `sys.print(ptr: i32, len: i32) -> ()`
+///     HostFn {
+///         name: "print".to_string(),
+///         module: "sys".to_string(),
+///         field: "print".to_string(),
+///         params: vec![HostParam::StrPtrLen],
+///         result: HostResult::Void,
+///     },
+///     // `sys.read_len() -> i32` and `sys.read(dst: i32, cap: i32) -> i32`,
+///     // written `read()` in a script and answering with a String.
+///     HostFn {
+///         name: "read".to_string(),
+///         module: "sys".to_string(),
+///         field: "read".to_string(),
+///         params: Vec::new(),
+///         result: HostResult::Bytes { length: "read_len".to_string() },
+///     },
+/// ];
+/// let wasm = compile_qjs_m1_with(
+///     "print(\"ready\"); return read();",
+///     Options { names: Names::Declared(table) },
+/// )?;
+/// let module = WasmModule::from_bytes_with(&wasm, Limits::default()).ok().unwrap();
+/// let imports: Vec<String> = module
+///     .imports()
+///     .iter()
+///     .map(|i| format!("{}.{}", i.module, i.field))
+///     .collect();
+/// assert_eq!(imports, ["sys.print", "sys.read_len", "sys.read"]);
+/// # Ok::<(), tinyvm_qjs::CompileError>(())
+/// ```
 pub fn compile_qjs_m1_with(source: &str, options: Options) -> Result<Vec<u8>, CompileError> {
     let tokens = lex::tokenize(source)?;
-    let program = parse::m1::parse(&tokens, options)?;
-    let module = emit::m1::lower(&program)?;
+    let program = parse::m1::parse(&tokens, options.clone())?;
+    let module = emit::m1::lower(&program, &options)?;
     Ok(ir::m1::assemble(&module))
 }
 

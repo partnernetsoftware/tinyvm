@@ -158,3 +158,120 @@ fn qjs_m1_rejections_name_the_engine_boundary() {
         );
     }
 }
+
+/// The host door a script reaches with arguments: an embedder declares raw
+/// wasm functions, the compiler unwraps JavaScript values onto them, and the
+/// module that comes out imports exactly what a hand-written `.wasm` guest
+/// would.
+///
+/// That is the product sentence being executed here: **the compiler unwraps;
+/// the door does not learn about JavaScript values.** The host bound below
+/// speaks `i32` and a byte slice and nothing else -- no V1 pair crosses it --
+/// which is why the same host can stand behind a hand-written guest.
+#[test]
+fn qjs_m1_reaches_a_declared_host_door_with_arguments() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use tinyvm::{Val, WasmError};
+    use tinyvm_qjs::{HostFn, HostParam, HostResult, Names, Options, compile_qjs_m1_with};
+
+    // `sys.echo(ptr, len) -> ()` takes a string; `sys.said_len() -> i32` and
+    // `sys.said(dst, cap) -> i32` hand one back in the two passes a wasm
+    // function needs to return a slice.
+    let table = vec![
+        HostFn {
+            name: "echo".to_string(),
+            module: "sys".to_string(),
+            field: "echo".to_string(),
+            params: vec![HostParam::StrPtrLen],
+            result: HostResult::Void,
+        },
+        HostFn {
+            name: "said".to_string(),
+            module: "sys".to_string(),
+            field: "said".to_string(),
+            params: Vec::new(),
+            result: HostResult::Bytes {
+                length: "said_len".to_string(),
+            },
+        },
+    ];
+    let source = "echo(\"ping\"); return said() + \"!\";";
+    let wasm = compile_qjs_m1_with(
+        source,
+        Options {
+            names: Names::Declared(table),
+        },
+    )
+    .unwrap_or_else(|e| panic!("compiling {source:?}: {e}"));
+
+    let mut module = WasmModule::from_bytes_with(&wasm, Limits::default())
+        .unwrap_or_else(|e| panic!("load gate: {}", e.message()));
+
+    // Raw signatures, in declaration order. Not `(i32, i64)` anywhere.
+    let imports: Vec<(String, usize, usize)> = module
+        .imports()
+        .iter()
+        .map(|i| (format!("{}.{}", i.module, i.field), i.n_params, i.n_results))
+        .collect();
+    assert_eq!(
+        imports,
+        vec![
+            ("sys.echo".to_string(), 2, 0),
+            ("sys.said_len".to_string(), 0, 1),
+            ("sys.said".to_string(), 2, 1),
+        ]
+    );
+
+    let heard: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&heard);
+    module
+        .bind_import_typed("sys", "echo", move |args, memory| {
+            let [Val::I32(ptr), Val::I32(len)] = args else {
+                return Err(WasmError::Trap("sys.echo wants (i32, i32)"));
+            };
+            let at = *ptr as usize;
+            let text = String::from_utf8(memory[at..at + *len as usize].to_vec())
+                .map_err(|_| WasmError::Trap("sys.echo was handed invalid utf-8"))?;
+            sink.borrow_mut().push(text);
+            Ok(Vec::new())
+        })
+        .ok()
+        .expect("bind sys.echo");
+    let answer = b"pong";
+    module
+        .bind_import_typed("sys", "said_len", move |_args, _memory| {
+            Ok(vec![Val::I32(answer.len() as i32)])
+        })
+        .ok()
+        .expect("bind sys.said_len");
+    module
+        .bind_import_typed("sys", "said", move |args, memory| {
+            let [Val::I32(dst), Val::I32(cap)] = args else {
+                return Err(WasmError::Trap("sys.said wants (i32, i32)"));
+            };
+            if (answer.len() as i32) > *cap {
+                return Ok(vec![Val::I32(-1)]);
+            }
+            let at = *dst as usize;
+            memory[at..at + answer.len()].copy_from_slice(answer);
+            Ok(vec![Val::I32(answer.len() as i32)])
+        })
+        .ok()
+        .expect("bind sys.said");
+
+    let mut instance = module.instantiate().ok().expect("instantiate");
+    let vals = instance
+        .invoke_by_name("main", &[])
+        .unwrap_or_else(|e| panic!("trap in {source:?}: {}", e.message()));
+    let Value::String(ptr) = Value::returned(&vals).expect("a V1 pair") else {
+        panic!("the declared door must hand back a JavaScript String");
+    };
+    let view = instance.memory().ok().expect("guest memory");
+    let bytes: &[u8] = &view;
+    let at = ptr as usize;
+    let len = u32::from_le_bytes(bytes[at..at + 4].try_into().expect("length header")) as usize;
+    assert_eq!(&bytes[at + 4..at + 4 + len], b"pong!");
+    assert_eq!(*heard.borrow(), vec!["ping".to_string()]);
+}
