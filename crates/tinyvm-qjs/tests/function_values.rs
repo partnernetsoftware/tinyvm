@@ -888,13 +888,19 @@ fn the_whole_fleet_library_compiles_and_its_methods_are_reachable() {
         .iter()
         .map(|i| format!("{}.{}", i.module, i.field))
         .collect();
-    assert_eq!(imports, ["js.JSON", "js.__host"], "got {imports:?}");
+    // One import, and `js.JSON` is not it: `JSON` is this engine's own, so
+    // the only thing the library asks a host for is the door it was written
+    // to wrap. See `control_conformance.rs`'s
+    // `json_is_this_engines_and_not_the_host_import_it_used_to_be`.
+    assert_eq!(imports, ["js.__host"], "got {imports:?}");
     // A record, not a budget -- so a change in it is visible in a diff. The
-    // README quotes this number; 6 625 of it is the conversion prelude every
-    // module carries, whatever the script. It was 16 381 for the same library
-    // with its `?:` written as an `if` and its `try` deleted, so the two
-    // constructs the engine now reads cost it 19 bytes.
-    assert_eq!(wasm.len(), 16_400, "the whole library's emitted size moved");
+    // README quotes this number. 6 625 of it is the conversion prelude every
+    // module carries, whatever the script; 4 535 more is the JSON set and the
+    // unwind channel `JSON.parse` raises through, which arrived together
+    // because a program that names `JSON` needs both. It was 16 381 for the
+    // same library with its `?:` written as an `if`, its `try` deleted and
+    // `JSON` an opaque host import.
+    assert_eq!(wasm.len(), 20_935, "the whole library's emitted size moved");
 }
 
 /// The same shape, reduced to what can run with no host at all: a namespace

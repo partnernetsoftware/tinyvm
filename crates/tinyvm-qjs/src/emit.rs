@@ -377,6 +377,15 @@ pub(crate) mod m1 {
     #[derive(Debug, Default)]
     struct FnTable {
         entries: Vec<ast::FuncId>,
+        /// How many elements are already spoken for before the user's first.
+        ///
+        /// Two for a program that names `JSON`, whose `stringify` and `parse`
+        /// adapters are in the same table and speak the same signature, and
+        /// zero otherwise. They go **first** because their element indices are
+        /// needed by the entry prologue, which is emitted while the script is
+        /// being lowered -- that is, before the count of user adapters exists.
+        /// Putting them last would need a number nobody has yet.
+        reserved: i32,
     }
 
     impl FnTable {
@@ -393,7 +402,7 @@ pub(crate) mod m1 {
                     self.entries.push(id);
                     self.entries.len() - 1
                 });
-            position as i32 + 1
+            position as i32 + 1 + self.reserved
         }
     }
 
@@ -447,6 +456,39 @@ pub(crate) mod m1 {
 
         /// How many globals it occupies.
         const WORDS: u32 = 3;
+    }
+
+    /// Where the `JSON` namespace object lives, for a program that names it.
+    ///
+    /// One V1 pair of globals holding one object, built by `__json_ns` on the
+    /// first top-level call and read by every occurrence of the name after
+    /// that. Globals and not a fresh object per read for the reason ECMA-262
+    /// 25.5 gives and the allocator seconds: `JSON === JSON` is `true`, and a
+    /// bump heap that never frees must not allocate a namespace per mention.
+    ///
+    /// Built once per *instance* rather than once per call, guarded by the tag
+    /// being `TAG_UNDEFINED`. A rebuild per call would be correct -- nothing
+    /// holds a reference across the boundary -- and would leak two records and
+    /// an object per invocation on an instance the embedder keeps, which is
+    /// exactly the shape the downstream slot has.
+    #[derive(Debug, Clone, Copy)]
+    struct Json {
+        tag: u32,
+        payload: u32,
+        /// Table elements of the two adapters, as `__json_ns` wants them.
+        stringify_element: i32,
+        parse_element: i32,
+        /// Function index of `__json_ns`, which builds the object.
+        ns: u32,
+    }
+
+    impl Json {
+        /// How many globals it occupies.
+        const WORDS: u32 = 2;
+        /// `JSON.stringify` declares `(value, replacer, space)`, so the one
+        /// uniform signature has to be at least this wide for its adapter to
+        /// forward what its target reads.
+        const ARITY: u32 = 3;
     }
 
     /// One enclosing `finally`, innermost last.
@@ -547,7 +589,16 @@ pub(crate) mod m1 {
         // conversion by index before either set is built.
         let runtime_base = table.imports();
         let convert_base = runtime_base + runtime::SET.len() as u32;
-        let user_base = convert_base + convert::SET.len() as u32;
+        // The JSON set sits between the conversions and the user's functions,
+        // and is absent entirely for a program that never names `JSON`, which
+        // is what leaves every such program's indices exactly where they were.
+        let json_base = convert_base + convert::SET.len() as u32;
+        let json_len = if scan.json {
+            convert::JSON_SET.len() as u32
+        } else {
+            0
+        };
+        let user_base = json_base + json_len;
         let ctx = Ctx {
             func_base: runtime_base,
             heap_global: HEAP_GLOBAL,
@@ -565,6 +616,13 @@ pub(crate) mod m1 {
             names: convert::Names::intern(&mut pool),
         };
 
+        // The three unwind globals sit *after* every binding global, so a
+        // program that cannot throw has the same global indices it always
+        // had. Computed here rather than where the globals are built, because
+        // the JSON set is handed the indices and is built before them.
+        let binding_globals = BINDING_GLOBALS + program.script().bindings.len() as u32 * WIDTH;
+        let unwind = scan.throws.then(|| Unwind::at(binding_globals));
+
         let mut types: Vec<ir::FuncType> = Vec::new();
         let imports: Vec<ir::Import> = match &table {
             Table::Pairs(hosts) => hosts
@@ -578,8 +636,33 @@ pub(crate) mod m1 {
             Table::Raw(bound) => raw_imports(bound, &mut types),
         };
 
+        // The JSON set is built only for a program that names `JSON`, and it
+        // is handed the unwind globals so that its refusals are catchable
+        // rather than traps -- `scan` guarantees they exist, because naming
+        // `JSON` is what sets `throws`.
+        let json_set: Vec<runtime::RtFunc> = if scan.json {
+            let jcx = convert::JsonCtx {
+                func_base: json_base,
+                runtime_base,
+                convert_base,
+                unwind: unwind.map(|u| convert::Throwing {
+                    flag: u.flag,
+                    tag: u.tag,
+                    payload: u.payload,
+                }),
+                names: convert::JsonNames::intern(&mut pool),
+            };
+            convert::build_json(&jcx)
+        } else {
+            Vec::new()
+        };
+
         let mut funcs: Vec<ir::Func> = Vec::new();
-        for built in runtime::build(&ctx).into_iter().chain(convert::build(&cv)) {
+        for built in runtime::build(&ctx)
+            .into_iter()
+            .chain(convert::build(&cv))
+            .chain(json_set)
+        {
             let type_index = intern(&mut types, built.params.clone(), built.results.clone());
             funcs.push(func(
                 built.name.to_string(),
@@ -591,26 +674,32 @@ pub(crate) mod m1 {
         debug_assert_eq!(
             funcs.len() as u32,
             user_base - runtime_base,
-            "the two set lengths are what every index above was computed from"
+            "the set lengths are what every index above was computed from"
         );
 
         // The uniform signature has to exist before the first call site names
         // it, and only for a program that has one: an unused type-section entry
         // would make every script pay a byte for a capability it never used.
-        let uniform = (scan.function_values || scan.indirect).then(|| Uniform {
+        let uniform = scan.needs_table().then(|| Uniform {
             type_index: intern(&mut types, values(scan.uniform_arity(program)), values(1)),
             arity: scan.uniform_arity(program),
         });
 
-        // The three unwind globals sit *after* every binding global, so a
-        // program that cannot throw has the same global indices it always
-        // had. Computed here rather than where the globals are built, because
-        // the lowering needs the indices and the globals are built after it.
-        let unwind = scan
-            .throws
-            .then(|| Unwind::at(BINDING_GLOBALS + program.script().bindings.len() as u32 * WIDTH));
+        // `JSON`'s two globals follow the unwind channel's three, so nothing
+        // that existed before either of them moves. Its two table elements
+        // follow every adapter a user function took, for the same reason.
+        let json = scan.json.then(|| Json {
+            tag: binding_globals + Unwind::WORDS,
+            payload: binding_globals + Unwind::WORDS + 1,
+            stringify_element: 1,
+            parse_element: 2,
+            ns: json_base + convert::Js::Ns.offset(),
+        });
 
-        let mut fns = FnTable::default();
+        let mut fns = FnTable {
+            reserved: if scan.json { 2 } else { 0 },
+            ..FnTable::default()
+        };
         for (index, function) in program.functions.iter().enumerate() {
             let id = ast::FuncId(index as u32);
             let built = Lower::new(
@@ -622,6 +711,7 @@ pub(crate) mod m1 {
                 &mut fns,
                 uniform,
                 unwind,
+                json,
                 user_base,
                 id,
             )
@@ -653,9 +743,34 @@ pub(crate) mod m1 {
         let adapter_base = user_base + program.functions.len() as u32;
         let mut elements = Vec::new();
         let mut table_type = None;
-        if !fns.entries.is_empty() || scan.indirect {
+        if !fns.entries.is_empty() || scan.indirect || scan.json {
             let uniform = uniform.expect("a table means the uniform signature exists");
             let mut in_table = Vec::new();
+            // `JSON`'s two, first, because `FnTable::reserved` promised the
+            // elements to them. Each forwards what its target declares --
+            // three JS values for `stringify`, two for `parse` -- exactly as a
+            // user function's adapter does; there is no shape here that a
+            // script's own function value does not also have.
+            if json.is_some() {
+                for (offset, arity) in [
+                    (convert::Js::Stringify.offset(), Json::ARITY),
+                    (convert::Js::Parse.offset(), 2),
+                ] {
+                    let mut body: Vec<Ins> = (0..arity * WIDTH).map(Ins::LocalGet).collect();
+                    body.push(Ins::Call(json_base + offset));
+                    let index = adapter_base + in_table.len() as u32;
+                    funcs.push(func(
+                        format!(
+                            "<adapter of {}>",
+                            convert::JSON_SET[offset as usize].symbol()
+                        ),
+                        uniform.type_index,
+                        Vec::new(),
+                        body,
+                    ));
+                    in_table.push(index);
+                }
+            }
             for (position, id) in fns.entries.iter().enumerate() {
                 let arity = program.func(*id).params.len() as u32;
                 debug_assert!(
@@ -670,7 +785,7 @@ pub(crate) mod m1 {
                     Vec::new(),
                     body,
                 ));
-                in_table.push(adapter_base + position as u32);
+                in_table.push(adapter_base + fns.reserved as u32 + position as u32);
             }
             if !in_table.is_empty() {
                 elements.push(ir::Elem {
@@ -680,7 +795,7 @@ pub(crate) mod m1 {
             }
             // One past the last element, because element 0 is the null one.
             table_type = Some(ir::Table {
-                min: fns.entries.len() as u32 + 1,
+                min: fns.entries.len() as u32 + fns.reserved as u32 + 1,
                 max: None,
             });
         }
@@ -734,6 +849,26 @@ pub(crate) mod m1 {
                 unwind.flag + Unwind::WORDS,
                 "the three words are the whole of an unwind channel"
             );
+        }
+        if let Some(json) = json {
+            debug_assert_eq!(
+                json.tag,
+                globals.len() as u32,
+                "`JSON`'s pair follows the unwind channel"
+            );
+            // `(0, 0)` is `undefined`, and the entry prologue reads exactly
+            // that to decide whether the namespace has been built yet.
+            globals.push(ir::Global {
+                ty: ir::ValType::I32,
+                mutable: true,
+                init: ir::Const::I32(0),
+            });
+            globals.push(ir::Global {
+                ty: ir::ValType::I64,
+                mutable: true,
+                init: ir::Const::I64(0),
+            });
+            debug_assert_eq!(globals.len() as u32, json.tag + Json::WORDS);
         }
 
         let data = if pool.is_empty() {
@@ -1095,13 +1230,28 @@ pub(crate) mod m1 {
         indirect: bool,
         /// The widest argument list at an indirect call site.
         call_arity: u32,
-        /// Whether the program writes a `throw` anywhere.
+        /// Whether the program names this engine's `JSON` -- see
+        /// [`ast::Res::Json`].
+        ///
+        /// The predicate is exact and not an over-approximation, which is what
+        /// earns the gate: a program that never writes the name emits none of
+        /// [`convert::JSON_SET`], no adapter, no element and no global, and is
+        /// byte-identical to what it was.
+        json: bool,
+        /// Whether the program writes a `throw` anywhere, **or** names `JSON`.
         ///
         /// The yes-or-no that decides whether this module carries any
         /// unwinding machinery at all. Nothing else can set the in-flight
         /// flag -- a trap is not a throw -- so in a program with no `throw`
         /// every check would be dead and every global unread, and none of
         /// them is emitted. See this module's header.
+        ///
+        /// `JSON` is the second producer, and it is the reason this is not
+        /// simply "the program writes `throw`": `JSON.parse` raises one for a
+        /// text that is not JSON, and `fleet.js` catches exactly that with a
+        /// `try`/`catch` that has no `throw` statement anywhere near it. The
+        /// condition is stated at `convert::JsonCtx::unwind` and satisfied in
+        /// [`scan`].
         throws: bool,
     }
 
@@ -1151,6 +1301,16 @@ pub(crate) mod m1 {
                 .max()
                 .unwrap_or(0)
                 .max(self.call_arity)
+                // `JSON.stringify`'s adapter is in the same table and speaks
+                // the same signature, so its three declared parameters are a
+                // floor for a program that names `JSON`. `fleet.js` already
+                // reaches three (`ui.input.pointer`), so it pays nothing.
+                .max(if self.json { Json::ARITY } else { 0 })
+        }
+
+        /// Whether this program needs the module's funcref table at all.
+        fn needs_table(&self) -> bool {
+            self.function_values || self.indirect || self.json
         }
 
         /// One call that has to go through the table.
@@ -1167,6 +1327,12 @@ pub(crate) mod m1 {
                 host_stmt(program, stmt, &mut out)?;
             }
         }
+        // The condition `convert::JsonCtx::unwind` states in its own words:
+        // *a program that mentions `JSON` needs the channel whether or not it
+        // writes `throw`*. Without this a `JSON.parse` refusal would trap
+        // where the script had written a `catch` for it -- which is `fleet.js`
+        // lines 15 to 19, the reason the feature exists.
+        out.throws |= out.json;
         Ok(out)
     }
 
@@ -1305,6 +1471,10 @@ pub(crate) mod m1 {
                     scan.value_bindings.insert(*id);
                     Ok(())
                 }
+                ast::Res::Json => {
+                    scan.json = true;
+                    Ok(())
+                }
                 _ => Ok(()),
             },
             ast::ExprKind::Call { callee, args } => {
@@ -1413,6 +1583,9 @@ pub(crate) mod m1 {
         /// Where a throw in flight lives, or `None` for a program with no
         /// `throw` in it -- which emits no check and no global.
         unwind: Option<Unwind>,
+        /// Where the `JSON` namespace object lives, or `None` for a program
+        /// that never names it -- which emits nothing of it at all.
+        json: Option<Json>,
         user_base: u32,
         id: ast::FuncId,
         f: FnBuild,
@@ -1458,6 +1631,7 @@ pub(crate) mod m1 {
             fns: &'a mut FnTable,
             uniform: Option<Uniform>,
             unwind: Option<Unwind>,
+            json: Option<Json>,
             user_base: u32,
             id: ast::FuncId,
         ) -> Self {
@@ -1503,6 +1677,7 @@ pub(crate) mod m1 {
                 fns,
                 uniform,
                 unwind,
+                json,
                 user_base,
                 id,
                 f,
@@ -1619,6 +1794,27 @@ pub(crate) mod m1 {
                 if let Some(unwind) = self.unwind {
                     self.push(Ins::I32Const(0));
                     self.push(Ins::GlobalSet(unwind.flag));
+                }
+                // `JSON`, built the first time this instance is called and
+                // read from a global for the rest of its life. `TAG_UNDEFINED`
+                // is 0 and the globals start zeroed, so "has it been built" is
+                // the tag being undefined -- no second flag, and no cost at
+                // all to a program that never names it. See [`Json`].
+                if let Some(json) = self.json {
+                    self.push(Ins::GlobalGet(json.tag));
+                    self.push(Ins::I32Eqz);
+                    self.push(Ins::If(BlockType::Empty));
+                    box_object(
+                        &[
+                            Ins::I32Const(json.stringify_element),
+                            Ins::I32Const(json.parse_element),
+                            Ins::Call(json.ns),
+                        ],
+                        &mut self.f.body,
+                    );
+                    self.push(Ins::GlobalSet(json.payload));
+                    self.push(Ins::GlobalSet(json.tag));
+                    self.push(Ins::End);
                 }
             }
             // A throw that reaches the entry point has nowhere to be handed
@@ -2476,6 +2672,19 @@ pub(crate) mod m1 {
                     );
                     let place = self.place(*id);
                     self.load(place);
+                    Ok(())
+                }
+                // The engine's own `JSON`: an ordinary read of an ordinary
+                // Object, out of the pair the entry prologue filled. Nothing
+                // about the *use* of it is special -- `JSON.parse` is a
+                // property read and a call through the value it finds, the
+                // same two things `o.m()` is.
+                ast::Res::Json => {
+                    let json = self
+                        .json
+                        .expect("the scan sets `json` for every occurrence of the name");
+                    self.push(Ins::GlobalGet(json.tag));
+                    self.push(Ins::GlobalGet(json.payload));
                     Ok(())
                 }
                 ast::Res::Unresolved => {

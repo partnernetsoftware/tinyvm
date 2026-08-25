@@ -1332,17 +1332,16 @@ fn delete_is_refused() {
 /// loud -- which is also why the divergence above is currently free.
 #[test]
 fn enumeration_is_refused() {
-    // Every one of these stops at a name this engine has no binding for --
-    // `Object` and `JSON` alike. The refusal moved from the call to the name
-    // when calling a value became a capability, and it is the better sentence:
-    // the engine can make the call, it just has nothing to make it on.
+    // Every one of these stops at a name this engine has no binding for. The
+    // refusal moved from the call to the name when calling a value became a
+    // capability, and it is the better sentence: the engine can make the
+    // call, it just has nothing to make it on.
     for (source, missing) in [
         ("const o = {}; return Object.keys(o);", "Object"),
         ("const o = {}; return Object.values(o);", "Object"),
         ("const o = {}; return Object.entries(o);", "Object"),
         ("const o = {}; return Object.assign({}, o);", "Object"),
         ("const o = {}; return Object.freeze(o);", "Object"),
-        ("const o = {}; return JSON.stringify(o);", "JSON"),
     ] {
         let error = refuse(source);
         assert!(
@@ -1353,6 +1352,15 @@ fn enumeration_is_refused() {
             error.message
         );
     }
+    // `JSON` used to be on that list and is not: it is the one name this
+    // engine binds itself. It reads a key order out loud, which is what this
+    // test is about, so the order it reads is the one 10.1.11.1 requires --
+    // insertion, not sorted. `tests/json.rs` and `control_conformance.rs`
+    // own the rest of 25.5.
+    text(
+        "const o = { b: 1, a: 2 }; return JSON.stringify(o);",
+        "{\"b\":1,\"a\":2}",
+    );
     // `o.hasOwnProperty("a")` names nothing that is missing -- `o` is right
     // there -- so it compiles and faults on the absent property instead.
     traps("const o = {}; return o.hasOwnProperty(\"a\");");

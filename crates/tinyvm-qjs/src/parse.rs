@@ -292,7 +292,7 @@ fn infix(kind: &TokenKind) -> Option<(BinaryOp, u8, u8)> {
 pub(crate) mod m1 {
     use crate::ast::m1::BinaryOp;
     use crate::ast::m1::{
-        Binding, BindingId, BindingKind, Catch, Declarator, Expr, ExprKind, FuncId, Function,
+        Binding, BindingId, BindingKind, Catch, Declarator, Expr, ExprKind, FuncId, Function, JSON,
         LogicalOp, MemberKey, Name, Program, Property, Res, Span, Stmt, StmtKind, UnaryOp,
         UpdateOp,
     };
@@ -1812,6 +1812,26 @@ pub(crate) mod m1 {
                 }
                 scope = self.scopes[id].parent;
             }
+            // The engine's own `JSON`, ECMA-262 25.5. Reached only after the
+            // scope walk above found nothing, so a script's own declaration of
+            // the name shadows it outright and there is nothing privileged to
+            // lose to. An embedder that *declares* a host function of the same
+            // name is being explicit and wins: a declaration table is a
+            // deliberate act, where `Names::HostImport`'s "any free name is an
+            // import" is a default, and a default must not quietly take a name
+            // the engine implements.
+            if p.name == JSON && !declared(&self.options.names, &p.name) {
+                return match p.role {
+                    Role::Write => Err(malformed(
+                        &format!(
+                            "cannot assign to `{}`, which is this engine's own binding; declare a binding of that name if the script wants one of its own",
+                            p.name
+                        ),
+                        p.offset,
+                    )),
+                    _ => Ok(Res::Json),
+                };
+            }
             match &self.options.names {
                 // Either host table resolves a free name the same way. Which
                 // *shape* the call takes -- V1 pairs into `js.<name>`, or the
@@ -1900,6 +1920,17 @@ pub(crate) mod m1 {
                     p.offset,
                 )),
             }
+        }
+    }
+
+    /// Whether the embedder's declaration table names this function.
+    ///
+    /// Only [`Names::Declared`] has a table; the other two modes never take a
+    /// name away from the engine's own -- see [`Parser::resolve_one`].
+    fn declared(names: &Names, name: &str) -> bool {
+        match names {
+            Names::Declared(decls) => decls.iter().any(|d| d.name == name),
+            Names::HostImport | Names::Unbound => false,
         }
     }
 

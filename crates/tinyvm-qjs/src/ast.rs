@@ -221,7 +221,25 @@ pub(crate) mod m1 {
         /// A free name, resolved against the host import table. Only produced
         /// under [`crate::Names::HostImport`].
         Host(String),
+        /// The one name this engine binds itself: [`JSON`].
+        ///
+        /// Not a global scope, and the distinction is the whole reason this is
+        /// a `Res` variant rather than a binding the parser injects. There is
+        /// no environment record here, nothing enumerates it, and a
+        /// declaration of the same name in the source shadows it outright --
+        /// the scope walk runs first and this arm is only reached when the
+        /// walk found nothing. What it *is* is a name the lowering knows how
+        /// to build a value for, which is exactly what
+        /// `JSON.parse(text)` needs and nothing more.
+        Json,
     }
+
+    /// The name [`Res::Json`] answers to.
+    ///
+    /// One name, spelled once. A second intrinsic would make this a table and
+    /// that is the point at which "no global scope" stops being true; until
+    /// then the singular is the honest shape.
+    pub(crate) const JSON: &str = "JSON";
 
     /// One occurrence of a name.
     #[derive(Debug, Clone, PartialEq)]

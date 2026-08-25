@@ -981,22 +981,21 @@ fn an_uncaught_throw_is_visible_through_the_public_guest_fault_door() {
 }
 
 // =========================================================================
-// DEFECT 4 -- the unwind channel is not declared for the thing that will
-// need it most
+// The unwind channel is declared for the thing that needs it most
 // =========================================================================
 
-/// `Scan::throws` is set in exactly one place -- `emit.rs:1279`, the
-/// `StmtKind::Throw` arm -- so a program whose only abrupt completion comes
-/// from a *runtime* refusal gets no channel.
+/// `Scan::throws` used to be set in exactly one place -- the `StmtKind::Throw`
+/// arm -- so a program whose only abrupt completion came from a *runtime*
+/// refusal got no channel.
 ///
-/// That is correct today, because nothing but `throw` raises. It stops being
-/// correct the moment `JSON` is wired: `src/convert.rs:3320` states the
-/// condition in its own words -- "**A program that mentions `JSON` needs the
-/// channel whether or not it writes `throw`**, because `JSON.parse` can raise
-/// one. That is a condition on `emit`'s scan" -- and `emit.rs` does not
-/// satisfy it. With `unwind: None`, `convert::build_json`'s `__throw` records
+/// That was correct while nothing but `throw` raised. It stopped being correct
+/// the moment `JSON` was wired: `src/convert.rs` states the condition in its
+/// own words -- "**A program that mentions `JSON` needs the channel whether or
+/// not it writes `throw`**, because `JSON.parse` can raise one. That is a
+/// condition on `emit`'s scan" -- and `emit.rs` did not satisfy it. With
+/// `unwind: None`, `convert::build_json`'s `__throw` records
 /// `FAULT_UNCAUGHT_THROW` and traps instead of returning, so the `catch`
-/// never runs.
+/// would never have run.
 ///
 /// The shape that lands on is `fleet.js` lines 15-19, the reason the feature
 /// was built:
@@ -1007,20 +1006,43 @@ fn an_uncaught_throw_is_visible_through_the_public_guest_fault_door() {
 ///
 /// -- a `try`/`catch` with no `throw` statement anywhere in the file.
 ///
-/// This test pins the observable half: such a program declares no channel.
+/// FIXED: `scan` ends with `out.throws |= out.json`. This test pins both
+/// halves -- the channel is there when `JSON` is named, and still absent when
+/// nothing can raise.
 #[test]
-fn defect_a_try_catch_with_no_throw_statement_declares_no_unwind_channel() {
+fn a_program_that_names_json_declares_the_channel_json_raises_through() {
     // One global is the bump pointer; two per script binding. `x` and the
-    // catch parameter are two bindings, so five is "no channel".
+    // catch parameter are two bindings, so five is "no channel" -- and a
+    // `try`/`catch` alone still declares none, because nothing on any path
+    // through it can raise.
     assert_eq!(
         globals_of("let x = 0; try { x = 1; } catch (e) { x = 2; } return x;"),
         5,
-        "a `try`/`catch` alone declares no unwind channel"
+        "a `try`/`catch` with nothing that can raise declares no channel"
     );
     // One `throw` anywhere and the three appear.
     assert_eq!(
         globals_of("let x = 0; try { throw 1; } catch (e) { x = 2; } return x;"),
         8
+    );
+    // And so does one mention of `JSON`, with no `throw` in the text at all:
+    // three for the channel and two more for the namespace object.
+    assert_eq!(
+        globals_of("let x = 0; try { x = JSON.parse(\"1\"); } catch (e) { x = 2; } return x;"),
+        5 + 3 + 2
+    );
+    // The observable half, which is the one that matters: the refusal is
+    // caught rather than trapping.
+    let mut instance = instantiate(
+        "function call(s) { try { return JSON.parse(s); } catch (_err) { return s; } } \
+         return call(\"not json\");",
+    );
+    let out = instance
+        .invoke_by_name("main", &Value::args(&[]))
+        .expect("the `catch` runs; without the channel this traps");
+    assert_eq!(
+        decode(&instance, &out, "fleet's call()"),
+        Out::Str("not json".into())
     );
 }
 
@@ -1359,35 +1381,36 @@ fn try_nested_past_the_frame_budget_is_a_diagnostic_and_not_an_abort() {
 // the same stand-in `tests/json.rs` uses: the namespace object, an
 // `__obj_get` for the property, and a `call_indirect` through an adapter.
 
-/// `JSON` still resolves to a **host import** and not to the twenty-two
-/// functions `convert.rs` now carries.
+/// `JSON` resolves to **this engine's own object** and not to a host import.
 ///
-/// Under `Names::HostImport` a bare `JSON` compiles to a zero-parameter,
+/// Under `Names::HostImport` a bare `JSON` used to compile to a zero-parameter,
 /// two-result import `js.JSON` -- one V1 pair, opaque to the compiler -- and
-/// `JSON.parse` is then an ordinary property read on whatever the host
-/// answered. `tinyvm_qjs::Value` has no Object variant, so no host can answer
+/// `JSON.parse` was then an ordinary property read on whatever the host
+/// answered. `tinyvm_qjs::Value` has no Object variant, so no host could answer
 /// with an object that has a `parse` property, and reading a property of a
-/// primitive traps. So the nine `JSON` sites in `fleet.js` compile, and the
-/// one path every other method routes through cannot run.
+/// primitive traps. The nine `JSON` sites in `fleet.js` compiled and the one
+/// path every other method routes through could not run.
 ///
-/// Under the default `Names` the same source is refused outright.
+/// Under the default `Names` the same source was refused outright.
 ///
-/// DEFECT (open, integration): the lowering hook `tests/json.rs`'s header
-/// calls "a hook the integrator makes".
+/// FIXED: `ast::Res::Json`. The scope walk still runs first, so this is one
+/// bound name and not a global scope -- `control_conformance.rs`'s
+/// `json_is_an_ordinary_name_and_a_script_may_take_it` is where that half is
+/// held. What is held here is the attacker's question: can a host still get
+/// between a script and its `JSON`?
 #[test]
-fn defect_json_is_not_reachable_from_a_script() {
+fn no_host_can_get_between_a_script_and_its_json() {
     use tinyvm_qjs::{Names, Options, compile_qjs_m1_with};
 
-    // The default naming: refused before any of this code is consulted.
-    let message = compile_qjs_m1("return JSON.parse(\"1\");")
-        .expect_err("no global scope for `JSON`")
-        .message;
-    assert!(
-        message.contains("finds no declaration of `JSON`"),
-        "got {message}"
+    // The default naming answers, where it used to refuse.
+    assert_eq!(
+        run("return JSON.parse(\"1\");"),
+        Out::Number(1.0),
+        "the default naming reaches `JSON`"
     );
 
-    // The naming `fleet.js` is compiled with: an opaque host import.
+    // The naming `fleet.js` is compiled with: a host import for every free
+    // name -- except this one.
     for source in [
         "return JSON.parse(\"1\");",
         "return JSON.stringify(1);",
@@ -1407,10 +1430,9 @@ fn defect_json_is_not_reachable_from_a_script() {
             .iter()
             .map(|i| (format!("{}.{}", i.module, i.field), i.n_params, i.n_results))
             .collect();
-        assert_eq!(
-            imports,
-            [("js.JSON".to_string(), 0usize, 2usize)],
-            "DEFECT: {source} reaches JSON through the host door, not through convert.rs"
+        assert!(
+            imports.is_empty(),
+            "{source} still reaches JSON through the host door: {imports:?}"
         );
     }
 }

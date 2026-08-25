@@ -42,7 +42,10 @@
 //! `JSON` is reachable while this file is green.
 
 use tinyvm::{Limits, Val, WasmInstance, WasmModule};
-use tinyvm_qjs::{CompileError, Names, Options, Value, compile_qjs_m1, compile_qjs_m1_with};
+use tinyvm_qjs::{
+    CompileError, HostFn, HostParam, HostResult, Names, Options, Value, compile_qjs_m1,
+    compile_qjs_m1_with,
+};
 
 // =========================================================================
 // Harness
@@ -887,161 +890,235 @@ fn the_shape_fleet_js_uses_them_in_runs() {
 /// row. Nine of these shapes are what `agenterm/scripts/qjs/lib/fleet.js`
 /// asks for; the rest are 25.5's own corners.
 ///
-/// The second column is not asserted -- it cannot be, because no row runs.
-/// It is what makes the row an acceptance test rather than a list of strings.
-const JSON_CORPUS: &[(&str, &str)] = &[
+/// The second column was **not asserted** when this file was written, because
+/// no row ran: `src/emit.rs` named `convert::build_json` nowhere, so the JSON
+/// set existed and nothing in the language could reach it. The integration
+/// joined the two and the column is now the assertion -- which is what the
+/// corpus was written to become.
+const JSON_CORPUS: &[(&str, Want)] = &[
     // -- round-tripping every value type (25.5.1, 25.5.2) --
-    ("return JSON.stringify(1);", "\"1\""),
+    ("return JSON.stringify(1);", Want::Str("1")),
     // Written `1 / 2` and not `1.5`: a fractional *literal* is a boundary of
     // its own that this engine has not reached yet, and a row that stopped
     // there would be measuring the lexer instead of `JSON`.
-    ("return JSON.stringify(1 / 2);", "\"0.5\""),
-    ("return JSON.stringify(-0);", "\"0\""),
-    ("return JSON.stringify(true);", "\"true\""),
-    ("return JSON.stringify(null);", "\"null\""),
-    ("return JSON.stringify(\"s\");", "\"\\\"s\\\"\""),
-    ("return JSON.stringify({});", "\"{}\""),
+    ("return JSON.stringify(1 / 2);", Want::Str("0.5")),
+    // 6.1.6.1.20 step 2: the sign of a negative zero is lost at the printer,
+    // which is exactly where the specification loses it.
+    ("return JSON.stringify(-0);", Want::Str("0")),
+    ("return JSON.stringify(true);", Want::Str("true")),
+    ("return JSON.stringify(null);", Want::Str("null")),
+    ("return JSON.stringify(\"s\");", Want::Str("\"s\"")),
+    ("return JSON.stringify({});", Want::Str("{}")),
     (
         "return JSON.stringify({ a: 1, b: \"x\" });",
-        "{\"a\":1,\"b\":\"x\"}",
+        Want::Str("{\"a\":1,\"b\":\"x\"}"),
     ),
-    ("return JSON.parse(\"1\");", "the Number 1"),
-    ("return JSON.parse(\"true\");", "the Boolean true"),
-    ("return JSON.parse(\"null\");", "null"),
-    ("return JSON.parse(\"\\\"s\\\"\");", "the String \"s\""),
-    ("return JSON.parse(\"{}\");", "an empty Object"),
+    ("return JSON.parse(\"1\");", Want::Num(1.0)),
+    ("return JSON.parse(\"true\");", Want::Bool(true)),
+    ("return JSON.parse(\"null\");", Want::Null),
+    ("return JSON.parse(\"\\\"s\\\"\");", Want::Str("s")),
+    ("return JSON.parse(\"{}\");", Want::Object),
     (
         "return JSON.parse(JSON.stringify({ a: 1 })).a;",
-        "the Number 1",
+        Want::Num(1.0),
     ),
     // -- what stringify leaves out (25.5.2.2 SerializeJSONProperty) --
-    ("return typeof JSON.stringify(undefined);", "\"undefined\""),
+    (
+        "return typeof JSON.stringify(undefined);",
+        Want::Str("undefined"),
+    ),
     (
         "return typeof JSON.stringify(function () {});",
-        "\"undefined\"",
+        Want::Str("undefined"),
     ),
     (
         "return JSON.stringify({ a: undefined, b: 1 });",
-        "{\"b\":1}",
+        Want::Str("{\"b\":1}"),
     ),
     (
         "return JSON.stringify({ a: function () {}, b: 1 });",
-        "{\"b\":1}",
+        Want::Str("{\"b\":1}"),
     ),
-    (
-        "return JSON.stringify(0 / 0);",
-        "\"null\" -- NaN is not JSON",
-    ),
-    (
-        "return JSON.stringify(1 / 0);",
-        "\"null\" -- nor is Infinity",
-    ),
+    // NaN is not JSON, and nor is an infinity: 25.5.2.2 step 10.
+    ("return JSON.stringify(0 / 0);", Want::Str("null")),
+    ("return JSON.stringify(1 / 0);", Want::Str("null")),
     // -- insertion order (10.1.11.1 OrdinaryOwnPropertyKeys) --
     (
         "return JSON.stringify({ b: 1, a: 2 });",
-        "{\"b\":1,\"a\":2} -- not sorted",
+        Want::Str("{\"b\":1,\"a\":2}"),
     ),
     // -- escaping (25.5.2.2 QuoteJSONString) --
     (
         "return JSON.stringify(\"a\\\"b\");",
-        "\"\\\"a\\\\\\\"b\\\"\"",
+        Want::Str("\"a\\\"b\""),
     ),
-    (
-        "return JSON.stringify(\"a\\nb\");",
-        "the two characters \\n, escaped",
-    ),
+    ("return JSON.stringify(\"a\\nb\");", Want::Str("\"a\\nb\"")),
     (
         "return JSON.stringify(\"a\\u0001b\");",
-        "\\u0001, escaped as a code unit",
+        Want::Str("\"a\\u0001b\""),
     ),
+    // U+2028 verbatim. QuoteJSONString escapes its seven table characters,
+    // everything below U+0020 and lone surrogates, and nothing else --
+    // escaping the line separators is a habit from embedding JSON in JS
+    // *source*, which is a different problem.
     (
         "return JSON.stringify(\"a\\u2028b\");",
-        "U+2028 verbatim -- 25.5.2.2 does not escape it",
+        Want::Str("\"a\u{2028}b\""),
     ),
     // -- the parse grammar, and everything it excludes (25.5.1) --
-    (
-        "return JSON.parse(\"[1]\");",
-        "an Array -- which this engine has no type for either",
-    ),
+    // The one row where this engine and ECMA-262 part company, and it parts
+    // at the value representation rather than at JSON: 25.5.1 answers with an
+    // Array and this engine has no Array type to answer with. It throws, by
+    // name, rather than approximating one -- see the test below this one.
+    ("return JSON.parse(\"[1]\");", Want::Throws),
     (
         "try { JSON.parse(\"nope\"); } catch (e) { return 1; }",
-        "1 -- a bad parse is a catchable SyntaxError",
+        Want::Num(1.0),
     ),
-    ("try { JSON.parse(\"\"); } catch (e) { return 1; }", "1"),
+    (
+        "try { JSON.parse(\"\"); } catch (e) { return 1; }",
+        Want::Num(1.0),
+    ),
     (
         "try { JSON.parse(\"{'a':1}\"); } catch (e) { return 1; }",
-        "1 -- JSON has no single quotes",
+        Want::Num(1.0),
     ),
     (
         "try { JSON.parse(\"{a:1}\"); } catch (e) { return 1; }",
-        "1 -- nor unquoted keys",
+        Want::Num(1.0),
     ),
     (
         "try { JSON.parse(\"[1,]\"); } catch (e) { return 1; }",
-        "1 -- nor a trailing comma",
+        Want::Num(1.0),
     ),
     (
         "try { JSON.parse(\"01\"); } catch (e) { return 1; }",
-        "1 -- nor a leading zero",
+        Want::Num(1.0),
     ),
     (
         "try { JSON.parse(\"+1\"); } catch (e) { return 1; }",
-        "1 -- nor a leading plus",
+        Want::Num(1.0),
     ),
     (
         "try { JSON.parse(\".5\"); } catch (e) { return 1; }",
-        "1 -- nor a bare point",
+        Want::Num(1.0),
     ),
     (
         "try { JSON.parse(\"NaN\"); } catch (e) { return 1; }",
-        "1 -- nor NaN",
+        Want::Num(1.0),
     ),
     (
         "try { JSON.parse(\"undefined\"); } catch (e) { return 1; }",
-        "1 -- nor undefined",
+        Want::Num(1.0),
     ),
     (
         "try { JSON.parse(\"1 2\"); } catch (e) { return 1; }",
-        "1 -- nor trailing text",
+        Want::Num(1.0),
     ),
     // -- the name itself --
-    ("return typeof JSON;", "\"object\""),
-    ("return typeof JSON.parse;", "\"function\""),
+    ("return typeof JSON;", Want::Str("object")),
+    ("return typeof JSON.parse;", Want::Str("function")),
 ];
 
-/// **No JavaScript source text reaches this engine's `JSON`.**
+/// What a [`JSON_CORPUS`] row must answer. `Throws` is a value this engine
+/// cannot represent reaching a `throw`, which is the only row that is not the
+/// specification's own answer.
+#[derive(Debug, Clone, Copy)]
+enum Want {
+    Num(f64),
+    Bool(bool),
+    Null,
+    Str(&'static str),
+    Object,
+    Throws,
+}
+
+/// **Every row of [`JSON_CORPUS`] runs, and answers what 25.5 requires.**
 ///
-/// Every row of [`JSON_CORPUS`] is refused, and refused for the same reason:
-/// there is no binding named `JSON` for the property read to happen on. The
-/// JSON set itself exists and is exercised by `tests/json.rs`, which builds
-/// its module by hand; `src/emit.rs` names `convert::build_json` nowhere, so
-/// nothing joins the two.
-///
-/// The refusal is honest -- it names the engine's boundary and does not claim
-/// the engine cannot serialize JSON, which would be the other lie. What it
-/// cannot say, and what this test exists to record instead, is that the
-/// capability is *present and unreachable*.
+/// This test used to be `no_source_text_reaches_this_engines_json`, and it
+/// asserted the opposite: that every row was refused with "no declaration of
+/// `JSON`". The set existed, `tests/json.rs` exercised it through a
+/// hand-assembled module, and nothing in `src/emit.rs` joined it to the
+/// language. `ast::Res::Json` is the join, and it is one name and no global
+/// scope -- the scope walk still runs first, so a script's own declaration
+/// shadows it outright.
 #[test]
-fn no_source_text_reaches_this_engines_json() {
-    for (source, ecma262) in JSON_CORPUS {
-        let message = refuse(source);
-        speaks_for_the_engine(&message);
-        assert!(
-            message.contains("no declaration of `JSON`"),
-            "{source:?} was refused with {message:?}; ECMA-262 answers {ecma262}"
-        );
+fn every_row_of_the_json_corpus_answers_what_ecma262_requires() {
+    for (source, want) in JSON_CORPUS {
+        match want {
+            Want::Throws => {
+                let mut instance = instantiate(source);
+                let outcome = instance.invoke_by_name("main", &Value::args(&[]));
+                assert!(outcome.is_err(), "{source:?} was expected to throw");
+                let memory = instance.memory().expect("guest memory");
+                assert_eq!(
+                    tinyvm_qjs::guest_fault(&memory),
+                    Some(tinyvm_qjs::GuestFault::UncaughtThrow),
+                    "{source:?} trapped without recording a throw"
+                );
+            }
+            Want::Num(x) => assert_eq!(run(source), Out::Number(*x), "{source:?}"),
+            Want::Bool(b) => assert_eq!(run(source), Out::Bool(*b), "{source:?}"),
+            Want::Null => assert_eq!(run(source), Out::Null, "{source:?}"),
+            Want::Str(s) => assert_eq!(run(source), Out::Str((*s).to_string()), "{source:?}"),
+            Want::Object => assert_eq!(run(source), Out::Object, "{source:?}"),
+        }
     }
     assert_eq!(
         JSON_CORPUS.len(),
         39,
         "the corpus is a fixed list, so a row cannot be dropped to make this pass"
     );
+    // Thirty-eight of the thirty-nine are ECMA-262's own answer. The one that
+    // is not is named, so the exemption cannot grow quietly.
+    assert_eq!(
+        JSON_CORPUS
+            .iter()
+            .filter(|(_, w)| matches!(w, Want::Throws))
+            .count(),
+        1
+    );
 }
 
-/// `JSON` is not a name this engine treats specially in any of the three
-/// [`Names`] modes -- which is the same fact from the other side, and worth
-/// its own row because "the compiler knows about JSON" is the assumption a
-/// reader would otherwise make.
+/// The Array row, on its own, because it is a **product** consequence and not
+/// a JSON one.
+///
+/// `[1,2]` is perfectly good JSON and this engine has no Array type, so the
+/// parser refuses it by name rather than approximating it. `fleet.js` exists
+/// to parse whatever the Fleet broker answered, and a broker answer that is or
+/// contains a JSON array -- `tabs.list` is the obvious one -- takes the
+/// `catch` and comes back as the raw text. A caller that expects a value gets
+/// a string. That is a downstream behaviour change and the reason this row is
+/// written out rather than folded into the corpus.
+#[test]
+fn a_json_array_is_refused_by_name_and_the_refusal_is_catchable() {
+    assert_eq!(
+        text("try { JSON.parse(\"[1,2]\"); } catch (e) { return e; }"),
+        "this engine does not support JSON arrays yet",
+        "the sentence names the engine's boundary, not the text"
+    );
+    // Anywhere in the text, not only at the top.
+    for source in [
+        "try { JSON.parse(\"[]\"); } catch (e) { return 1; }",
+        "try { JSON.parse(\"{\\\"tabs\\\":[]}\"); } catch (e) { return 1; }",
+        "try { JSON.parse(\"{\\\"a\\\":{\\\"b\\\":[1]}}\"); } catch (e) { return 1; }",
+    ] {
+        assert_eq!(num(source), 1.0, "{source:?}");
+    }
+    // And the shape `fleet.js` writes: the raw text comes back.
+    assert_eq!(
+        text(
+            "function call(s) { try { return JSON.parse(s); } catch (_err) { return s; } } \
+             return call(\"[1,2]\");"
+        ),
+        "[1,2]"
+    );
+}
+
+/// `JSON` is a name a script may take, which is the same fact from the other
+/// side and worth its own row because "the compiler knows about JSON" is the
+/// assumption a reader would otherwise make. It knows one name, the scope walk
+/// runs before it, and there is no environment record anywhere.
 #[test]
 fn json_is_an_ordinary_name_and_a_script_may_take_it() {
     assert_eq!(
@@ -1049,11 +1126,22 @@ fn json_is_an_ordinary_name_and_a_script_may_take_it() {
             "const JSON = { stringify: function (v) { return \"mine\"; } }; return JSON.stringify(1);"
         ),
         "mine",
-        "a script's own `JSON` binding wins, because there is nothing to lose to"
+        "a script's own `JSON` binding wins outright"
     );
     assert_eq!(text("const JSON = 1; return typeof JSON;"), "number");
-    // The same refusal as any other undeclared name.
-    for name in ["JSON", "Object", "Math", "Array"] {
+    // Reading the engine's own twice is one object -- 25.5 makes `JSON` a
+    // single ordinary object, and this engine's is a single record built once
+    // per instance.
+    assert_eq!(run("return JSON === JSON;"), Out::Bool(true));
+    assert_eq!(run("const a = JSON; return a === JSON;"), Out::Bool(true));
+    // Assigning to it without declaring it is refused, and the refusal says
+    // whose name it is rather than claiming there is none.
+    let message = refuse("JSON = 1; return 0;");
+    speaks_for_the_engine(&message);
+    assert!(message.contains("this engine's own binding"), "{message:?}");
+    // Every *other* undeclared name is still refused the way it always was,
+    // which is what says one name was bound and not a global scope opened.
+    for name in ["Object", "Math", "Array", "console", "globalThis"] {
         let message = refuse(&format!("return {name}.x;"));
         assert!(
             message.contains(&format!("no declaration of `{name}`")),
@@ -1062,15 +1150,17 @@ fn json_is_an_ordinary_name_and_a_script_may_take_it() {
     }
 }
 
-/// Under [`Names::HostImport`] the name resolves -- to an **import**. So
-/// `fleet.js` compiles, and the `JSON` its nine call sites reach is whatever
-/// the embedder puts behind `js.JSON`, not the set in `convert.rs`.
+/// Under [`Names::HostImport`] a free name is a `js.*` import, and `JSON` used
+/// to be one -- so `fleet.js` compiled and the `JSON` its nine call sites
+/// reached was whatever the embedder put behind `js.JSON`, which no embedder
+/// can answer with an object because `tinyvm_qjs::Value` has no Object
+/// variant.
 ///
-/// This is the row that keeps the acceptance claim precise. "`fleet.js`
-/// compiles" is true and is measured here. "`fleet.js`'s `JSON.parse` runs
-/// this engine's parser" is not, and the import list is the evidence.
+/// The import is gone. This is the row that keeps the acceptance claim
+/// precise: the import list is the evidence that `fleet.js`'s `JSON.parse`
+/// runs *this* engine's parser.
 #[test]
-fn under_host_import_json_is_the_embedders_and_not_this_engines() {
+fn json_is_this_engines_and_not_the_host_import_it_used_to_be() {
     let source = "\
         function call(opId, params) { \
             const resultJson = __host.fleet_call(opId, params === undefined ? \"{}\" : params); \
@@ -1086,19 +1176,109 @@ fn under_host_import_json_is_the_embedders_and_not_this_engines() {
         .collect();
     assert_eq!(
         imports,
-        ["js.JSON", "js.__host"],
-        "`JSON` is an import like any other host name"
+        ["js.__host"],
+        "`JSON` must not be an import in any naming mode"
     );
-    // Without the host mode there is no door at all: the same two names are
-    // refused, which is what says the import is the only one there is.
+    // A host name still is one, which is what says the default was narrowed
+    // by exactly one name.
     assert!(
         refuse(source).contains("no declaration of `__host`"),
-        "the default mode must not resolve a host name either"
+        "the default mode must not resolve a host name"
     );
+    // And an embedder that *declares* a host function called `JSON` is being
+    // explicit, so it wins: a declaration table is a deliberate act where
+    // `HostImport`'s "any free name is an import" is a default.
+    let declared = compile_qjs_m1_with(
+        "return JSON(\"x\");",
+        Options {
+            names: Names::Declared(vec![HostFn {
+                name: "JSON".into(),
+                module: "sys".into(),
+                field: "json".into(),
+                params: vec![HostParam::StrPtrLen],
+                result: HostResult::I32,
+            }]),
+        },
+    )
+    .expect("a declared `JSON` compiles");
+    let module = WasmModule::from_bytes_with(&declared, Limits::default()).expect("clears");
+    assert_eq!(
+        module
+            .imports()
+            .iter()
+            .map(|i| format!("{}.{}", i.module, i.field))
+            .collect::<Vec<_>>(),
+        ["sys.json"]
+    );
+}
+
+/// A program that never names `JSON` carries none of it: not a function, not
+/// an element, not a global, not a byte.
+///
+/// The gate is what makes the whole set affordable, and it is checked
+/// structurally rather than against an absolute byte count another lane can
+/// move: the same two programs, differing by one mention of the name.
+#[test]
+fn a_program_that_never_names_json_carries_none_of_it() {
+    let without = compile_qjs_m1("return 1;").expect("compiles");
+    let with = compile_qjs_m1("const j = JSON; return 1;").expect("compiles");
+    // Section 4 is the table section and section 6 is the globals section.
+    // Without the name there is neither a funcref table nor the unwind channel
+    // `JSON.parse` raises through; with it, both.
+    assert_eq!(section_len(&without, 4), None, "no table section");
+    assert!(section_len(&with, 4).is_some(), "a table section");
+    // One global is the bump pointer and two are the binding `j`; the three
+    // unwind globals and `JSON`'s own pair are what the name added.
+    assert_eq!(globals(&without), 1);
+    assert_eq!(globals(&with), 1 + 2 + 3 + 2);
     assert!(
-        refuse("return JSON.parse(\"{}\");").contains("no declaration of `JSON`"),
-        "nor `JSON`"
+        with.len() > without.len() + 3_000,
+        "the JSON set came to {} bytes, which is not a set",
+        with.len() - without.len()
     );
+}
+
+/// The length of one wasm section, or `None` when the module has none.
+fn section_len(bytes: &[u8], id: u8) -> Option<usize> {
+    let mut at = 8;
+    while at < bytes.len() {
+        let this = bytes[at];
+        at += 1;
+        let (size, next) = uleb(bytes, at);
+        if this == id {
+            return Some(size);
+        }
+        at = next + size;
+    }
+    None
+}
+
+/// How many globals the module declares.
+fn globals(bytes: &[u8]) -> usize {
+    let mut at = 8;
+    while at < bytes.len() {
+        let id = bytes[at];
+        at += 1;
+        let (size, next) = uleb(bytes, at);
+        if id == 6 {
+            return uleb(bytes, next).0;
+        }
+        at = next + size;
+    }
+    0
+}
+
+fn uleb(bytes: &[u8], mut at: usize) -> (usize, usize) {
+    let (mut value, mut shift) = (0usize, 0);
+    loop {
+        let byte = bytes[at];
+        at += 1;
+        value |= ((byte & 0x7f) as usize) << shift;
+        if byte & 0x80 == 0 {
+            return (value, at);
+        }
+        shift += 7;
+    }
 }
 
 // =========================================================================
