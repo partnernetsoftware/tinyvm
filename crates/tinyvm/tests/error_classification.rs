@@ -17,6 +17,10 @@ use std::path::{Path, PathBuf};
 
 use tinyvm::{Limits, Val, WasmCeiling, WasmError, WasmFaultClass, WasmModule};
 
+/// Kept for the call sites that read better with a sentence than with a
+/// `.expect`. It is no longer *needed*: [`WasmError`] derives `Debug`
+/// unconditionally now, so `Result::expect` compiles here -- see
+/// `fault_types_are_debug_printable_outside_this_crates_unit_tests`.
 fn must_ok<T>(result: Result<T, WasmError>, context: &str) -> T {
     match result {
         Ok(value) => value,
@@ -359,4 +363,47 @@ fn every_fault_message_obeys_the_naming_rule_the_classifier_reads() {
             "the overloaded message {retired:?} must not come back"
         );
     }
+}
+
+/// `Debug` has to be reachable from *here*, not only from the crate's own unit
+/// tests.
+///
+/// `#[cfg_attr(test, derive(Debug))]` sets `cfg(test)` for `crates/tinyvm/src`
+/// and nowhere else, so an integration test -- and every downstream crate --
+/// saw these types as un-printable and un-`unwrap`able. The cost was a
+/// hand-rolled `must_ok` in each test file, panicking through `message()` and
+/// throwing away everything `assert_eq!` would have shown. The core stays
+/// fmt-free because nothing in it formats a fault, which is what
+/// `measure-core.sh` measures; naming the trait costs the static core nothing.
+#[test]
+fn fault_types_are_debug_printable_outside_this_crates_unit_tests() {
+    // The three fault vocabularies, printed.
+    assert_eq!(
+        format!("{:?}", WasmError::Trap("call depth")),
+        r#"Trap("call depth")"#
+    );
+    assert_eq!(
+        format!("{:?}", WasmError::Decode("module allocation")),
+        r#"Decode("module allocation")"#
+    );
+    assert_eq!(format!("{:?}", WasmCeiling::MemoryPages), "MemoryPages");
+    assert_eq!(
+        format!("{:?}", WasmFaultClass::ResourceCeiling),
+        "ResourceCeiling"
+    );
+    assert_eq!(format!("{:?}", Val::I32(-1)), "I32(-1)");
+
+    // Which is what makes these compile at all: `expect`, `unwrap_err` and
+    // `assert_eq!` on a fault all need `Debug`, and none of them compiled from
+    // an integration test before.
+    let module = WasmModule::from_bytes(&wasm(r#"(module (func (export "stop") unreachable))"#))
+        .expect("load a module without a hand-rolled helper");
+    let error = module
+        .instantiate()
+        .expect("instantiate")
+        .invoke_by_name("stop", &[])
+        .expect_err("unreachable must trap");
+    assert_eq!(error, WasmError::Trap("unreachable executed"));
+    assert_eq!(error.class(), WasmFaultClass::Guest);
+    assert_eq!(error.ceiling(), None);
 }

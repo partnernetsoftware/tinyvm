@@ -71,9 +71,10 @@ pub const WASM_MAX_LOCALS: usize = 1 << 20;
 pub const WASM_MAX_DECODE_ITEMS: usize = 262_144;
 
 /// An opaque, non-null standard function reference with store identity.
+///
+/// `Debug` is unconditional for the reason recorded on [`WasmError`].
 #[cfg(not(all(feature = "staticcore", not(feature = "std"))))]
-#[cfg_attr(test, derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FunctionReference {
     token: u64,
 }
@@ -88,8 +89,9 @@ static NEXT_FUNCTION_REFERENCE: AtomicU64 = AtomicU64::new(1);
 /// it through standard Wasm functions/globals, and compare the returned value
 /// with the original handle. Process-unique identity lets a reference cross
 /// instances without becoming a native pointer or a store allocation address.
-#[cfg_attr(test, derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// `Debug` is unconditional for the reason recorded on [`WasmError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExternReference {
     token: NonZeroU64,
 }
@@ -114,8 +116,9 @@ impl ExternReference {
 
 /// A tagged WebAssembly value. The operand stack, locals, arguments, and
 /// results are all sequences of these so numeric and reference types coexist.
-#[cfg_attr(test, derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+///
+/// `Debug` is unconditional for the reason recorded on [`WasmError`].
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Val {
     I32(i32),
     I64(i64),
@@ -136,8 +139,9 @@ pub enum Val {
 }
 
 /// A standard value type accepted by this VM profile.
-#[cfg_attr(test, derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+///
+/// `Debug` is unconditional for the reason recorded on [`WasmError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueType {
     I32,
     I64,
@@ -1199,8 +1203,25 @@ impl Global {
 /// inside the crate, so the wording can change without silently changing an
 /// embedder's behaviour — which is what happened the first time these messages
 /// were split.
-#[cfg_attr(test, derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+///
+/// # Why `Debug` is derived unconditionally
+///
+/// It used to be `#[cfg_attr(test, derive(Debug))]`, which is invisible to an
+/// integration test and to every downstream crate: `cfg(test)` is set for this
+/// crate's own unit tests and nothing else. The cost of that was one
+/// hand-rolled `must_ok` helper per test file, each panicking through
+/// [`message`](Self::message), and the same tax paid again downstream.
+///
+/// A fmt-free core is a claim about what the *shipped* core links, not about
+/// which traits the type names. `measure-core.sh` is the judge, and it says the
+/// derive costs the static core zero bytes: nothing inside the core formats a
+/// `WasmError`, so dead-code elimination drops the impl. `__text` is 68408
+/// bytes with the derive and 68408 without it. [`PendingResultError`] already
+/// derived `Debug` unconditionally on the same reasoning; this follows that
+/// precedent rather than inventing a second rule.
+///
+/// [`PendingResultError`]: crate::PendingResultError
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WasmError {
     /// The function body could not be decoded.
     Decode(&'static str),
@@ -1242,8 +1263,9 @@ fn reserve_exact<T>(values: &mut Vec<T>, count: usize) -> Result<(), WasmError> 
 /// Each variant is exactly one field of [`Limits`]: an embedder that gets one
 /// back knows which number to raise, and keeps knowing it if the message
 /// wording changes.
-#[cfg_attr(test, derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+///
+/// `Debug` is unconditional for the reason recorded on [`WasmError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ceiling {
     /// [`Limits::max_steps`].
     Steps,
@@ -1259,8 +1281,9 @@ pub enum Ceiling {
 
 /// What kind of fault a [`WasmError`] is, for a caller that must react
 /// differently to each and cannot afford to match on message text.
-#[cfg_attr(test, derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+///
+/// `Debug` is unconditional for the reason recorded on [`WasmError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultClass {
     /// The module was rejected before it could ever run. Nothing about the
     /// embedding's configuration will make this module load.

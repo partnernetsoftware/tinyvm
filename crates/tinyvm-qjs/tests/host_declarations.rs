@@ -239,8 +239,8 @@ fn refuse(source: &str, hosts: Vec<HostFn>) -> CompileError {
     }
 }
 
-/// `ValueType` has no `Debug` -- the core is fmt-free -- so a signature is
-/// compared as the text a wasm reader would write.
+/// A signature compared as the text a wasm reader would write, which is what
+/// makes a mismatch legible at a glance.
 fn spell(ty: ValueType) -> &'static str {
     match ty {
         ValueType::I32 => "i32",

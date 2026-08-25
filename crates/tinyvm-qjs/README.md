@@ -31,9 +31,13 @@ use tinyvm::{Limits, WasmModule};
 use tinyvm_qjs::{Value, compile_qjs_m1};
 
 let wasm = compile_qjs_m1("return $0 * 2;")?;
-let module = WasmModule::from_bytes_with(&wasm, Limits::default()).ok().unwrap();
-let mut instance = module.instantiate().ok().unwrap();
-let out = instance.invoke_by_name("main", &Value::args(&[Value::Number(21.0)])).ok().unwrap();
+// `WasmError` derives `Debug` but is not a `std::error::Error` -- the core is
+// `no_std` -- so `expect` rather than `?`.
+let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("clears the gate");
+let mut instance = module.instantiate().expect("instantiates");
+let out = instance
+    .invoke_by_name("main", &Value::args(&[Value::Number(21.0)]))
+    .expect("runs");
 assert_eq!(Value::returned(&out), Ok(Value::Number(42.0)));
 ```
 

@@ -42,8 +42,9 @@ use tinyvm::{Val, WasmModule};
 
 // -- harness -------------------------------------------------------------------
 
-/// tinyvm is deliberately fmt-free, so `WasmError` has no `Debug` and
-/// `Result::unwrap` will not take it. Unwrap through its `message()` instead.
+/// `Result::unwrap` takes a `WasmError` now that it derives `Debug`. This
+/// stays because naming the stage that refused reads better than the fault
+/// alone does.
 fn ok<T>(result: Result<T, tinyvm::WasmError>, what: &str) -> T {
     match result {
         Ok(value) => value,

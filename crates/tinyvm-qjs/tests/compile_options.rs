@@ -89,10 +89,9 @@ fn a_diagnostic_crosses_into_wasm_error_by_category() {
     ] {
         let rich = host_import(source).expect_err("outside the subset");
         assert_eq!(rich.boundary, boundary, "{source:?}: {rich}");
-        // `WasmError` has no `Debug` -- the core is fmt-free -- so compare it
-        // by hand rather than through `assert_eq!`.
-        assert!(
-            qjs2wasm(source) == Err(WasmError::Decode(boundary.terse())),
+        assert_eq!(
+            qjs2wasm(source),
+            Err(WasmError::Decode(boundary.terse())),
             "{source:?} did not narrow to its own boundary"
         );
         // The rich sentence is the thing worth keeping. It is a different

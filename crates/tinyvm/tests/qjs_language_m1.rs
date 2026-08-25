@@ -67,8 +67,7 @@ fn qjs_m1_moves_v1_values_across_the_call_boundary() {
     let Value::String(ptr) = out else {
         panic!("want a String, got {out:?}");
     };
-    // `WasmError` has no `Debug` -- the core is fmt-free -- so `ok()` first.
-    let view = instance.memory().ok().expect("guest memory");
+    let view = instance.memory().expect("guest memory");
     let bytes: &[u8] = &view;
     let at = ptr as usize;
     let len = u32::from_le_bytes(bytes[at..at + 4].try_into().expect("length header")) as usize;
@@ -237,14 +236,12 @@ fn qjs_m1_reaches_a_declared_host_door_with_arguments() {
             sink.borrow_mut().push(text);
             Ok(Vec::new())
         })
-        .ok()
         .expect("bind sys.echo");
     let answer = b"pong";
     module
         .bind_import_typed("sys", "said_len", move |_args, _memory| {
             Ok(vec![Val::I32(answer.len() as i32)])
         })
-        .ok()
         .expect("bind sys.said_len");
     module
         .bind_import_typed("sys", "said", move |args, memory| {
@@ -258,17 +255,16 @@ fn qjs_m1_reaches_a_declared_host_door_with_arguments() {
             memory[at..at + answer.len()].copy_from_slice(answer);
             Ok(vec![Val::I32(answer.len() as i32)])
         })
-        .ok()
         .expect("bind sys.said");
 
-    let mut instance = module.instantiate().ok().expect("instantiate");
+    let mut instance = module.instantiate().expect("instantiate");
     let vals = instance
         .invoke_by_name("main", &[])
         .unwrap_or_else(|e| panic!("trap in {source:?}: {}", e.message()));
     let Value::String(ptr) = Value::returned(&vals).expect("a V1 pair") else {
         panic!("the declared door must hand back a JavaScript String");
     };
-    let view = instance.memory().ok().expect("guest memory");
+    let view = instance.memory().expect("guest memory");
     let bytes: &[u8] = &view;
     let at = ptr as usize;
     let len = u32::from_le_bytes(bytes[at..at + 4].try_into().expect("length header")) as usize;

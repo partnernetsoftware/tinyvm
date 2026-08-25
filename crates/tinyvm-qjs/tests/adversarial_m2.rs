@@ -27,8 +27,8 @@ use tinyvm_qjs::{Boundary, CompileError, Names, Options, Value, compile_qjs_m1};
 // Harness
 // =========================================================================
 
-/// `WasmError` has no `Debug` -- the core is fmt-free -- so a message is all
-/// there is to carry out of the gate.
+/// The gate's whole answer, as one sentence: these cases are tabulated by the
+/// message they must produce, so that is what comes out.
 fn gate(wasm: &[u8]) -> Result<WasmModule, &'static str> {
     WasmModule::from_bytes_with(wasm, Limits::default()).map_err(|e: WasmError| e.message())
 }

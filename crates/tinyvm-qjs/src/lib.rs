@@ -201,14 +201,11 @@ pub fn compile_qjs_with(source: &str, options: Options) -> Result<Vec<u8>, Compi
 /// use tinyvm_qjs::{Value, compile_qjs_m1};
 ///
 /// let wasm = compile_qjs_m1("return $0 * 2;").expect("compiles");
-/// // `WasmError` has no `Debug` -- the core is fmt-free -- so `ok()` first.
-/// let module = WasmModule::from_bytes_with(&wasm, Limits::default())
-///     .ok()
-///     .expect("clears the load gate");
-/// let mut instance = module.instantiate().ok().expect("instantiates");
+/// let module =
+///     WasmModule::from_bytes_with(&wasm, Limits::default()).expect("clears the load gate");
+/// let mut instance = module.instantiate().expect("instantiates");
 /// let out = instance
 ///     .invoke_by_name("main", &Value::args(&[Value::Number(21.0)]))
-///     .ok()
 ///     .expect("runs");
 /// assert_eq!(Value::returned(&out), Ok(Value::Number(42.0)));
 /// ```
@@ -257,7 +254,7 @@ pub fn compile_qjs_m1(source: &str) -> Result<Vec<u8>, CompileError> {
 ///     "print(\"ready\"); return read();",
 ///     Options { names: Names::Declared(table) },
 /// )?;
-/// let module = WasmModule::from_bytes_with(&wasm, Limits::default()).ok().unwrap();
+/// let module = WasmModule::from_bytes_with(&wasm, Limits::default()).unwrap();
 /// let imports: Vec<String> = module
 ///     .imports()
 ///     .iter()

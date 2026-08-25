@@ -38,8 +38,8 @@ struct Host {
     answer: fn(&[Value]) -> Value,
 }
 
-/// `WasmError` has no `Debug` -- the core is fmt-free -- so `expect` is not
-/// available on anything the engine returns.
+/// `expect` would work now that [`WasmError`] derives `Debug`; this stays
+/// because a named stage reads better in a failure than `Trap("...")` does.
 #[track_caller]
 fn ok<T>(result: Result<T, WasmError>, what: &str) -> T {
     match result {
@@ -179,11 +179,10 @@ fn a_js_value_is_two_wasm_values_at_every_boundary() {
         "two JS arguments, four wasm params"
     );
     assert_eq!(main.result_count(), 2, "one JS result, two wasm results");
-    // `ValueType` has no `Debug` -- the core is fmt-free -- so the pair is
-    // matched rather than compared.
     for (slot, want) in [(0, ValueType::I32), (1, ValueType::I64)] {
-        assert!(
-            main.parameter_type(slot) == Some(want),
+        assert_eq!(
+            main.parameter_type(slot),
+            Some(want),
             "parameter {slot} is not the V1 word it must be"
         );
         assert!(
