@@ -1,12 +1,18 @@
 //! Attacks on the two things this milestone added: hand-rolled unwinding, and
 //! `JSON.parse`/`JSON.stringify`.
 //!
-//! This file breaks nothing on purpose and fixes nothing at all. Every row is
-//! a minimal reproducer that was **run**, and where the engine's answer is not
-//! the answer ECMA-262 gives, the engine's answer is what is asserted, marked
-//! `DEFECT (open):` with the right answer written beside it -- the convention
-//! `conformance_m2.rs` uses for a debt, so the debt is visible in a green
-//! suite and the assertion inverts loudly on the day it is paid.
+//! This file breaks nothing on purpose. Every row is a minimal reproducer that
+//! was **run**; where the engine's answer was not the answer ECMA-262 gives,
+//! the engine's answer was asserted as observed and marked `DEFECT (open):`
+//! with the right answer beside it, so the debt was visible in a green suite
+//! and the assertion inverted loudly on the day it was paid.
+//!
+//! All five have been paid, and each of those rows now asserts the
+//! specification's answer instead -- the stale in-flight flag, the finalizer
+//! that overwrote the completion value, the fault code `guest_fault` could not
+//! read, the channel `JSON` needs and did not declare, and `JSON` itself being
+//! unreachable from a script. The tests kept their evidence and inverted their
+//! claim; none of them was relaxed.
 //!
 //! # Where the attacks came from
 //!
@@ -20,7 +26,10 @@
 //! from outside the compiler.
 //!
 //! The label question came back clean over 50 shapes. The flag question did
-//! not: a module global outlives a call, and nothing puts it back.
+//! not: a module global outlives a call, and nothing put it back. Two
+//! instructions in the entry prologue do now, and
+//! `a_handled_throw_is_never_a_throw_the_previous_call_raised` is where that
+//! is held.
 
 // The harness below is `tests/json.rs`'s, copied rather than shared because
 // an integration test cannot import another one. Parts of it (`stringify`,
