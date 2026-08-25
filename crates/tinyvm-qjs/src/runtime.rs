@@ -144,6 +144,8 @@ pub(crate) enum Rt {
     ObjFind,
     ObjGet,
     ObjSet,
+    // Functions. Appended, so every existing function keeps its index.
+    FnNew,
 }
 
 /// Every runtime function, in the order they are defined in the module.
@@ -174,6 +176,7 @@ pub(crate) const SET: &[Rt] = &[
     Rt::ObjFind,
     Rt::ObjGet,
     Rt::ObjSet,
+    Rt::FnNew,
 ];
 
 impl Rt {
@@ -208,6 +211,7 @@ impl Rt {
             Rt::ObjFind => "__obj_find",
             Rt::ObjGet => "__obj_get",
             Rt::ObjSet => "__obj_set",
+            Rt::FnNew => "__fn_new",
         }
     }
 
@@ -412,6 +416,7 @@ fn one(ctx: &Ctx, rt: Rt) -> RtFunc {
             Vec::new(),
             obj_set(ctx),
         ),
+        Rt::FnNew => (vec![ValType::I32], vec![ValType::I32], fn_new(ctx)),
     };
     RtFunc {
         name: rt.symbol(),
@@ -1282,7 +1287,7 @@ const ENTRY_PAYLOAD: u32 = 8;
 /// four bytes. `__alloc` aligns to four, so the eight-byte alignment an
 /// `i64.load` would naturally claim is not something this module may promise.
 /// Below-natural is legal wasm and is a hint only.
-const ALIGN_WORD: u32 = 2;
+pub(crate) const ALIGN_WORD: u32 = 2;
 
 /// The entry vector a record allocates the first time it has to grow, and the
 /// factor it grows by afterwards.
@@ -1665,6 +1670,53 @@ fn to_string(ctx: &Ctx) -> FnBuild {
     // The one conversion this milestone did *not* bring in, and the reason
     // `"" + {}` and `o[{}]` both still trap.
     f.body.push(Ins::Unreachable);
+    f
+}
+
+// ---- functions -----------------------------------------------------------
+
+/// A function record: `[element: i32]`, and nothing else yet.
+///
+/// One word, on the same bump heap every string and object lives on. It holds
+/// the index of the module's table element whose adapter calls this function.
+///
+/// # Why there is a record at all
+///
+/// The payload used to *be* the element index, which made two evaluations of
+/// one FunctionExpression one function value -- ECMA-262 15.2.5 says they are
+/// two objects, and `mk() === mk()` answered `true`. One address per
+/// evaluation is what makes them two, and the allocator already hands out one
+/// address per allocation, so identity comes out of the existing `i64.eq` on
+/// the payload with no arm added anywhere. See [`super::repr`]'s header.
+///
+/// # Why it is one word and not more
+///
+/// A spec function object also carries `length`, `name`, `prototype` and a
+/// `[[Environment]]`. None of those is reachable here: there is no prototype,
+/// so `f.length` and `f.name` are absent properties rather than wrong ones,
+/// and there are no closures, so there is nothing to capture. Each is one more
+/// word in this record when it lands, and the record is where it goes -- which
+/// is the other thing an address buys that an index could not.
+pub(crate) const FN_ELEMENT: u32 = 0;
+
+/// How many bytes one function record takes.
+pub(crate) const FN_BYTES: i32 = 4;
+
+/// `__fn_new(element) -> i32`: one fresh function record.
+///
+/// Called once per *evaluation* of a function expression and once per
+/// instantiation of a function declaration, which is what 15.2.5 and 10.2.11
+/// respectively ask for.
+fn fn_new(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(1);
+    let p = f.local(ValType::I32);
+    let b = &mut f.body;
+    b.push(Ins::I32Const(FN_BYTES));
+    b.push(ctx.call(Rt::Alloc));
+    b.push(Ins::LocalTee(p));
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Store(ALIGN_WORD, FN_ELEMENT));
+    b.push(Ins::LocalGet(p));
     f
 }
 

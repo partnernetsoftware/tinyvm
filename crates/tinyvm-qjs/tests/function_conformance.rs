@@ -443,6 +443,33 @@ fn a_named_function_expression_can_reach_itself_by_name() {
     );
 }
 
+/// 15.2.5 step 4 initialises the self-name binding to *the object step 3 just
+/// created*, so the name and whatever the expression was stored in are the
+/// same object.
+///
+/// DIVERGENCE, and it is the one the per-evaluation function record cost.
+/// That object is built in the enclosing frame and there is no closure
+/// environment to carry it into the call, so the self name is initialised to
+/// a fresh object on each call instead. Everything the binding exists for
+/// still works -- it is a function, `typeof` says so, and recursion through
+/// it runs -- and only identity tells the difference. The fix is a callee
+/// slot in the frame, which is the same machinery `this` needs.
+#[test]
+fn a_named_function_expression_sees_a_function_but_not_its_own_object() {
+    text(
+        "let f = function me() { return typeof me; }; return f();",
+        "function",
+    );
+    boolean(
+        "let f = function me() { return me === undefined; }; return f();",
+        false,
+    );
+    boolean(
+        "let f = function me() { return me === f; }; return f();",
+        false,
+    );
+}
+
 /// The same clause, read the other way: that environment is created *for the
 /// function*, so the name is not added to the enclosing scope.
 #[test]
@@ -604,22 +631,33 @@ fn strict_equality_on_a_function_value_is_identity() {
 /// evaluations of one piece of source text are two distinct function objects.
 #[test]
 fn each_evaluation_of_a_function_expression_is_a_new_object() {
-    // DIVERGENCE: ECMA-262 15.2.5 says `false` for both of these -- `mk()`
-    // called twice evaluates its FunctionExpression twice and returns two
-    // distinct objects, and a block entered twice does the same. This engine
-    // assigns one table element per function expression in the *source*, so
-    // every evaluation of that text yields the same index and `===` answers
-    // `true`. Observable only through `===`; a script that merely stores and
-    // calls what it gets back cannot tell.
+    // This was a DIVERGENCE when the corpus was written: a function value's
+    // payload was the table element index, one per function expression in the
+    // *source*, so every evaluation of that text yielded the same index and
+    // `===` answered `true`. The payload is now the address of a record built
+    // per evaluation, so both of these answer what 15.2.5 says.
     boolean(
         "function mk() { return function () { return 1; }; } let a = mk(); let b = mk(); return a === b;",
-        true,
+        false,
     );
     boolean(
         "const t = {}; t.first = undefined; t.same = false; let i = 0; \
          while (i < 2) { let g = function () { return 1; }; \
            if (i === 0) { t.first = g; } else { t.same = t.first === g; } i = i + 1; } \
          return t.same;",
+        false,
+    );
+    // 10.2.11 asks the same of a *declaration*: it is instantiated when the
+    // scope holding it is entered, so two calls of the enclosing function are
+    // two objects, and reading the name twice inside one call is one.
+    boolean(
+        "function outer() { function inner() { return 1; } return inner; } \
+         return outer() === outer();",
+        false,
+    );
+    boolean(
+        "function outer() { function inner() { return 1; } return inner === inner; } \
+         return outer();",
         true,
     );
     // What is *not* divergent, and is the half that matters for a namespace

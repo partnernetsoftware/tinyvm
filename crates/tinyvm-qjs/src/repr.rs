@@ -28,19 +28,21 @@
 //! | 3   | String    | guest pointer to `[len: i32][utf8 bytes]`  |
 //! | 4   | Null      | always 0                                   |
 //! | 5   | Object    | guest pointer to an object record          |
-//! | 6   | Function  | index of an element of the module's funcref table |
+//! | 6   | Function  | guest pointer to a function record         |
 //!
 //! `TAG_OBJECT` is 5 because it was the next free number when objects landed,
 //! and appending is the whole point: see *Dispatch order* below. `TAG_FUNCTION`
 //! is 6 for the same reason.
 //!
-//! A Function's payload is **not** a heap pointer, which is what makes it the
-//! one payload with no memory behind it. wasm MVP has no first-class function
-//! reference an `i64` could hold, so the only thing a value can carry that a
-//! call can act on is an index into the module's table, and `call_indirect` is
-//! the instruction that acts on it. The index is assigned by
-//! [`super::emit`] when a function first becomes a value, and element 0 is left
-//! null so that a zeroed payload is never a callable element.
+//! A Function's payload **is** a heap pointer, like a String's and an
+//! Object's, and it used to be the table index directly. That was the shorter
+//! answer and it was wrong: see *The payload-0 invariant* below. The record it
+//! points at holds the element index, because wasm MVP has no first-class
+//! function reference an `i64` could hold -- the only thing a call can act on
+//! is an index into the module's table, and `call_indirect` is the instruction
+//! that acts on it. [`super::emit`] assigns the index when a function first
+//! becomes a value, and element 0 is left null so that a zeroed word is never
+//! a callable element.
 //!
 //! `TAG_UNDEFINED` is 0 so that a zero-initialised pair -- a fresh wasm local,
 //! a zeroed word of linear memory -- reads as `undefined`, which is exactly
@@ -66,10 +68,21 @@
 //! allocator hands out one address per object. So the existing `i64.eq` is
 //! already reference identity, and no arm was added for it.
 //!
-//! Function arrived into that same arm on the same terms. One function gets one
-//! element index however many times it is read, and two function expressions
-//! get two, so the payload comparison already is 7.2.15 step 4 -- and `===`
-//! again needed no new arm.
+//! Function arrived into that same arm, and the argument for it was wrong the
+//! first time. It read: "one function gets one element index however many
+//! times it is read, and two function expressions get two, so the payload
+//! comparison already is 7.2.15 step 4." Both halves are true and the sentence
+//! is a proof only if those are the two cases. They are not. The third is one
+//! function *expression evaluated twice* -- `function mk() { return function
+//! () {}; } mk() === mk()` -- which ECMA-262 15.2.5 makes two objects and the
+//! element index made one. The word "read" is what hid it, and
+//! `tests/indirect_attack.rs` is what found it.
+//!
+//! So the payload is the address of a per-evaluation record, and the arm is
+//! right for the reason the Object arm is right: a bump allocator hands out
+//! one address per object, and the existing `i64.eq` is reference identity.
+//! `===` still needed no new arm; what it needed was for the payload to be
+//! the identity rather than the implementation.
 //!
 //! # Dispatch order
 //!
@@ -224,9 +237,11 @@ pub(crate) const TAG_NULL: i32 = 4;
 /// [`super::runtime`] lays out. Appended rather than slotted in, for the
 /// reason the module header's *Dispatch order* section gives.
 pub(crate) const TAG_OBJECT: i32 = 5;
-/// A Function: the payload is the index of an element of the module's funcref
-/// table, and calling it is `call_indirect`. Appended rather than slotted in,
-/// for the reason the module header's *Dispatch order* section gives.
+/// A Function: the payload is a guest pointer to the function record
+/// [`super::runtime`] lays out, which holds the index of an element of the
+/// module's funcref table. Calling it is a load and then `call_indirect`.
+/// Appended rather than slotted in, for the reason the module header's
+/// *Dispatch order* section gives.
 pub(crate) const TAG_FUNCTION: i32 = 6;
 
 /// The wasm value types one JS value occupies, in stack order.
@@ -295,18 +310,23 @@ pub(crate) fn box_object(inner: &[Ins], out: &mut Vec<Ins>) {
     out.push(Ins::I64ExtendI32U);
 }
 
-/// A function value: `element` is the index of an element of the module's
-/// funcref table.
+/// `inner` leaves exactly one `i32` guest pointer to a function record.
+/// Result: one JS Function.
+///
+/// Not a constant, which is the whole of the fix for the identity defect: a
+/// function value has per-evaluation state after all, and that state is its
+/// own address. ECMA-262 15.2.5 makes each evaluation of a FunctionExpression
+/// a new object, and the only thing that can tell two of them apart here is
+/// that the allocator handed out two addresses.
 ///
 /// Unused when this module is compiled without `emit`, which is what
 /// `tests/repr_v1.rs` does -- the only producer of a function value is the
-/// lowering, because only the lowering knows which element a function took. A constant, like a string literal's address and unlike every
-/// other reference this engine has -- there is nothing to allocate, because a
-/// function has no per-value state to keep.
+/// lowering, because only the lowering knows which element a function took.
 #[allow(dead_code)]
-pub(crate) fn const_function(element: i32, out: &mut Vec<Ins>) {
+pub(crate) fn box_function(inner: &[Ins], out: &mut Vec<Ins>) {
     out.push(Ins::I32Const(TAG_FUNCTION));
-    out.push(Ins::I64Const(i64::from(element)));
+    out.extend_from_slice(inner);
+    out.push(Ins::I64ExtendI32U);
 }
 
 /// Bit-exact: the payload is the double's bits, so nothing is lost -- not the
@@ -374,14 +394,40 @@ pub(crate) fn unbox_object(base: u32, out: &mut Vec<Ins>) {
     out.push(Ins::I32WrapI64);
 }
 
-/// -> `i32` table element index. Traps when the value is not a Function --
-/// which is what makes `undefined()` a clean fault, raised before any table is
-/// touched, rather than a `call_indirect` into whatever the payload was.
+/// -> `i32` guest pointer to a function record. Traps when the value is not a
+/// Function -- which is what makes `undefined()` a clean fault, raised before
+/// any table is touched, rather than a `call_indirect` into whatever the
+/// payload was.
 ///
-/// Unused without `emit`, for the reason [`const_function`] gives.
+/// It also traps when the payload does not *fit* in the `i32` the pointer is,
+/// and that second check is the one worth explaining. Every other accessor
+/// here narrows with a bare `i32.wrap_i64`, which silently discards the high
+/// half. For a String or an Object the worst that buys is a wrong address,
+/// which reads guest-owned bytes or traps on the bounds check. For a Function
+/// it buys a *call*: `(TAG_FUNCTION, 2^32 + 1)` truncated to 1 lands wherever
+/// element 1 points, quietly. `tests/indirect_attack.rs` verified that before
+/// this check existed. No script can build such a pair -- the only producer is
+/// the lowering -- and `Value` has no Function variant, so the only door left
+/// is a hand-built `&[Val]` handed to `invoke_by_name`. The guard is here
+/// anyway, because "no producer makes one" is a property of every producer
+/// and this is a property of the consumer.
+///
+/// Written as extend-and-compare rather than a high-half test, because
+/// [`Ins`] has `i64.eq` and no other 64-bit comparison.
+///
+/// Unused without `emit`, for the reason [`box_function`] gives.
 #[allow(dead_code)]
 pub(crate) fn unbox_function(base: u32, out: &mut Vec<Ins>) {
     require_tag(base, TAG_FUNCTION, out);
+    out.push(Ins::LocalGet(base + 1));
+    out.push(Ins::I32WrapI64);
+    out.push(Ins::I64ExtendI32U);
+    out.push(Ins::LocalGet(base + 1));
+    out.push(Ins::I64Eq);
+    out.push(Ins::I32Eqz);
+    out.push(Ins::If(BlockType::Empty));
+    out.push(Ins::Unreachable);
+    out.push(Ins::End);
     out.push(Ins::LocalGet(base + 1));
     out.push(Ins::I32WrapI64);
 }
@@ -501,12 +547,13 @@ pub(crate) fn host_decode(vals: &[Val]) -> Result<HostVal, String> {
             );
         }
         // Named rather than lumped into "unknown", for the reason the Object
-        // arm gives, and for one more: a function value is an index into
-        // *this module's* table, so it has no meaning at all on the other side
-        // of the boundary -- not even a meaning the host could learn.
+        // arm gives, and for one more: a function value points at a record
+        // holding an index into *this module's* table, so it has no meaning at
+        // all on the other side of the boundary -- not even one a host could
+        // learn.
         TAG_FUNCTION => {
             return Err(
-                "V1: a function is an index into this module's own table; `Value` has no variant for one"
+                "V1: a function is a guest reference to an index into this module's own table; `Value` has no variant for one"
                     .to_string(),
             );
         }

@@ -413,37 +413,56 @@ fn a_wrong_tag_call_is_not_misreported_as_a_budget_fault() {
 // 2. The payload the tag promises
 //
 // These hand the guest a `(TAG_FUNCTION, n)` pair the compiler never
-// produces. No script can build one -- `const_function` is the only producer
-// and it only ever emits an index it just assigned -- and the public `Value`
-// has no `Function` variant, so this is strictly below the supported door.
-// That is the point: it is the only way to ask what stands between a bad
-// payload and a jump.
+// produces. No script can build one -- the lowering is the only producer and
+// it only ever emits an address `__fn_new` just returned -- and the public
+// `Value` has no `Function` variant, so this is strictly below the supported
+// door. That is the point: it is the only way to ask what stands between a
+// bad payload and a jump.
+//
+// The payload is a *guest pointer to a function record*, not the element
+// index it used to be, so the question a bad payload asks is now asked of
+// memory before it is asked of the table: load a word from wherever the
+// pointer says, and use that as the index.
 // =========================================================================
 
-/// A payload past the end of the table is a bounds trap, not a jump.
+/// A payload that is not the address of a function record must not reach a
+/// jump. Where it stops depends on what is at that address, and all three
+/// stops are traps.
 #[test]
-fn a_function_payload_out_of_range_traps() {
-    // The module has exactly one element (index 1); 2 and beyond are past it.
+fn a_function_payload_that_is_not_a_record_traps() {
     let src = "let f = function () { return 1; }; return $0();";
-    for bad in [2i64, 3, 99, 1_000_000, i64::from(i32::MAX)] {
+    // Low addresses are inside the module's own data: the fault word, the
+    // reserved word, and the string pool. Every word there reads as an
+    // element the table does not have.
+    for bad in [0i64, 1, 2, 3, 99] {
         let message = raw_trap(src, &[Val::I32(TAG_FUNCTION), Val::I64(bad)]);
         assert!(
-            message.contains("table element out of bounds"),
+            message.contains("uninitialised table element")
+                || message.contains("table element out of bounds"),
+            "payload {bad} gave {message}"
+        );
+    }
+    // Past the end of linear memory the load itself is the trap.
+    for bad in [1_000_000i64, i64::from(i32::MAX)] {
+        let message = raw_trap(src, &[Val::I32(TAG_FUNCTION), Val::I64(bad)]);
+        assert!(
+            message.contains("memory access out of bounds"),
             "payload {bad} gave {message}"
         );
     }
 }
 
-/// Negative payloads are read as unsigned indices, so they land far past the
-/// end rather than before the start. Worth pinning: an implementation that
-/// sign-extended into a signed index would be reading backwards from the table.
+/// A negative payload never becomes a pointer at all: `unbox_function`'s
+/// range check refuses it before the load, so nothing reads backwards from
+/// anywhere. Worth pinning, because the narrowing that produces the pointer
+/// is `i32.wrap_i64` and on its own it would turn -1 into address `0xffffffff`.
 #[test]
 fn a_negative_function_payload_traps_rather_than_reading_backwards() {
     let src = "let f = function () { return 1; }; return $0();";
     for bad in [-1i64, -2, -1000, i64::from(i32::MIN)] {
         let message = raw_trap(src, &[Val::I32(TAG_FUNCTION), Val::I64(bad)]);
         assert!(
-            message.contains("table element out of bounds"),
+            message.contains("unreachable executed"),
             "payload {bad} gave {message}"
         );
     }
@@ -500,34 +519,29 @@ fn no_element_index_is_ever_zero_and_none_repeats() {
     );
 }
 
-/// **The truncation.** The payload is an `i64` and the index is an `i32`, so
-/// `unbox_function`'s `i32.wrap_i64` discards the high half without looking at
-/// it: `(TAG_FUNCTION, 2^32 + 1)` calls element **1**.
+/// **The truncation, closed.** This test used to assert the defect: the
+/// payload is an `i64` and the pointer is an `i32`, and `unbox_function`
+/// narrowed with a bare `i32.wrap_i64`, so `(TAG_FUNCTION, 2^32 + 1)` reached
+/// element 1 -- a real function, silently, which is the worst outcome a bad
+/// payload can have.
 ///
-/// This is not reachable from any script -- the compiler's only producer of
-/// the tag emits a small assigned index -- and it is not reachable through the
-/// supported host door either, since `Value` has no `Function` variant. It is
-/// recorded here because it is the one place where a payload that is *not* an
-/// element index still reaches a real function, and because the guard that
-/// makes it unreachable is a fact about the producers rather than a check at
-/// the consumer.
+/// `unbox_function` now extends the narrowed value back and compares, so a
+/// payload with anything in its high half traps before the load. Still not
+/// reachable from a script, and still not through the supported door; the
+/// point of the check is that the guarantee is a property of the consumer
+/// rather than of every producer.
 #[test]
-fn the_high_half_of_a_function_payload_is_discarded() {
+fn the_high_half_of_a_function_payload_is_refused() {
     let src = "let f = function () { return 41; }; return $0();";
-    // The honest index, for the baseline.
-    let (instance, vals) =
-        attempt_raw(src, &[Val::I32(TAG_FUNCTION), Val::I64(1)]).expect("element 1 is f");
-    assert_eq!(decode(&instance, &vals, src), Out::Number(41.0));
-    // The same low half, with rubbish above it.
     for high in [1u64 << 32, 0xdead_beef << 32, 0xffff_ffff << 32] {
-        let payload = (high | 1) as i64;
-        let (instance, vals) = attempt_raw(src, &[Val::I32(TAG_FUNCTION), Val::I64(payload)])
-            .unwrap_or_else(|e| panic!("payload {payload:#x}: {e}"));
-        assert_eq!(
-            decode(&instance, &vals, src),
-            Out::Number(41.0),
-            "payload {payload:#x} reached element 1 with its high half discarded"
-        );
+        for low in [0u64, 1, 2] {
+            let payload = (high | low) as i64;
+            let message = raw_trap(src, &[Val::I32(TAG_FUNCTION), Val::I64(payload)]);
+            assert!(
+                message.contains("unreachable executed"),
+                "payload {payload:#x} gave {message}"
+            );
+        }
     }
 }
 
@@ -590,11 +604,12 @@ fn the_element_section_names_the_adapter_the_assignment_order_asks_for() {
             .map(|(e, n)| (*e, n.as_str()))
             .collect::<Vec<_>>(),
         vec![
-            (1, "<adapter of gamma>"),
-            (2, "<adapter of alpha>"),
-            (3, "<adapter of beta>"),
+            (1, "<adapter of alpha>"),
+            (2, "<adapter of beta>"),
+            (3, "<adapter of gamma>"),
         ],
-        "the three named functions take elements in assignment order, not definition order"
+        "a declaration takes its element when the scope holding it is entered, \
+         so the three go in source order however the assignments below reorder them"
     );
     // The anonymous one is named after where it was written, which is the only
     // thing that tells two of them apart -- so the offset is not pinned here.
@@ -785,30 +800,44 @@ fn two_slots_cannot_reach_each_others_functions() {
     );
 }
 
-/// The payload is an index into **this module's** table, so the same index
-/// means a different function in a different module. That is by construction
-/// -- `repr`'s `host_decode` refuses the tag outward for exactly this reason
-/// -- and this test states it as a fact rather than leaving it implied: a
-/// module handed an index from elsewhere calls its own element, quietly.
+/// The payload is a guest reference into **this module's** memory, naming an
+/// index into **this module's** table, so nothing about it travels. That is
+/// by construction -- `repr`'s `host_decode` refuses the tag outward for
+/// exactly this reason -- and this states it as a fact rather than leaving it
+/// implied: every payload a module is handed either faults or reaches one of
+/// its *own* functions, whatever it meant where it came from.
+///
+/// Written as a sweep rather than two cases, because the payload became an
+/// address and there is no longer a small set of "plausible" ones to try. Two
+/// facts have to hold together: nothing answers with A's numbers, and
+/// something answers, so the sweep is not vacuous.
 #[test]
-fn a_table_index_means_nothing_outside_its_own_module() {
-    // Module A's element 1 answers 100. Module B's element 1 answers 1.
+fn a_function_payload_means_nothing_outside_its_own_module() {
+    // Module A's functions answer 100 and 200. Module B's answer 1 and 2.
     let a = "let f = function () { return 100; }; let g = function () { return 200; }; \
              return f() + g();";
     let b = "let f = function () { return 1; }; let g = function () { return 2; }; return $0();";
     assert_eq!(run(a), Out::Number(300.0));
-    for (index, want) in [(1i64, 1.0), (2, 2.0)] {
-        let (instance, vals) = attempt_raw(b, &[Val::I32(TAG_FUNCTION), Val::I64(index)])
-            .unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(
-            decode(&instance, &vals, b),
-            Out::Number(want),
-            "element {index} answers with B's own function, not A's"
+    let wasm = compile_qjs_m1(b).expect("B compiles");
+    let mut answered = 0;
+    for payload in 0i64..4096 {
+        let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("gate");
+        let mut instance = module.instantiate().expect("instantiate");
+        let Ok(vals) =
+            instance.invoke_by_name("main", &[Val::I32(TAG_FUNCTION), Val::I64(payload)])
+        else {
+            continue;
+        };
+        let out = decode(&instance, &vals, b);
+        assert!(
+            out == Out::Number(1.0) || out == Out::Number(2.0),
+            "payload {payload} answered {out:?}, which is not one of B's own"
         );
+        answered += 1;
     }
-    // And past B's own table it is a bounds trap rather than anything else.
     assert!(
-        raw_trap(b, &[Val::I32(TAG_FUNCTION), Val::I64(3)]).contains("table element out of bounds")
+        answered >= 2,
+        "the sweep found {answered} answering payloads, so it proves nothing"
     );
 }
 
@@ -1105,28 +1134,27 @@ fn a_function_value_cannot_be_returned_to_the_host() {
 }
 
 // =========================================================================
-// 8. A divergence this attack found
+// 8. The defect this attack found, and its fix
 // =========================================================================
 
-/// **Known defect, deliberately failing.** ECMA-262 15.2.5 /
-/// InstantiateOrdinaryFunctionExpression makes each *evaluation* of a
-/// FunctionExpression a new function object, so `make() === make()` is `false`
-/// in JavaScript. Here a function expression is one `FuncId`, which is one
-/// element index however many times it is evaluated, so `===` answers `true`.
+/// ECMA-262 15.2.5 / InstantiateOrdinaryFunctionExpression makes each
+/// *evaluation* of a FunctionExpression a new function object, so
+/// `make() === make()` is `false`.
 ///
-/// It is exactly the case `repr.rs`'s module header does not cover: it says
-/// "one function gets one element index however many times it is **read**, and
-/// two function expressions get two", and both halves are true -- the gap is a
-/// third case, one function expression *evaluated* twice, which JavaScript
-/// says is two functions and this engine says is one.
+/// This was `#[ignore]`d and failing when the attack was written: a function
+/// expression was one `FuncId`, which was one element index however many times
+/// it was evaluated, so `===` answered `true`. It is exactly the case
+/// `repr.rs`'s header did not cover -- it argued from "however many times it
+/// is **read**", and the third case is one expression *evaluated* twice.
 ///
-/// The gap is inert for `fleet.js` (all 29 of its function expressions are
-/// evaluated exactly once, at the top level) and cannot be reached at all
-/// without `===` on two function values, since there are no closures for the
-/// two objects to differ in. Ignored rather than deleted so that the day the
-/// element table stops being keyed on `FuncId` alone, this flips green.
+/// The fix is that a function value's payload stopped being the element index
+/// and became the address of a one-word record holding it, so identity comes
+/// from the allocator, as it does for every other reference this engine has.
+/// The tempting fix -- "a function expression inside a loop takes a fresh
+/// element" -- was refused: it is a second path outside the value
+/// representation, which is the shape this stack reports rather than
+/// satisfies.
 #[test]
-#[ignore = "known divergence: one function expression evaluated twice is one element, not two"]
 fn two_evaluations_of_one_function_expression_are_two_functions() {
     boolean(
         "function make() { return function () { return 1; }; } return make() === make();",

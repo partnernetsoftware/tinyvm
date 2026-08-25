@@ -266,7 +266,7 @@ fn emit(expr: &Expr, hosts: &[String], out: &mut Vec<Ins>) {
 /// -- so a label stack would be machinery with one possible answer. It is what
 /// the milestone that adds them must build.
 pub(crate) mod m1 {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use crate::ast::m1 as ast;
     use crate::convert;
@@ -274,11 +274,13 @@ pub(crate) mod m1 {
     use crate::ir::m1 as ir;
     use crate::opts::{HostFn, HostParam, HostResult, Names, Options};
     use crate::repr::{
-        self, BlockType, Ins, ValType, WIDTH, box_bool, box_number, box_object, box_string,
-        const_bool, const_function, const_null, const_number, const_string, const_undefined,
+        self, BlockType, Ins, ValType, WIDTH, box_bool, box_function, box_number, box_object,
+        box_string, const_bool, const_null, const_number, const_string, const_undefined,
         drop_value, load_local, store_local, unbox_function, unbox_number, unbox_string,
     };
-    use crate::runtime::{self, Conversions, Ctx, FnBuild, Rt, STRING_HEADER, StringPool};
+    use crate::runtime::{
+        self, ALIGN_WORD, Conversions, Ctx, FN_ELEMENT, FnBuild, Rt, STRING_HEADER, StringPool,
+    };
 
     /// The name every compiled script exports, as at M0.
     pub(crate) const ENTRY: &str = super::ENTRY;
@@ -488,7 +490,15 @@ pub(crate) mod m1 {
         for (index, function) in program.functions.iter().enumerate() {
             let id = ast::FuncId(index as u32);
             let built = Lower::new(
-                program, &ctx, &mut pool, &table, &mut fns, uniform, user_base, id,
+                program,
+                &ctx,
+                &scan.value_bindings,
+                &mut pool,
+                &table,
+                &mut fns,
+                uniform,
+                user_base,
+                id,
             )
             .function()?;
             let arity = if id == ast::Program::SCRIPT {
@@ -913,6 +923,15 @@ pub(crate) mod m1 {
         /// yes-or-no of what [`FnTable`] then counts exactly, and the reason
         /// a program that never does emits no table and no uniform signature.
         function_values: bool,
+        /// The function bindings whose *name* is read as a value somewhere --
+        /// `f` rather than `f()`.
+        ///
+        /// Those are the only bindings that need storage and a function
+        /// object built into it. A `function f(){}` that is only ever called
+        /// keeps costing nothing: no global, no allocation, no table element.
+        /// The object it would hold has no way to be observed, and ECMA-262
+        /// makes it exist rather than makes it visible.
+        value_bindings: BTreeSet<ast::BindingId>,
         /// Whether the program calls anything that is not a statically known
         /// function. Tracked separately from `function_values` because a
         /// module can need the table for one without the other -- a script
@@ -1027,11 +1046,12 @@ pub(crate) mod m1 {
             ast::StmtKind::Expr(e) => host_expr(e, scan),
             ast::StmtKind::Decl(declarators) => declarators.iter().try_for_each(|d| {
                 match (&d.init, program.binding(d.binding).kind) {
-                    // `const f = function () {}`: the name *is* the function,
-                    // so [`Lower::declarator`] emits nothing at all -- and a
-                    // function that is never emitted is not a value. Mirrored
-                    // here rather than over-approximated, so a script that
-                    // only declares functions still carries no table.
+                    // `const f = function () {}`: the declarator builds a
+                    // function object only when the name is read as a value
+                    // somewhere, and whether it is cannot be known until the
+                    // whole program has been walked. So nothing is decided
+                    // here; `Lower::declarator` asks `value_bindings`, which
+                    // this walk is what fills in.
                     (
                         Some(ast::Expr {
                             kind: ast::ExprKind::Function(_),
@@ -1097,8 +1117,9 @@ pub(crate) mod m1 {
                 ast::Res::Host(text) => note_host(scan, text, 0, expr.span),
                 // A name bound to a known function, read and not called. The
                 // read is the constant function value.
-                ast::Res::Callee(_) => {
+                ast::Res::Callee(id) => {
                     scan.function_values = true;
+                    scan.value_bindings.insert(*id);
                     Ok(())
                 }
                 _ => Ok(()),
@@ -1191,6 +1212,8 @@ pub(crate) mod m1 {
     struct Lower<'a> {
         program: &'a ast::Program,
         ctx: &'a Ctx,
+        /// Which function bindings hold an object -- see [`Scan`].
+        value_bindings: &'a BTreeSet<ast::BindingId>,
         pool: &'a mut StringPool,
         table: &'a Table,
         /// The funcref table, which every function value in the program shares
@@ -1220,6 +1243,7 @@ pub(crate) mod m1 {
         fn new(
             program: &'a ast::Program,
             ctx: &'a Ctx,
+            value_bindings: &'a BTreeSet<ast::BindingId>,
             pool: &'a mut StringPool,
             table: &'a Table,
             fns: &'a mut FnTable,
@@ -1263,6 +1287,7 @@ pub(crate) mod m1 {
             Lower {
                 program,
                 ctx,
+                value_bindings,
                 pool,
                 table,
                 fns,
@@ -1276,7 +1301,89 @@ pub(crate) mod m1 {
             }
         }
 
+        /// One statement list: the function declarations directly in it are
+        /// instantiated first, then the statements run.
+        ///
+        /// That order is ECMA-262 10.2.11 FunctionDeclarationInstantiation for
+        /// a function body and 14.2.3 BlockDeclarationInstantiation for a
+        /// block, and it is what makes `f()` above `function f(){}` work.
+        /// Running it *per entry to the list* is the other half: a declaration
+        /// in a loop body is a new function object on every pass, which is the
+        /// same rule as `let`.
+        ///
+        /// The two places a `StmtKind::Func` can appear are a function body
+        /// and a block, and both come through here. It cannot be the bare body
+        /// of an `if`, a `while` or a `for`: the parser refuses a declaration
+        /// there with a diagnostic of its own, which
+        /// `a_function_declaration_is_not_a_statement_body` in `parse_m1.rs`
+        /// holds.
+        fn stmts(&mut self, stmts: &[ast::Stmt]) -> Result<(), CompileError> {
+            for stmt in stmts {
+                if let ast::StmtKind::Func { binding, func } = &stmt.kind {
+                    self.instantiate(*binding, *func);
+                }
+            }
+            stmts.iter().try_for_each(|s| self.stmt(s))
+        }
+
+        /// Build the function object a `BindingKind::Function` binding holds,
+        /// and store it.
+        ///
+        /// Nothing at all when no occurrence of the name is a *value*: the
+        /// object would then be unobservable, and the whole cost of it -- a
+        /// pair of globals or locals, a table element, an adapter and an
+        /// allocation -- is what a script that only declares and calls used to
+        /// not pay and still does not.
+        fn instantiate(&mut self, binding: ast::BindingId, func: ast::FuncId) {
+            if !self.value_bindings.contains(&binding) {
+                return;
+            }
+            let place = self.place(binding);
+            self.function_value(func);
+            self.store(place);
+        }
+
+        /// One fresh function object, on the stack: 15.2.5's "a new object"
+        /// for a FunctionExpression and 10.2.11's for a declaration.
+        fn function_value(&mut self, func: ast::FuncId) {
+            let element = self.fns.element(func);
+            let new = self.ctx.call(Rt::FnNew);
+            box_function(&[Ins::I32Const(element), new], &mut self.f.body);
+        }
+
+        /// The binding a named function expression makes for its own name,
+        /// which is the one binding of this function whose kind names *this*
+        /// function. A `function g(){}` written inside the body names `g`'s
+        /// id, not this one, so the test is exact.
+        fn self_name(&self) -> Option<ast::BindingId> {
+            self.program
+                .func(self.id)
+                .bindings
+                .iter()
+                .copied()
+                .find(|b| self.program.binding(*b).kind == ast::BindingKind::Function(self.id))
+        }
+
         fn function(mut self) -> Result<FnBuild, CompileError> {
+            // ECMA-262 15.2.5 step 4 binds a named function expression's own
+            // name inside the function, before the body runs.
+            //
+            // DIVERGENCE, and it is this fix's own: the spec initialises that
+            // binding to *the object 15.2.5 just created*, and this
+            // initialises it to a fresh one per call. There is no channel to
+            // the other: the object was built in the enclosing frame, and
+            // without a closure environment nothing carries it in. So `me`
+            // is a function, `typeof me` is `"function"`, `me()` recurses and
+            // `me === undefined` is false -- everything the binding exists
+            // for -- and `f === f()` where the body returns `me` answers
+            // `false` where JavaScript answers `true`. The fix is a callee
+            // slot in the frame, which is the same machinery `this` needs;
+            // `a_named_function_expression_sees_a_function_but_not_its_own
+            // _object` in `function_conformance.rs` is where it is written
+            // down.
+            if let Some(binding) = self.self_name() {
+                self.instantiate(binding, self.id);
+            }
             if self.id == ast::Program::SCRIPT {
                 // The fault word describes *this* call, so the entry point
                 // clears it before anything can write one. Without this a
@@ -1285,9 +1392,7 @@ pub(crate) mod m1 {
                 // entirely different reason.
                 runtime::clear_fault(&mut self.f.body);
             }
-            for stmt in &self.program.func(self.id).body {
-                self.stmt(stmt)?;
-            }
+            self.stmts(&self.program.func(self.id).body)?;
             // Falling off the end. The script yields its completion value --
             // which is `undefined` unless a statement produced one, and is
             // already `undefined` because a fresh local is zeroed and
@@ -1400,7 +1505,7 @@ pub(crate) mod m1 {
                 // No wasm block: this milestone has no `break` or `continue`,
                 // so nothing can branch to a block's label, and the front end
                 // has already turned block scoping into distinct bindings.
-                ast::StmtKind::Block(stmts) => stmts.iter().try_for_each(|s| self.stmt(s)),
+                ast::StmtKind::Block(stmts) => self.stmts(stmts),
                 ast::StmtKind::If { test, then, alt } => self.if_stmt(test, then, alt.as_deref()),
                 ast::StmtKind::While { test, body } => self.loop_stmt(Some(test), None, body),
                 ast::StmtKind::For {
@@ -1432,15 +1537,26 @@ pub(crate) mod m1 {
         fn declarator(&mut self, declarator: &ast::Declarator) -> Result<(), CompileError> {
             let binding = self.program.binding(declarator.binding);
             match (&declarator.init, binding.kind) {
-                // `const f = function () {}`: the name is the function, and
-                // the function is an index, so there is nothing to store.
+                // `const f = function () {}`: 15.2.5 evaluates the
+                // FunctionExpression *here*, so the object is built here and
+                // not hoisted -- which is what makes a declarator inside a
+                // loop body a new function on every pass. `instantiate`
+                // decides whether an object is needed at all.
                 (
                     Some(ast::Expr {
-                        kind: ast::ExprKind::Function(_),
+                        kind: ast::ExprKind::Function(func),
                         ..
                     }),
                     ast::BindingKind::Function(_),
-                ) => Ok(()),
+                ) => {
+                    debug_assert_eq!(
+                        self.program.binding(declarator.binding).kind,
+                        ast::BindingKind::Function(*func),
+                        "the parser binds the name to the function it was written with"
+                    );
+                    self.instantiate(declarator.binding, *func);
+                    Ok(())
+                }
                 (Some(init), _) => {
                     let place = self.place(declarator.binding);
                     self.expr(init)?;
@@ -1600,11 +1716,10 @@ pub(crate) mod m1 {
                     Ok(())
                 }
                 // A function expression reached here rather than as a
-                // callee: the value is the table element index its adapter
-                // will occupy, which is a constant and needs no allocation.
+                // callee, so ECMA-262 15.2.5 runs and its answer is a new
+                // object every time this expression is evaluated.
                 ast::ExprKind::Function(id) => {
-                    let element = self.fns.element(*id);
-                    const_function(element, &mut self.f.body);
+                    self.function_value(*id);
                     Ok(())
                 }
                 ast::ExprKind::Call { callee, args } => self.call(callee, args),
@@ -1740,13 +1855,19 @@ pub(crate) mod m1 {
                 // As at M0: a bare host name is the zero-argument call.
                 ast::Res::Host(text) => self.host_call(text, &[]),
                 // A name bound to a known function, read rather than called.
-                // The binding has no storage -- `declarator` writes nothing
-                // for it -- because the name *is* the function, so the read is
-                // the same constant a function expression would be.
+                // An ordinary storage read: the object was built once, when
+                // the scope holding the binding was entered (a declaration) or
+                // when the declarator ran (`const f = function () {}`), and
+                // reading the name twice has to give the same object back.
+                // This used to rebuild the value from the element index, which
+                // is what made two *evaluations* one function.
                 ast::Res::Callee(id) => {
-                    let target = self.func_of(*id);
-                    let element = self.fns.element(target);
-                    const_function(element, &mut self.f.body);
+                    debug_assert!(
+                        self.value_bindings.contains(id),
+                        "the scan records every name read as a value"
+                    );
+                    let place = self.place(*id);
+                    self.load(place);
                     Ok(())
                 }
                 ast::Res::Unresolved => {
@@ -1829,6 +1950,7 @@ pub(crate) mod m1 {
             store_local(slot, &mut self.f.body);
             self.arguments(args, uniform.arity)?;
             unbox_function(slot, &mut self.f.body);
+            self.push(Ins::I32Load(ALIGN_WORD, FN_ELEMENT));
             self.push(Ins::CallIndirect(uniform.type_index, 0));
             self.give(slot);
             Ok(())
