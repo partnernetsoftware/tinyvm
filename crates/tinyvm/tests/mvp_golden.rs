@@ -638,7 +638,7 @@ fn parse_prd_x_leaves(prd: &str) -> Vec<String> {
 /// test must exist in this package's integration tests and assert something
 /// concrete — the point of naming it here is that a leaf can no longer be
 /// satisfied by a text row.
-const LEAF_TESTS: [(&str, &str); 174] = [
+const LEAF_TESTS: [(&str, &str); 175] = [
     ("eval(bytes)", "eval_bytes"),
     (
         "in-guest throughput gate",
@@ -695,6 +695,10 @@ const LEAF_TESTS: [(&str, &str); 174] = [
     (
         "every rejection names the engine boundary",
         "qjs_m1_rejections_name_the_engine_boundary",
+    ),
+    (
+        "an exhausted heap is legible, not a bare trap",
+        "qjs_m1_tells_an_exhausted_heap_from_a_broken_script",
     ),
     ("iOS runtime boundary", "native_interpreter_boundary"),
     ("interpret wasm", "eval_bytes"),

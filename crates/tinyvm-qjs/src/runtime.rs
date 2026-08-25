@@ -57,8 +57,57 @@ use super::repr::{
 };
 
 /// Byte 0..8 is left out of the data segment so a null pointer is never a
-/// valid string.
+/// valid string. The first word of it is the fault word; the second stays
+/// reserved.
 pub(crate) const DATA_ORIGIN: u32 = 8;
+
+/// The guest's own account of why it trapped, at a fixed address in its linear
+/// memory.
+///
+/// A refused `memory.grow` is not a trap -- standard wasm has it return `-1`
+/// (`crates/tinyvm/src/wasm.rs`, `Op::MemoryGrow`, the `stack.push(Val::I32(-1))`
+/// arm) -- so it carries no reason of its own, and the `unreachable` the
+/// allocator falls into afterwards is byte-for-byte the same fault a genuine
+/// type error produces. A host that saw only the trap would have to *guess*
+/// which one it had, and guessing wrong means telling an author their script is
+/// broken when the truth is that the heap ran out.
+///
+/// So the guest writes down what it knows on the way down, at a word no
+/// allocation can ever hand out: the bump pointer starts at
+/// [`StringPool::heap_start`], which is never below [`DATA_ORIGIN`], and the
+/// only instruction in the emitted module that stores here is the one below.
+/// Nothing is imported, nothing is exported and no host has to be watching --
+/// the record is simply there afterwards, for a host that has the instance.
+///
+/// Reading it is [`crate::guest_fault`]; that function and this constant are
+/// the same fact stated on the two sides of the boundary.
+pub(crate) const FAULT_WORD: i32 = 0;
+
+/// This call recorded no fault. Written at the top of the entry point, so the
+/// word always describes the call the host just made rather than an older one.
+///
+/// Only `emit` writes it, and `tests/repr_v1.rs` includes this module without
+/// that one.
+#[allow(dead_code)]
+pub(crate) const FAULT_NONE: i32 = 0;
+
+/// `memory.grow` refused: the bump heap cannot hold what the script asked for.
+/// A budget fact, not a defect in the script.
+pub(crate) const FAULT_HEAP_EXHAUSTED: i32 = 1;
+
+/// `mem[FAULT_WORD] = code`.
+fn store_fault(code: i32, out: &mut Vec<Ins>) {
+    out.push(Ins::I32Const(FAULT_WORD));
+    out.push(Ins::I32Const(code));
+    out.push(Ins::I32Store(2, 0));
+}
+
+/// Emitted once, at the top of the entry point. Unused when this module is
+/// included without `emit` -- see [`FAULT_NONE`].
+#[allow(dead_code)]
+pub(crate) fn clear_fault(out: &mut Vec<Ins>) {
+    store_fault(FAULT_NONE, out);
+}
 
 /// The emitted runtime functions, in index order. Position in [`SET`] is the
 /// function's offset from [`Ctx::func_base`], so the list *is* the call table.
@@ -783,6 +832,11 @@ fn to_number_of(ctx: &Ctx, base: u32, out: &mut Vec<Ins>) {
 /// linear memory rather than trapping at the first page boundary; the host's
 /// [`tinyvm::Limits`] is what actually bounds it, which is where the bound
 /// belongs.
+///
+/// When that bound is reached the allocator still has to fail, and it records
+/// [`FAULT_HEAP_EXHAUSTED`] in [`FAULT_WORD`] before it does, so the host can
+/// tell "out of budget" from "broken script" without matching on a trap
+/// message that is identical for both.
 fn alloc(ctx: &Ctx) -> FnBuild {
     let mut f = FnBuild::new(1);
     let p = f.local(ValType::I32);
@@ -811,6 +865,9 @@ fn alloc(ctx: &Ctx) -> FnBuild {
     b.push(Ins::I32Const(-1));
     b.push(Ins::I32Eq);
     b.push(Ins::If(BlockType::Empty));
+    // The refusal is about to become an ordinary `unreachable`, which says
+    // nothing. Say it first -- see [`FAULT_WORD`].
+    store_fault(FAULT_HEAP_EXHAUSTED, b);
     b.push(Ins::Unreachable);
     b.push(Ins::End);
     b.push(Ins::Br(0));

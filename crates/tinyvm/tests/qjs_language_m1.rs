@@ -10,8 +10,8 @@
 //! These tests execute the product sentences; the exhaustive corpus lives in
 //! `tinyvm-qjs`'s own suite.
 
-use tinyvm::{Limits, WasmInstance, WasmModule};
-use tinyvm_qjs::{CompileError, Value, compile_qjs_m1};
+use tinyvm::{Limits, WasmFaultClass, WasmInstance, WasmModule};
+use tinyvm_qjs::{CompileError, GuestFault, Value, compile_qjs_m1, guest_fault};
 
 /// Compile, load, instantiate, call `main`. Every stage's refusal comes back as
 /// a sentence, so a failing test says *which* stage refused.
@@ -167,6 +167,97 @@ fn qjs_m1_rejections_name_the_engine_boundary() {
 /// the door does not learn about JavaScript values.** The host bound below
 /// speaks `i32` and a byte slice and nothing else -- no V1 pair crosses it --
 /// which is why the same host can stand behind a hand-written guest.
+/// An exhausted guest heap must not look like a broken script.
+///
+/// The two are genuinely indistinguishable to the VM. A refused `memory.grow`
+/// is not a trap -- standard wasm returns `-1`
+/// (`crates/tinyvm/src/wasm.rs`, `Op::MemoryGrow`) -- so the allocator has no
+/// reason to carry and falls into an ordinary `unreachable`, byte for byte the
+/// same instruction a conversion this milestone lacks executes. The host sees
+/// one `WasmError`, one message, one `FaultClass` for both, and a host-side
+/// heuristic ("memory is at its ceiling, so call it a budget problem") would
+/// mislabel a script that is simply broken.
+///
+/// So the guest says which it was, in a word of its own memory, before it
+/// goes. This test holds both halves: that the VM really cannot tell them
+/// apart, and that `guest_fault` can.
+#[test]
+fn qjs_m1_tells_an_exhausted_heap_from_a_broken_script() {
+    // One page and no more. The script allocates a 36-byte record per
+    // iteration and discards it -- a bump heap has no free -- so it needs
+    // about 288 KiB and is refused at 64 KiB. The step budget stays at its
+    // default so that what stops the loop is the heap and not the fuel.
+    let one_page = Limits {
+        max_memory_pages: 1,
+        ..Limits::default()
+    };
+    let exhausted = trap_in(
+        "let s = \"abcdefghijklmnop\"; let i = 0; while (i < 8000) { s + s; i = i + 1; } return i;",
+        one_page,
+    );
+    // A trap the heap had nothing to do with: `"a" + 1` needs ToString of a
+    // Number (ECMA-262 7.1.17), which this milestone does not have, and the
+    // runtime traps rather than fabricate a string. Same instruction, same
+    // budget, entirely different cause.
+    let semantic = trap_in("return \"a\" + 1;", one_page);
+
+    // The VM cannot tell them apart, and does not pretend to.
+    assert_eq!(exhausted.message, semantic.message);
+    assert_eq!(exhausted.class, WasmFaultClass::Guest);
+    assert_eq!(semantic.class, WasmFaultClass::Guest);
+    assert_eq!(exhausted.ceiling, None);
+    assert_eq!(semantic.ceiling, None);
+
+    // The guest can, because it wrote it down on the way out.
+    assert_eq!(exhausted.fault, Some(GuestFault::HeapExhausted));
+    assert_eq!(semantic.fault, None);
+
+    // And no host has to be watching: neither module imports anything.
+    assert_eq!(exhausted.imports, 0);
+    assert_eq!(semantic.imports, 0);
+
+    // A call that simply succeeds leaves no fault behind, and a later call
+    // does not inherit an earlier one: the entry point clears the word.
+    let (_, instance) = run("return 1 + 1;", &[]).unwrap_or_else(|e| panic!("{e}"));
+    let memory = instance.memory().expect("memory zero");
+    assert_eq!(guest_fault(&memory), None);
+}
+
+/// What a host learns from one trapping call: the fault the VM reported, and
+/// the guest's own account of it.
+struct Trapped {
+    message: &'static str,
+    class: WasmFaultClass,
+    ceiling: Option<tinyvm::WasmCeiling>,
+    fault: Option<GuestFault>,
+    imports: usize,
+}
+
+#[track_caller]
+fn trap_in(source: &str, limits: Limits) -> Trapped {
+    let wasm = compile_qjs_m1(source).unwrap_or_else(|e| panic!("compiling {source:?}: {e}"));
+    let module = WasmModule::from_bytes_with(&wasm, limits)
+        .unwrap_or_else(|e| panic!("load gate rejected {source:?}: {}", e.message()));
+    let imports = module.imports().len();
+    let mut instance = module
+        .instantiate()
+        .unwrap_or_else(|e| panic!("instantiating {source:?}: {}", e.message()));
+    let error = match instance.invoke_by_name("main", &Value::args(&[])) {
+        Err(error) => error,
+        Ok(values) => panic!("{source:?} was expected to trap, returned {values:?}"),
+    };
+    let memory = instance
+        .memory()
+        .unwrap_or_else(|e| panic!("reading memory after {source:?}: {}", e.message()));
+    Trapped {
+        message: error.message(),
+        class: error.class(),
+        ceiling: error.ceiling(),
+        fault: guest_fault(&memory),
+        imports,
+    }
+}
+
 #[test]
 fn qjs_m1_reaches_a_declared_host_door_with_arguments() {
     use std::cell::RefCell;

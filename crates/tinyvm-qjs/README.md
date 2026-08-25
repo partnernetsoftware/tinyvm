@@ -155,6 +155,41 @@ representation into a boundary meant to serve any guest. So this crate owns the
   order**, so an embedder can predict its import table without reading the
   script.
 
+## When the heap runs out, the guest says so
+
+The bump heap grows linear memory; the host's `Limits` is what bounds it. When
+that bound is reached, `memory.grow` returns `-1` — standard wasm, not a trap
+(`crates/tinyvm/src/wasm.rs`, `Op::MemoryGrow`) — so the refusal carries no
+reason and the allocator has nowhere to put one. It falls into `unreachable`,
+which is the same instruction a conversion this milestone lacks executes, so
+the host receives the same `WasmError`, the same `"unreachable executed"` and
+the same `FaultClass::Guest` for a script that ran out of budget and a script
+that is simply broken.
+
+Guessing between them is exactly the misclassification worth avoiding, so the
+guest writes the reason down first, in the first word of its own linear memory
+— an address the bump pointer never hands out. Read it after a trap:
+
+```rust
+use tinyvm_qjs::{GuestFault, guest_fault};
+
+if let Err(fault) = instance.invoke_by_name("main", &tinyvm_qjs::Value::args(&[])) {
+    match guest_fault(&instance.memory().expect("memory zero")) {
+        Some(GuestFault::HeapExhausted) => { /* budget: raise max_memory_pages */ }
+        _ => { /* the script itself: report `fault` */ }
+    }
+}
+```
+
+`None` means the guest recorded nothing — an ordinary guest fault, or a module
+with no linear memory at all. The entry point clears the word on the way in, so
+the answer is about the call that just failed rather than an older one.
+
+No import, no export, and nothing for a host to opt into: a module with no
+declared host imports still fails honestly. The cost is 14 bytes of emitted
+wasm per module — seven where the allocator gives up and seven where the entry
+point clears the word — whatever the script's size.
+
 ## The M0 skin
 
 ```rust

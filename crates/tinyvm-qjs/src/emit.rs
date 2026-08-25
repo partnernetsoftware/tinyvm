@@ -974,6 +974,14 @@ pub(crate) mod m1 {
         }
 
         fn function(mut self) -> Result<FnBuild, CompileError> {
+            if self.id == ast::Program::SCRIPT {
+                // The fault word describes *this* call, so the entry point
+                // clears it before anything can write one. Without this a
+                // heap exhaustion recorded by an earlier call would still be
+                // sitting there when a later call trapped for its own,
+                // entirely different reason.
+                runtime::clear_fault(&mut self.f.body);
+            }
             for stmt in &self.program.func(self.id).body {
                 self.stmt(stmt)?;
             }

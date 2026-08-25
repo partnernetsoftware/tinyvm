@@ -63,6 +63,7 @@ tinyvm (35)                                      [~]
 │   │   ├── host calls with declared raw signatures       [x]
 │   │   ├── nesting bounded by a diagnostic, not an abort [x]
 │   │   ├── every rejection names the engine boundary     [x]
+│   │   ├── an exhausted heap is legible, not a bare trap [x]
 │   │   └── full JS engine / AOT                          [–]
 │   ├── host                                              [x]
 │   ├── <100KiB>                                          [x]
@@ -342,6 +343,17 @@ as “almost approved” or “safe to ship externally.”
   nobody's host function; the vocabulary belongs to the embedder. A wrong
   argument type is a compile diagnostic where the compiler can settle it and a
   trap where only the run can — never a silent coercion.
+- 客户机自己的资源耗尽必须和语义错误分得开。`memory.grow` 被拒返回 `-1` 而不是陷阱
+  （标准 Wasm；`crates/tinyvm/src/wasm.rs` 的 `Op::MemoryGrow`），拒绝本身不带理由，
+  编译出的 bump 分配器只能落进一个普通 `unreachable` —— 和这一里程碑缺失的某个转换执行
+  的是同一条指令，宿主拿到的是同一个 `WasmError`、同一句 `unreachable executed`、同一个
+  `FaultClass::Guest`。靠"内存到顶了，那就算预算问题"去猜，会把一个真的坏脚本判成预算
+  不足，正是分类要避免的那种静默误判。所以客户机在倒下之前把原因写进自己线性内存的第
+  一个字（`__alloc` 唯一会写那里的地方，bump 指针永远不会发到那个地址），宿主陷阱之后用
+  `tinyvm_qjs::guest_fault(&instance.memory()?)` 读出来：`Some(GuestFault::HeapExhausted)`
+  是预算，`None` 是脚本自己的问题。不新增 import、不新增 export、不需要宿主在场，
+  代价是每个产物 14 字节。
+
 - Syntax nesting is bounded by a number the compiler keeps, not by the native
   stack. Recursive descent overflows into a process abort, which for a host
   compiling untrusted `.qjs` is the worst failure mode there is — no caller is

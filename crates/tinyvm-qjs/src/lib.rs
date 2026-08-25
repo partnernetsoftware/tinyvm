@@ -161,6 +161,73 @@ impl From<repr::HostVal> for Value {
     }
 }
 
+/// What the guest wrote down about its own failure, before it trapped.
+///
+/// A compiled `.qjs` guest fails through `unreachable`, and every
+/// `unreachable` reaches the host as the same [`tinyvm::WasmError`] with the
+/// same [`tinyvm::FaultClass::Guest`] class. That is correct as far as the VM
+/// is concerned -- the guest executed an `unreachable` -- and useless to a host
+/// that has to decide whether to raise a budget or tell an author their script
+/// is broken.
+///
+/// One of those failures is not the script's fault. A refused `memory.grow`
+/// returns `-1` rather than trapping (standard wasm; see
+/// `crates/tinyvm/src/wasm.rs`, `Op::MemoryGrow`), so the refusal carries no
+/// reason and the allocator has nowhere to put one. It therefore writes the
+/// reason into its own linear memory before failing, and this is the name of
+/// what it wrote.
+///
+/// Not exhaustive: a later milestone may record more reasons at the same word,
+/// and a host that matches on this must keep a fallback arm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GuestFault {
+    /// The guest's bump heap could not grow. `memory.grow` was refused --
+    /// either by [`tinyvm::Limits::max_memory_pages`] or by the module's own
+    /// declared maximum or the allocator -- so the script asked for more
+    /// memory than this embedding allows, which is a budget fact and not a
+    /// defect. Raising the ceiling may let the same script through.
+    HeapExhausted,
+}
+
+/// Read the guest's own account of why it trapped, out of its linear memory.
+///
+/// Call it after an invocation returned `Err`, with the instance's memory
+/// zero:
+///
+/// ```
+/// # use tinyvm::{Limits, WasmModule};
+/// # use tinyvm_qjs::{GuestFault, Value, compile_qjs_m1};
+/// # let wasm = compile_qjs_m1("return 1;").expect("compiles");
+/// # let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
+/// # let mut instance = module.instantiate().expect("instantiates");
+/// if let Err(fault) = instance.invoke_by_name("main", &Value::args(&[])) {
+///     let memory = instance.memory().expect("memory zero");
+///     match tinyvm_qjs::guest_fault(&memory) {
+///         Some(GuestFault::HeapExhausted) => { /* raise the budget */ }
+///         _ => { /* the script itself is at fault: report `fault` */ }
+///     }
+/// }
+/// ```
+///
+/// `None` means the guest recorded nothing, which is the honest answer for
+/// three different situations and the host should treat them alike: the trap
+/// was an ordinary guest fault, or the module is too small to have a fault word
+/// (an M0 module from [`compile_qjs`] has no linear memory at all), or the call
+/// never started. In none of them did the heap run out.
+///
+/// The entry point clears the word on the way in, so the answer is about the
+/// most recent call and not an older one.
+pub fn guest_fault(memory: &[u8]) -> Option<GuestFault> {
+    let at = runtime::FAULT_WORD as usize;
+    let word = memory.get(at..at + 4)?;
+    let code = i32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+    match code {
+        runtime::FAULT_HEAP_EXHAUSTED => Some(GuestFault::HeapExhausted),
+        _ => None,
+    }
+}
+
 /// Compile `.qjs` source to standard wasm bytes. Compile-only: never executes.
 ///
 /// The bytes are an ordinary module. They go through tinyvm's load gate on the
