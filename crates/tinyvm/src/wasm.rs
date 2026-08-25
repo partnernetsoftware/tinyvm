@@ -367,7 +367,7 @@ impl Store {
         state
             .references
             .try_reserve(1)
-            .map_err(|_| WasmError::Trap("function references"))?;
+            .map_err(|_| WasmError::Trap("function reference allocation"))?;
         let token = NEXT_FUNCTION_REFERENCE
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 next.checked_add(1)
@@ -407,7 +407,7 @@ impl Store {
         state
             .instances
             .try_reserve(1)
-            .map_err(|_| WasmError::Trap("instance address space"))?;
+            .map_err(|_| WasmError::Trap("instance table allocation"))?;
         state.instances.push(None);
         Ok(id)
     }
@@ -495,7 +495,7 @@ impl Store {
         let mut initial_args = Vec::new();
         initial_args
             .try_reserve_exact(args.len())
-            .map_err(|_| WasmError::Trap("call arguments"))?;
+            .map_err(|_| WasmError::Trap("call argument allocation"))?;
         initial_args.extend_from_slice(args);
         let mut entry = StoreEntry::Call {
             address: address.clone(),
@@ -1187,7 +1187,8 @@ impl Global {
 /// | `activation slot limit` | `Limits::max_activation_slots` reached |
 /// | `activation slot overflow` | slot accounting overflowed (internal invariant) |
 /// | `call stack allocation` | the allocator refused to grow the activation vectors |
-/// | `operand stack` | `WASM_STACK_LIMIT` reached, or the operand stack could not grow |
+/// | `operand stack` | `WASM_STACK_LIMIT` reached |
+/// | `operand stack allocation` | the allocator refused to grow the operand stack |
 /// | `control stack` | the control-frame vector could not grow |
 /// | `step budget` | `Limits::max_steps` reached |
 /// | `memory page limit` | declared or grown pages exceed `Limits::max_memory_pages` |
@@ -1197,6 +1198,13 @@ impl Global {
 /// | `table element limit` | declared or grown elements exceed `Limits::max_table_elems` |
 /// | `table allocation` | the allocator refused a table buffer |
 /// | `table size overflow` | a table element total overflowed |
+///
+/// This table is the ceilings and the faults sitting next to them, not every
+/// allocator refusal in the crate: those are too many to keep in prose and
+/// were, for exactly that reason, wrong. Every one of them ends its message in
+/// `allocation` so [`WasmError::class`] answers [`FaultClass::Allocation`], and
+/// the list of them lives in the test that walks the `try_reserve` calls rather
+/// than here.
 ///
 /// Downstream must not reproduce this table. [`WasmError::class`] and
 /// [`WasmError::ceiling`] answer "which kind of fault" and "which budget" from
@@ -1342,6 +1350,15 @@ impl WasmError {
     /// remaining bounded-execution conditions are named one by one. Anything
     /// else is an ordinary guest fault, or a load rejection when it came from
     /// decoding.
+    ///
+    /// The rule is enforced from the allocator's side: the suite walks every
+    /// `try_reserve` in the crate to whatever its failure arm constructs, so a
+    /// refusal that forgets to say `allocation` is caught by the call it made,
+    /// not by the words it chose. Reading the naming convention off the
+    /// messages alone cannot catch that -- it only re-checks the sites already
+    /// keeping the rule -- and `invoke arguments`, `invoke results` and five
+    /// more families were classified as the guest's fault for exactly that
+    /// reason.
     pub fn class(&self) -> FaultClass {
         let message = self.message();
         if self.ceiling().is_some() {
@@ -4063,7 +4080,7 @@ fn adapt_i32_host(callback: Rc<HostImpl>) -> Rc<TypedHostImpl> {
         let mut i32_args = Vec::new();
         i32_args
             .try_reserve_exact(args.len())
-            .map_err(|_| WasmError::Trap("host arguments"))?;
+            .map_err(|_| WasmError::Trap("host argument allocation"))?;
         for value in args {
             if let Val::I32(number) = value {
                 i32_args.push(*number);
@@ -4074,7 +4091,7 @@ fn adapt_i32_host(callback: Rc<HostImpl>) -> Rc<TypedHostImpl> {
         let mut values = Vec::new();
         values
             .try_reserve_exact(n_results)
-            .map_err(|_| WasmError::Trap("host results"))?;
+            .map_err(|_| WasmError::Trap("host result allocation"))?;
         let results = callback(&i32_args, memory)?;
         if results.len() != n_results {
             return Err(WasmError::Trap("host function"));
@@ -4650,7 +4667,7 @@ impl CallValues {
                 let mut owned = Vec::new();
                 owned
                     .try_reserve_exact(len)
-                    .map_err(|_| WasmError::Trap("host results"))?;
+                    .map_err(|_| WasmError::Trap("host result allocation"))?;
                 owned.extend(values[..len].iter().copied().map(Val::I32));
                 Ok(owned)
             }
@@ -4659,7 +4676,7 @@ impl CallValues {
                 let mut owned = Vec::new();
                 owned
                     .try_reserve_exact(len)
-                    .map_err(|_| WasmError::Trap("host results"))?;
+                    .map_err(|_| WasmError::Trap("host result allocation"))?;
                 owned.extend_from_slice(&values[..len]);
                 Ok(owned)
             }
@@ -5845,7 +5862,7 @@ impl Module {
             let mut results = Vec::new();
             results
                 .try_reserve_exact(n_results)
-                .map_err(|_| WasmError::Trap("host results"))?;
+                .map_err(|_| WasmError::Trap("host result allocation"))?;
             results.resize(n_results, 0);
             f(args, &mut results, memory)?;
             Ok(results)
@@ -6057,7 +6074,7 @@ impl Module {
         let mut globals = Vec::new();
         globals
             .try_reserve_exact(self.globals.len())
-            .map_err(|_| WasmError::Trap("global state"))?;
+            .map_err(|_| WasmError::Trap("global state allocation"))?;
         for global in &self.globals {
             let slot = match &global.init {
                 GlobalInit::Value(value) => {
@@ -6087,7 +6104,7 @@ impl Module {
         let mut state = Vec::new();
         state
             .try_reserve(self.data.len())
-            .map_err(|_| WasmError::Trap("data segment state"))?;
+            .map_err(|_| WasmError::Trap("data segment allocation"))?;
         state.extend(
             self.data
                 .iter()
@@ -6243,7 +6260,7 @@ impl Module {
         let mut elem_live = Vec::new();
         elem_live
             .try_reserve(self.elems.len())
-            .map_err(|_| WasmError::Trap("element segment state"))?;
+            .map_err(|_| WasmError::Trap("element segment allocation"))?;
         elem_live.extend(
             self.elems
                 .iter()
@@ -6285,12 +6302,12 @@ impl Module {
         let mut params_types = Vec::new();
         params_types
             .try_reserve_exact(params)
-            .map_err(|_| WasmError::Trap("function types"))?;
+            .map_err(|_| WasmError::Trap("function type allocation"))?;
         params_types.resize(params, 0x7f);
         let mut result_types = Vec::new();
         result_types
             .try_reserve_exact(results)
-            .map_err(|_| WasmError::Trap("function types"))?;
+            .map_err(|_| WasmError::Trap("function type allocation"))?;
         result_types.resize(results, 0x7f);
         Ok(FuncType {
             params: params_types,
@@ -6382,7 +6399,7 @@ impl Module {
         if extra > 0 {
             locals
                 .try_reserve_exact(extra)
-                .map_err(|_| WasmError::Trap("function locals"))?;
+                .map_err(|_| WasmError::Trap("locals allocation"))?;
         }
         // Declared locals default to the zero value of their declared type.
         locals.extend_from_slice(&func.locals);
@@ -6457,7 +6474,7 @@ impl Module {
                     let mut values = Vec::new();
                     values
                         .try_reserve_exact(host.n_results)
-                        .map_err(|_| WasmError::Trap("host results"))?;
+                        .map_err(|_| WasmError::Trap("host result allocation"))?;
                     Some(values)
                 } else {
                     None
@@ -6492,7 +6509,7 @@ impl Module {
                     let mut values = Vec::new();
                     values
                         .try_reserve_exact(host.n_results)
-                        .map_err(|_| WasmError::Trap("host results"))?;
+                        .map_err(|_| WasmError::Trap("host result allocation"))?;
                     Some(values)
                 } else {
                     None
@@ -6555,7 +6572,7 @@ impl Module {
             let mut values = Vec::new();
             values
                 .try_reserve_exact(host.n_results)
-                .map_err(|_| WasmError::Trap("host results"))?;
+                .map_err(|_| WasmError::Trap("host result allocation"))?;
             Some(values)
         } else {
             None
@@ -6628,7 +6645,7 @@ impl Module {
                 CallEntry::Call(call) => {
                     let mut args = Vec::new();
                     args.try_reserve_exact(call.args.len())
-                        .map_err(|_| WasmError::Trap("call arguments"))?;
+                        .map_err(|_| WasmError::Trap("call argument allocation"))?;
                     args.extend_from_slice(call.args);
                     (call.index, args, Vec::new(), 0, None)
                 }
@@ -6700,7 +6717,7 @@ impl Module {
                     caller
                         .stack
                         .try_reserve(result_count)
-                        .map_err(|_| WasmError::Trap("operand stack"))?;
+                        .map_err(|_| WasmError::Trap("operand stack allocation"))?;
                 }
                 if let HostBinding::Wasm { function, .. } = &self.hosts[index].binding {
                     let function_type = self.hosts[index]
@@ -6797,7 +6814,7 @@ impl Module {
                         caller
                             .stack
                             .try_reserve(values.len())
-                            .map_err(|_| WasmError::Trap("operand stack"))?;
+                            .map_err(|_| WasmError::Trap("operand stack allocation"))?;
                         values.append_to(&mut caller.stack);
                         activation = Some(caller);
                     } else {
@@ -8247,7 +8264,7 @@ impl Module {
                     if stack.len() < n {
                         return Err(WasmError::Trap("call"));
                     }
-                    let args = take_values(&mut stack, n, "call arguments")?;
+                    let args = take_values(&mut stack, n, "call argument allocation")?;
                     return Ok(DefinedOutcome::Call {
                         index: combined,
                         args,
@@ -8278,7 +8295,7 @@ impl Module {
                     if stack.len() < n {
                         return Err(WasmError::Trap("call_indirect: stack has"));
                     }
-                    let args = take_values(&mut stack, n, "call arguments")?;
+                    let args = take_values(&mut stack, n, "call argument allocation")?;
                     if address.instance_id != bulk.instance_id {
                         return Ok(DefinedOutcome::ForeignCall {
                             address,
@@ -8310,7 +8327,7 @@ impl Module {
                     if stack.len() < n {
                         return Err(WasmError::Trap("return_call"));
                     }
-                    let args = take_values(&mut stack, n, "call arguments")?;
+                    let args = take_values(&mut stack, n, "call argument allocation")?;
                     return Ok(DefinedOutcome::TailCall {
                         index: combined,
                         args,
@@ -8334,7 +8351,7 @@ impl Module {
                     if stack.len() < n {
                         return Err(WasmError::Trap("return_call_indirect"));
                     }
-                    let args = take_values(&mut stack, n, "call arguments")?;
+                    let args = take_values(&mut stack, n, "call argument allocation")?;
                     if address.instance_id != bulk.instance_id {
                         return Ok(DefinedOutcome::ForeignTailCall { address, args });
                     }
@@ -9722,7 +9739,7 @@ fn i32_args_to_vals(args: &[i32]) -> Result<Vec<Val>, WasmError> {
     let mut values = Vec::new();
     values
         .try_reserve_exact(args.len())
-        .map_err(|_| WasmError::Trap("invoke arguments"))?;
+        .map_err(|_| WasmError::Trap("invoke argument allocation"))?;
     values.extend(args.iter().copied().map(Val::I32));
     Ok(values)
 }
@@ -9731,7 +9748,7 @@ fn vals_to_i32(values: Vec<Val>) -> Result<Vec<i32>, WasmError> {
     let mut integers = Vec::new();
     integers
         .try_reserve_exact(values.len())
-        .map_err(|_| WasmError::Trap("invoke results"))?;
+        .map_err(|_| WasmError::Trap("invoke result allocation"))?;
     for value in values {
         match value {
             Val::I32(number) => integers.push(number),
@@ -9757,10 +9774,13 @@ fn push_operand(
     if live_slots >= available_slots {
         return Err(WasmError::Trap("activation slot limit"));
     }
+    // Below: the allocator refusing to grow this stack is *not* the fixed
+    // bound above. Sharing `operand stack` between them told an embedder out
+    // of memory that it had hit a ceiling it never set and could not raise.
     if stack.len() == stack.capacity() {
         stack
             .try_reserve(1)
-            .map_err(|_| WasmError::Trap("operand stack"))?;
+            .map_err(|_| WasmError::Trap("operand stack allocation"))?;
     }
     stack.push(value);
     Ok(())
@@ -9786,6 +9806,11 @@ fn reserve_control_growth(
 /// Copy top values into a new call/result vector only after its complete
 /// bounded allocation succeeds. The source stack remains unchanged on
 /// allocator refusal.
+///
+/// `allocation_error` names the vector that could not be allocated; every
+/// literal threaded through it must classify as
+/// [`FaultClass::Allocation`], which the suite checks by following this
+/// parameter back to its call sites.
 #[inline(never)]
 fn take_values(
     stack: &mut Vec<Val>,
@@ -9809,7 +9834,7 @@ fn take_results(stack: &mut Vec<Val>, arity: usize) -> Result<Vec<Val>, WasmErro
     if stack.len() < arity {
         return Err(WasmError::Trap("result arity"));
     }
-    take_values(stack, arity, "function results")
+    take_values(stack, arity, "function result allocation")
 }
 
 fn finish_defined(stack: &mut Vec<Val>, arity: usize) -> Result<DefinedOutcome, WasmError> {
