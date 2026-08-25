@@ -1314,87 +1314,96 @@ fn the_end_of_a_statement_says_what_it_wanted_and_not_what_it_lacks() {
     assert!(message.contains("operand"), "{message:?}");
 }
 
-/// **DEFECT**, and the two features this milestone landed each added one.
+/// **CLOSED**, and the two features this milestone landed had each added one.
 ///
-/// At an operand position and at a statement position, a refusal still
-/// reaches for the offending token's capability phrase, so it disclaims a
-/// capability this engine demonstrably has. Each row below pairs the sentence
-/// with a program that proves the disclaimed capability works -- the lie is
-/// executed, not argued.
+/// At an operand position and at a statement position, a refusal used to reach
+/// for the offending token's capability phrase, so it disclaimed a capability
+/// this engine demonstrably has. Each row below pairs the sentence it gives
+/// now with a program that proves the capability it used to disclaim -- the
+/// old lie is refuted by execution, not by argument.
 ///
-/// The two new ones are the first two rows: before this milestone "this
-/// engine does not support conditional expressions yet" and "this engine does
-/// not support the `throw` keyword yet" were true sentences. Landing the
-/// features turned the *feature* on and left the *sentence* alone, so today
-/// the only place either sentence appears is a place where it is false.
+/// The two the milestone added are the first two rows: before it, "this engine
+/// does not support conditional expressions yet" and "this engine does not
+/// support the `throw` keyword yet" were true sentences. Landing the features
+/// turned the *feature* on and left the *sentence* alone, so the only place
+/// either sentence appeared was a place where it was false.
 ///
-/// What each should say instead is what the position wanted: an operand, or
-/// the end of the statement.
+/// `Parser::cannot_use` now says what the position wanted. See
+/// `parse::unlowered_by_m1` for the short list of tokens whose phrase it still
+/// trusts, and `conformance_m2.rs`'s
+/// `a_misplaced_token_says_what_was_wanted_and_never_disclaims_what_the_engine_has`
+/// for the same fix at the ten positions that corpus had recorded.
 #[test]
-fn every_capability_a_diagnostic_disclaims_here_is_one_this_engine_has() {
-    // (a source refused, the phrase the refusal reaches for, a program that
-    //  proves the disclaimed capability is present, what that program answers)
+fn no_diagnostic_here_disclaims_a_capability_this_engine_has() {
+    // (a source refused, the sentence it gives now, a program that proves the
+    //  capability it used to disclaim is present, what that program answers)
     let rows: [(&str, &str, &str, f64); 6] = [
         (
             "return ? 1 : 2;",
-            "does not support conditional expressions yet",
+            "this engine needs an operand here, and found a `?` instead",
             "return 1 ? 2 : 3;",
             2.0,
         ),
         (
             "return true ? throw 1 : 2;",
-            "does not support the `throw` keyword yet",
+            "this engine needs an operand here, and found the `throw` keyword instead",
             "try { throw 4; } catch (e) { return e; }",
             4.0,
         ),
         (
             "try { throw 1; } catch (e) { } catch (f) { }",
-            "does not support the `catch` keyword yet",
+            "this engine needs an operand here, and found the `catch` keyword instead",
             "try { throw 5; } catch (e) { return e; }",
             5.0,
         ),
         (
             "try { throw 1; } catch (e) { } finally { } finally { }",
-            "does not support the `finally` keyword yet",
+            "this engine needs an operand here, and found the `finally` keyword instead",
             "let n = 0; try { } finally { n = 6; } return n;",
             6.0,
         ),
         (
             "try { } catch (e) return 1;",
-            "does not support the `return` keyword yet",
+            "this engine needs a `{` to open the `catch` block, and found the `return` keyword instead",
             "return 7;",
             7.0,
         ),
         (
             "else { }",
-            "does not support the `else` keyword yet",
+            "this engine needs an operand here, and found the `else` keyword instead",
             "if (0) { return 1; } else { return 8; }",
             8.0,
         ),
     ];
-    for (refused, phrase, proof, answer) in rows {
+    for (refused, sentence, proof, answer) in rows {
         let message = refuse(refused);
         speaks_for_the_engine(&message);
+        assert_eq!(message, sentence, "{refused:?}");
         assert!(
-            message.contains(phrase),
-            "DEFECT row moved: {refused:?} now answers {message:?}"
+            !message.contains("does not support"),
+            "{refused:?} still disclaims something"
         );
         assert_eq!(
             num(proof),
             answer,
-            "{proof:?} proves {phrase:?} is a false claim"
+            "{proof:?} is what would have made the old sentence a false claim"
         );
     }
 }
 
-/// The softer half of the same defect: a phrase that is **true** but names a
+/// The narrower debt that is still open: a phrase that is **true** but names a
 /// capability that would not have helped, which sends the reader after a
 /// feature that is not the problem.
 ///
-/// `catch (e, f)` is a SyntaxError in JavaScript too -- a CatchParameter is
-/// one binding, and the comma operator has no place in a parameter list. A
-/// destructuring catch parameter is not a block statement either. Both
-/// refusals are right; both reasons are not.
+/// These are the tokens `parse::unlowered_by_m1` still trusts, standing where
+/// their phrase is true of the engine and false of the position. `catch (e, f)`
+/// is a SyntaxError in JavaScript too -- a CatchParameter is one binding, and
+/// the comma operator has no place in a parameter list. Both refusals are
+/// right; both reasons are not.
+///
+/// One row left this list when the rule narrowed: `catch ({ a })` claimed
+/// "block statements", and blocks are something the engine has, so that row
+/// was the *other* defect and is now an ordinary structural refusal.
 #[test]
 fn a_true_capability_phrase_can_still_be_the_wrong_answer() {
     for (source, phrase, why) in [
@@ -1402,11 +1411,6 @@ fn a_true_capability_phrase_can_still_be_the_wrong_answer() {
             "try { throw 1; } catch (e, f) { }",
             "does not support the comma operator yet",
             "a CatchParameter is one binding; the comma operator would not make this legal",
-        ),
-        (
-            "try { throw 1; } catch ({ a }) { }",
-            "does not support block statements yet",
-            "this is a destructuring pattern, and block statements compile",
         ),
         (
             "return true ? : 2;",
@@ -1419,7 +1423,14 @@ fn a_true_capability_phrase_can_still_be_the_wrong_answer() {
         assert!(message.contains(phrase), "DEFECT row moved: {message:?}");
         assert!(!why.is_empty());
     }
-    // The proof for the second row: a block statement compiles.
+    // The row that left: a destructuring catch parameter is refused for what
+    // the position wanted, and block statements compile.
+    let message = refuse("try { throw 1; } catch ({ a }) { }");
+    speaks_for_the_engine(&message);
+    assert_eq!(
+        message,
+        "this engine needs a name for the `catch` parameter, and found a `{` instead"
+    );
     assert_eq!(num("{ let q = 1; } return 2;"), 2.0);
 }
 

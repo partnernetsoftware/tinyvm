@@ -1669,68 +1669,86 @@ fn two_diagnostics_currently_name_the_engine_twice() {
     }
 }
 
-/// DIVERGENCE (diagnostic honesty, not semantics): `TokenKind::capability` in
-/// `src/lex.rs` carries phrases for lexemes M1 *does* lower, so a token in the
-/// wrong place can claim the engine lacks a capability it demonstrably has --
-/// a misplaced `else` reports "does not support the `else` keyword yet", next
-/// to a suite full of working `else` arms. Every source below compiles and
-/// runs in its correct spelling.
+/// **CLOSED.** `TokenKind::capability` in `src/lex.rs` carries phrases for
+/// lexemes M1 *does* lower, and a token in the wrong place used to claim the
+/// engine lacked a capability it demonstrably has -- a misplaced `else`
+/// reported "does not support the `else` keyword yet", next to a suite full
+/// of working `else` arms.
 ///
-/// **One position has been fixed and is no longer in this list**: the end of
-/// a statement, where the phrase was wrong for nearly every token and where
-/// `o.m = function () {} function rec() {}` claimed the engine had no
-/// `function` keyword. See `the_end_of_a_statement_names_the_missing_semicolon`
-/// below and `Parser::semicolon`. The rows left are operand and header
-/// positions, where the fix is a different one: the table is not wrong, the
-/// caller is, and each caller has to say what it was looking for.
+/// The end of a statement was fixed first, then generalised:
+/// `Parser::cannot_use` now trusts the phrase only for the tokens M1 lowers
+/// **nowhere** (`parse::unlowered_by_m1`: `[`, `]`, `:`, `,`, and the lexer's
+/// own `Unsupported` bucket) and says what it was looking for otherwise. The
+/// table is shared with M0's expression compiler, which really does lack every
+/// capability in it, so the table stayed and the caller changed.
 ///
-/// Retire the rest the same way, at which point these become ordinary
-/// structural diagnostics ("needs an operand here, and found the `else`
-/// keyword instead"). Asserted as-is so the debt is visible rather than
-/// merely absent.
+/// Each row is a source that used to disclaim a capability, the sentence it
+/// gives now, and a program in that capability's correct spelling -- which is
+/// what says the disclaimer would have been false.
 #[test]
-fn a_misplaced_token_currently_claims_a_capability_the_engine_has() {
-    for (source, claimed, works) in [
+fn a_misplaced_token_says_what_was_wanted_and_never_disclaims_what_the_engine_has() {
+    for (source, message, works) in [
         (
             "else { }",
-            "the `else` keyword",
+            "this engine needs an operand here, and found the `else` keyword instead",
             "if (false) { } else { return 1; } return 0;",
         ),
-        ("return 1; }", "block statements", "{ return 1; }"),
+        (
+            "return 1; }",
+            "this engine needs an operand here, and found a `}` instead",
+            "{ return 1; }",
+        ),
         (
             "if true) { }",
-            "boolean literals",
+            "this engine needs a `(` after `if`, and found the `true` literal instead",
             "if (true) { return 1; } return 0;",
         ),
         (
             "let x = 1; x = = 2;",
-            "assignment",
+            "this engine needs an operand here, and found a `=` instead",
             "let x = 1; x = 2; return x;",
         ),
         (
             "let ++x = 1;",
-            "the increment and decrement operators",
+            "this engine needs a name after the `let` keyword, and found a `++` instead",
             "let x = 1; x++; return x;",
         ),
-        ("let && x = 1;", "logical operators", "return true && 1;"),
-        ("let ! x = 1;", "the logical `!` operator", "return !false;"),
-        ("let < x = 1;", "comparison operators", "return 1 < 2;"),
-        ("let return x = 1;", "the `return` keyword", "return 1;"),
+        (
+            "let && x = 1;",
+            "this engine needs a name after the `let` keyword, and found a `&&` instead",
+            "return true && 1;",
+        ),
+        (
+            "let ! x = 1;",
+            "this engine needs a name after the `let` keyword, and found a `!` instead",
+            "return !false;",
+        ),
+        (
+            "let < x = 1;",
+            "this engine needs a name after the `let` keyword, and found a `<` instead",
+            "return 1 < 2;",
+        ),
+        (
+            "let return x = 1;",
+            "this engine needs a name after the `let` keyword, and found the `return` keyword instead",
+            "return 1;",
+        ),
         (
             "let while x = 1;",
-            "the `while` keyword",
+            "this engine needs a name after the `let` keyword, and found the `while` keyword instead",
             "let i = 0; while (i < 1) { i++; } return i;",
         ),
     ] {
-        assert_eq!(
-            refuse(source).message,
-            format!("this engine does not support {claimed} yet"),
-            "{source:?}"
+        assert_eq!(refuse(source).message, message, "{source:?}");
+        // Nothing here may disclaim a capability, and the capability each row
+        // used to disclaim is one the engine has.
+        assert!(
+            !refuse(source).message.contains("does not support"),
+            "{source:?} still disclaims something"
         );
-        // The capability it disclaims is one it has.
         assert!(
             compile_qjs_m1(works).is_ok(),
-            "{works:?} must compile, or the claim above is not a divergence"
+            "{works:?} must compile, or the row above proves nothing"
         );
     }
 }

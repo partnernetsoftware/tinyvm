@@ -464,10 +464,33 @@ pub(crate) mod m1 {
 
         /// The diagnostic for a token the parser has no use for here.
         ///
-        /// A token that names its own capability boundary gets to: that table
-        /// lives in the lexer so the wording does not drift as lexemes
-        /// graduate. Everything else is a structural refusal, phrased as what
-        /// the engine was looking for.
+        /// A token whose capability this pipeline genuinely lacks names it;
+        /// that table lives in the lexer so the wording does not drift as
+        /// lexemes graduate. Everything else is a structural refusal, phrased
+        /// as what the engine was looking for.
+        ///
+        /// # Why the phrase is not simply taken whenever the lexer has one
+        ///
+        /// [`TokenKind::capability`] serves two pipelines. M0's expression
+        /// compiler really lacks every capability in that table, so for it the
+        /// phrase is always true. M1 has almost all of them, and reaching for
+        /// the phrase here disclaimed capabilities this engine demonstrably
+        /// has: `else { }` was refused with "this engine does not support the
+        /// `else` keyword yet" while `if (0) { } else { }` compiled and ran,
+        /// and the milestone that landed `?:` and `throw` added two more of
+        /// exactly that shape. Disclaiming a capability the engine has is the
+        /// same lie as blaming the author with the sign flipped, and it is
+        /// worse to act on: it sends the reader hunting for a workaround to a
+        /// feature that shipped.
+        ///
+        /// So this position trusts the phrase for exactly the tokens M1 cannot
+        /// lower **anywhere**, which is [`unlowered_by_m1`], and says what it
+        /// wanted for the rest. That is the same rule [`Parser::semicolon`]
+        /// already reached on its own; this generalises it rather than
+        /// repeating it. The remaining debt is narrower and is recorded in
+        /// `control_conformance.rs`: a phrase that is *true* can still be the
+        /// wrong answer for the position, as `catch (e, f)`'s "comma operator"
+        /// is.
         fn cannot_use(&self, what: &str) -> CompileError {
             let token = self.peek();
             match &token.kind {
@@ -475,7 +498,7 @@ pub(crate) mod m1 {
                 TokenKind::Eof => {
                     malformed(&format!("{what}; the source ends first"), token.offset)
                 }
-                other => match other.capability() {
+                other => match other.capability().filter(|_| unlowered_by_m1(other)) {
                     Some(u) => unsupported(u.boundary, &u.phrase, token.offset),
                     None => malformed(
                         &format!("{what}, and found {} instead", other.name()),
@@ -1921,6 +1944,33 @@ pub(crate) mod m1 {
                 )),
             }
         }
+    }
+
+    /// Whether M1 lowers nothing this token can spell.
+    ///
+    /// The complement of the list is long and the list itself is short, which
+    /// is the point: M1 reads every keyword, every operator rung, blocks,
+    /// object literals, property access and the conditional, so a refusal that
+    /// names one of those as missing is false. What is left is genuinely ahead
+    /// of the engine wherever it appears.
+    ///
+    /// [`TokenKind::Unsupported`] is not here because it never reaches this
+    /// function's second arm -- it carries its own phrase and is answered
+    /// first.
+    fn unlowered_by_m1(kind: &TokenKind) -> bool {
+        matches!(
+            kind,
+            // Array literals, and `o[k]` is the only other thing a `[` spells.
+            TokenKind::LBracket
+                | TokenKind::RBracket
+                // A `:` that neither an object literal nor a `?:` consumed is
+                // a label.
+                | TokenKind::Colon
+                // The comma operator. A `,` in an argument list, a parameter
+                // list, a declarator list or an object literal is consumed
+                // where it belongs and never reaches here.
+                | TokenKind::Comma
+        )
     }
 
     /// Whether the embedder's declaration table names this function.
