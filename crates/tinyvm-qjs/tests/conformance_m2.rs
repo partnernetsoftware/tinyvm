@@ -1427,9 +1427,14 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     ("let x = 1; x **= 2; return x;", "assignment"),
     ("1, 2;", "the comma operator"),
     // -- things that need a third binding -----------------------------------
-    ("let o = {}; return 0;", "object literals"),
+    //
+    // Object literals and property access left this table when M3 landed
+    // them; `tests/objects_m3.rs` is where their behaviour is asserted now.
+    // `"ab".length` left it too, and did *not* become a diagnostic: the
+    // receiver of a property access is a run-time fact, so a String receiver
+    // is refused where its type is known, which is at run time. That trap is
+    // `objects_m3::a_property_of_a_non_object_traps`.
     ("let a = [1]; return 0;", "array literals"),
-    ("\"ab\".length", "property access"),
     ("let x = 1; x?.y;", "optional chaining"),
     (
         "function f(a) { return a; } return f(...1);",
@@ -1544,7 +1549,10 @@ fn the_boundary_is_classified_not_just_worded() {
         refuse("let a = [1]; return 0;").boundary,
         Boundary::ThirdBinding
     );
-    assert_eq!(refuse("\"ab\".length").boundary, Boundary::ThirdBinding);
+    assert_eq!(
+        refuse("const o = {}; return o.a.b.c(1);").boundary,
+        Boundary::FullJs
+    );
     assert_eq!(refuse("this;").boundary, Boundary::FullJs);
     assert_eq!(refuse("class C { }").boundary, Boundary::FullJs);
     assert_eq!(
@@ -1635,11 +1643,11 @@ fn two_diagnostics_currently_name_the_engine_twice() {
     for (source, message) in [
         (
             "1 = 2;",
-            "this engine needs a name on the left of an assignment; this engine has nothing else to assign to yet",
+            "this engine needs a name or a property on the left of an assignment; this engine has nothing else to assign to yet",
         ),
         (
             "1++;",
-            "this engine needs a name to increment or decrement; this engine has nothing else to write back to yet",
+            "this engine needs a name or a property to increment or decrement; this engine has nothing else to write back to yet",
         ),
     ] {
         assert_eq!(refuse(source).message, message, "{source:?}");

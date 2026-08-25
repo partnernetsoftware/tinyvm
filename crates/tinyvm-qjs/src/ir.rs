@@ -147,6 +147,13 @@ pub(crate) mod m1 {
         I32Load8U(u32, u32),
         I32Store(u32, u32),
         I32Store8(u32, u32),
+        /// The whole `i64` of a V1 pair's payload, in and out of an object
+        /// record's value slot. The alignment is an *exponent* the caller
+        /// chooses, and every emitter of these passes 2: the bump allocator
+        /// aligns to four bytes, so eight-byte alignment is not something the
+        /// module may claim. Below-natural is legal wasm and is a hint only.
+        I64Load(u32, u32),
+        I64Store(u32, u32),
         MemorySize,
         MemoryGrow,
         // constants
@@ -457,6 +464,10 @@ pub(crate) mod m1 {
             }
             Ins::I32Store8(align, offset) => {
                 encode::mem_aligned(out, MemOp::I32Store8, align, offset)
+            }
+            Ins::I64Load(align, offset) => encode::mem_aligned(out, MemOp::I64Load, align, offset),
+            Ins::I64Store(align, offset) => {
+                encode::mem_aligned(out, MemOp::I64Store, align, offset)
             }
             Ins::MemorySize => encode::memory_size(out, 0),
             Ins::MemoryGrow => encode::memory_grow(out, 0),

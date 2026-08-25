@@ -49,11 +49,15 @@
 //! 8/16-bit forms. That is the smallest heap strings can land on; the shape it
 //! grows into is a later milestone's decision, and nothing above this file
 //! reads the layout except [`super::repr`]'s string pointer.
+//!
+//! An object is on the same heap -- see [`OBJ_HEADER`] for the record and for
+//! why it is a flat key/value vector rather than a shape table.
 
 use super::repr::{
     self, BlockType, Ins, ValType, WIDTH, box_bool, box_number, box_string, const_bool,
-    const_string, is_bool, is_null, is_nullish, is_number, is_string, is_undefined, load_local,
-    same_type, store_local, unbox_bool, unbox_number, unbox_string,
+    const_string, const_undefined, is_bool, is_null, is_nullish, is_number, is_object, is_string,
+    is_undefined, load_local, same_type, store_local, unbox_bool, unbox_number, unbox_object,
+    unbox_string,
 };
 
 /// Byte 0..8 is left out of the data segment so a null pointer is never a
@@ -134,6 +138,13 @@ pub(crate) enum Rt {
     Alloc,
     StrConcat,
     StrEq,
+    // Objects. Appended, so every existing function keeps its index.
+    NumToStr,
+    ToKey,
+    ObjNew,
+    ObjFind,
+    ObjGet,
+    ObjSet,
 }
 
 /// Every runtime function, in the order they are defined in the module.
@@ -159,6 +170,12 @@ pub(crate) const SET: &[Rt] = &[
     Rt::Alloc,
     Rt::StrConcat,
     Rt::StrEq,
+    Rt::NumToStr,
+    Rt::ToKey,
+    Rt::ObjNew,
+    Rt::ObjFind,
+    Rt::ObjGet,
+    Rt::ObjSet,
 ];
 
 impl Rt {
@@ -188,6 +205,12 @@ impl Rt {
             Rt::Alloc => "__alloc",
             Rt::StrConcat => "__str_concat",
             Rt::StrEq => "__str_eq",
+            Rt::NumToStr => "__num_to_str",
+            Rt::ToKey => "__to_key",
+            Rt::ObjNew => "__obj_new",
+            Rt::ObjFind => "__obj_find",
+            Rt::ObjGet => "__obj_get",
+            Rt::ObjSet => "__obj_set",
         }
     }
 
@@ -240,6 +263,36 @@ impl TypeNames {
     }
 }
 
+/// The three fixed Strings `ToPropertyKey` answers with for a Boolean, `null`
+/// and `undefined` (ECMA-262 7.1.19 over 7.1.17), as guest addresses.
+///
+/// Interned only for a program that writes a *computed* member access: a
+/// static `o.a` never runs `ToPropertyKey` at all -- 13.3.2.1 takes the String
+/// value of the IdentifierName directly -- so a program with only dotted
+/// access should not carry these records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KeyNames {
+    pub(crate) yes: i32,
+    pub(crate) no: i32,
+    pub(crate) null: i32,
+    pub(crate) undefined: i32,
+}
+
+impl KeyNames {
+    /// Unused when this module is compiled without `emit`, which is what
+    /// `tests/repr_v1.rs` does -- only the lowering's scan knows whether a
+    /// program has a computed access.
+    #[allow(dead_code)]
+    pub(crate) fn intern(pool: &mut StringPool) -> Self {
+        Self {
+            yes: pool.intern("true"),
+            no: pool.intern("false"),
+            null: pool.intern("null"),
+            undefined: pool.intern("undefined"),
+        }
+    }
+}
+
 /// What the runtime needs to know about the module it is being spliced into.
 pub(crate) struct Ctx {
     /// Function index of `__add`. Imports occupy the first indices, so this is
@@ -256,6 +309,9 @@ pub(crate) struct Ctx {
     /// of guest memory and shift every other literal's address, in a module
     /// that may have no `typeof` in it at all.
     pub(crate) type_names: Option<TypeNames>,
+    /// Where `__to_key`'s three constant answers live, or `None` for a program
+    /// that never writes a computed member access. See [`KeyNames`].
+    pub(crate) key_names: Option<KeyNames>,
 }
 
 impl Ctx {
@@ -300,6 +356,24 @@ fn one(ctx: &Ctx, rt: Rt) -> RtFunc {
             vec![ValType::I32, ValType::I32],
             vec![ValType::I32],
             str_eq(),
+        ),
+        Rt::NumToStr => (vec![ValType::F64], vec![ValType::I32], num_to_str(ctx)),
+        Rt::ToKey => (values(1), vec![ValType::I32], to_key(ctx)),
+        Rt::ObjNew => (vec![ValType::I32], vec![ValType::I32], obj_new(ctx)),
+        Rt::ObjFind => (
+            vec![ValType::I32, ValType::I32, ValType::I32],
+            vec![ValType::I32],
+            obj_find(ctx),
+        ),
+        Rt::ObjGet => (
+            [values(1), vec![ValType::I32]].concat(),
+            values(1),
+            obj_get(ctx),
+        ),
+        Rt::ObjSet => (
+            [values(1), vec![ValType::I32], values(1)].concat(),
+            Vec::new(),
+            obj_set(ctx),
         ),
     };
     RtFunc {
@@ -506,7 +580,10 @@ fn type_of(ctx: &Ctx) -> FnBuild {
         (is_string, names.string),
         (is_bool, names.boolean),
         (is_undefined, names.undefined),
+        // 13.5.3 step 3 gives Null the name "object", and step 8 gives an
+        // ordinary Object the same one. Two arms, one string.
         (is_null, names.object),
+        (is_object, names.object),
     ] {
         test(0, &mut f.body);
         f.body.push(Ins::If(BlockType::Empty));
@@ -520,9 +597,11 @@ fn type_of(ctx: &Ctx) -> FnBuild {
 
 /// `+`: ECMA-262 13.15.3, ApplyStringOrNumericBinaryOperator.
 ///
-/// No operand can be an Object yet, so `ToPrimitive` is the identity and the
-/// spec reduces to: if either side is a String, concatenate the `ToString`s;
-/// otherwise add the `ToNumber`s.
+/// `ToPrimitive` is the identity on every primitive, so the spec reduces to:
+/// if either side is a String, concatenate the `ToString`s; otherwise add the
+/// `ToNumber`s. An Object operand is the one case where `ToPrimitive` is not
+/// the identity, and it reaches `__to_number`, whose Object arm is the
+/// `unreachable` that says so.
 ///
 /// Number is tested first. That is the documented dispatch order (see
 /// [`super::repr`]), and the experiment measured what the other order costs:
@@ -755,6 +834,15 @@ fn to_number(_ctx: &Ctx) -> FnBuild {
     f.body.push(Ins::Return);
     f.body.push(Ins::End);
 
+    // 7.1.4 step 9: ToNumber of an Object is ToNumber of its ToPrimitive, and
+    // 7.1.1 reaches `valueOf`/`toString` through a prototype this engine does
+    // not have. Written as its own arm rather than left to the fallthrough, so
+    // that the fallthrough keeps meaning "not built by this engine".
+    is_object(0, &mut f.body);
+    f.body.push(Ins::If(BlockType::Empty));
+    f.body.push(Ins::Unreachable);
+    f.body.push(Ins::End);
+
     // Every tag is accounted for above, so reaching here means the pair was
     // not built by this engine.
     f.body.push(Ins::Unreachable);
@@ -800,6 +888,14 @@ fn truthy(_ctx: &Ctx) -> FnBuild {
     is_nullish(0, &mut f.body);
     f.body.push(Ins::If(BlockType::Empty));
     f.body.push(Ins::I32Const(0));
+    f.body.push(Ins::Return);
+    f.body.push(Ins::End);
+
+    // 7.1.2 step 8: an Object is always true. Not "an object with properties"
+    // -- `{}` is truthy, which is the case an emptiness shortcut gets wrong.
+    is_object(0, &mut f.body);
+    f.body.push(Ins::If(BlockType::Empty));
+    f.body.push(Ins::I32Const(1));
     f.body.push(Ins::Return);
     f.body.push(Ins::End);
 
@@ -990,6 +1086,622 @@ fn str_eq() -> FnBuild {
     b.push(Ins::End);
     b.push(Ins::End);
     b.push(Ins::I32Const(1));
+    f
+}
+
+// ---- objects ------------------------------------------------------------
+
+/// The object record: `[len: i32][cap: i32][entries: i32]`, and an entry
+/// vector of `cap` entries of [`ENTRY_BYTES`] each.
+///
+/// # Why a flat key/value vector, and when it stops being right
+///
+/// A real engine gives an object a *shape* -- a hidden class shared by every
+/// object built the same way -- so that `o.a` becomes a load at a constant
+/// offset once the shape is known, and so that a hundred objects of the same
+/// shape store their keys once between them. That is the right design and it
+/// is not the right design *here*, for two measured reasons about the scripts
+/// this milestone exists to compile.
+///
+/// The binding library this targets (`agenterm/scripts/qjs/lib/fleet.js`)
+/// builds exactly two kinds of object: **namespace tables**, of which there
+/// are twelve, each built once and never again, the largest holding ten
+/// properties; and **parameter objects** of one to three fields, built fresh
+/// at every call and thrown away. Neither benefits from a shape table:
+///
+/// * The namespace tables are each of a *different* shape, and each exists in
+///   one copy. A shape table would hold twelve entries used once apiece -- the
+///   sharing that pays for a hidden class never happens.
+/// * The parameter objects are built by literal, so their offsets are already
+///   known to the compiler at the only site that writes them, and read once by
+///   `JSON.stringify` -- a walk that visits every property anyway, which is
+///   the access pattern a linear vector is already optimal for.
+///
+/// The lookup cost that buys is a linear scan of at most ten `__str_eq` calls,
+/// and in the overwhelming case a scan of one to three. The cost a shape table
+/// would add is a transition table, a shape identity, and a second allocation
+/// per object -- machinery whose whole payoff is a case this workload does not
+/// contain.
+///
+/// **Where the choice stops being right**, stated so the next milestone does
+/// not have to rediscover it:
+///
+/// 1. **Many objects of one shape.** The moment a script builds objects in a
+///    loop -- rows out of a `ui.snapshot`, one object per tab -- the keys are
+///    stored once per object and the duplication is the whole heap. That is
+///    the shape table's case, and it arrives with arrays and `JSON.parse`, not
+///    with this milestone.
+/// 2. **Objects past roughly sixteen properties.** A linear scan of ten
+///    `__str_eq` calls is cheap because each is a length compare that usually
+///    fails on the first byte; at sixty keys it is not, and a hash of the key
+///    string belongs in the record.
+/// 3. **A key looked up in a loop.** `while (...) { o[k] = o[k] + 1; }` pays
+///    the scan twice per turn. An inline cache -- remember the entry index
+///    this site found last time -- is the cure, and it needs a stable entry
+///    index, which this layout already has because entries never move within a
+///    record. Growth reallocates the vector but keeps every index.
+///
+/// None of the three is a reason to build the shape table now, and all three
+/// are reasons this comment exists.
+const OBJ_HEADER: i32 = 12;
+const OBJ_LEN: u32 = 0;
+const OBJ_CAP: u32 = 4;
+const OBJ_ENTRIES: u32 = 8;
+
+/// The `[len: i32][utf8 bytes]` record's header, in bytes. A reader of a
+/// string wants the bytes, which start after it.
+pub(crate) const STRING_HEADER: i32 = 4;
+
+/// One property: `[key: i32][tag: i32][payload: i64]`.
+///
+/// The key is a pointer to an ordinary string record, so a key and a String
+/// value are the same kind of thing and `__str_eq` compares them. The value is
+/// the V1 pair stored whole -- tag beside payload -- which is what makes a
+/// read a load of two words and not a re-boxing.
+const ENTRY_BYTES: i32 = 16;
+const ENTRY_KEY: u32 = 0;
+const ENTRY_TAG: u32 = 4;
+const ENTRY_PAYLOAD: u32 = 8;
+
+/// The alignment *exponent* every access into a record declares: 2, meaning
+/// four bytes. `__alloc` aligns to four, so the eight-byte alignment an
+/// `i64.load` would naturally claim is not something this module may promise.
+/// Below-natural is legal wasm and is a hint only.
+const ALIGN_WORD: u32 = 2;
+
+/// The entry vector a record allocates the first time it has to grow, and the
+/// factor it grows by afterwards.
+///
+/// A literal is built at its own exact size instead (`__obj_new` takes the
+/// count), so this number is only ever reached by an object filled with
+/// assignments -- the namespace-table pattern, which reaches four properties
+/// in nine of `fleet.js`'s twelve tables and ten in the largest. Four then
+/// eight then sixteen reaches every one of them in at most two reallocations.
+const FIRST_CAP: i32 = 4;
+const GROWTH: i32 = 2;
+
+/// `__obj_new(cap) -> i32`: an empty record with room for `cap` properties.
+///
+/// The capacity is the caller's because the caller usually knows it exactly:
+/// an object literal has its properties counted at compile time and never
+/// reallocates. `__obj_new(0)` allocates no entry vector at all, which is what
+/// `{}` wants -- and `{}` is how every namespace table in `fleet.js` starts.
+fn obj_new(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(1);
+    let p = f.local(ValType::I32);
+    let b = &mut f.body;
+    b.push(Ins::I32Const(OBJ_HEADER));
+    b.push(ctx.call(Rt::Alloc));
+    b.push(Ins::LocalSet(p));
+    b.push(Ins::LocalGet(p));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::I32Store(ALIGN_WORD, OBJ_LEN));
+    b.push(Ins::LocalGet(p));
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Store(ALIGN_WORD, OBJ_CAP));
+    // Written before the test rather than in an `else`: `repr`'s `BlockType`
+    // has only `Empty` and its instruction set has no `else`, and a zero
+    // pointer is the honest value for "no entry vector" anyway.
+    b.push(Ins::LocalGet(p));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::I32Store(ALIGN_WORD, OBJ_ENTRIES));
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(p));
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Const(ENTRY_BYTES));
+    b.push(Ins::I32Mul);
+    b.push(ctx.call(Rt::Alloc));
+    b.push(Ins::I32Store(ALIGN_WORD, OBJ_ENTRIES));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(p));
+    f
+}
+
+/// `__obj_find(entries, len, key) -> i32`: the index of `key`, or `-1`.
+///
+/// Byte equality through `__str_eq`, not pointer equality: the string pool
+/// interns equal *literals*, but a key computed at run time -- `o["a" + "b"]`,
+/// or the digits `__num_to_str` just allocated -- is a fresh record. Comparing
+/// pointers would make `o[1]` and `o["1"]` two properties, which is the exact
+/// thing ECMA-262 7.1.19 says they are not.
+fn obj_find(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(3);
+    let i = f.local(ValType::I32);
+    let b = &mut f.body;
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(1));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    entry_at(b, 0, i);
+    b.push(Ins::I32Load(ALIGN_WORD, ENTRY_KEY));
+    b.push(Ins::LocalGet(2));
+    b.push(ctx.call(Rt::StrEq));
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::Return);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    b.push(Ins::I32Const(-1));
+    f
+}
+
+/// Push `entries + index * ENTRY_BYTES`, both read from locals.
+fn entry_at(b: &mut Vec<Ins>, entries: u32, index: u32) {
+    b.push(Ins::LocalGet(entries));
+    b.push(Ins::LocalGet(index));
+    b.push(Ins::I32Const(ENTRY_BYTES));
+    b.push(Ins::I32Mul);
+    b.push(Ins::I32Add);
+}
+
+/// `__obj_get(value, key) -> value`: ECMA-262 10.1.8.1 OrdinaryGet, over an
+/// object with no prototype.
+///
+/// # Two answers that are not the same shape of "no"
+///
+/// A **property that is not there** is `undefined`, not a fault. That is
+/// 10.1.8.1 step 2 with a null prototype, and it is the single most common
+/// thing a real script does -- `if (o.note)`. A trap here would make the
+/// engine unusable for the scripts it exists to run.
+///
+/// A **receiver that is not an Object** is a fault. `undefined.a` and `null.a`
+/// are TypeErrors in ECMA-262 and this is the closest thing to a throw the
+/// engine has. The other three primitives are the interesting case: 13.3.2.1
+/// wraps them with ToObject, and `"abc".length` is `3` only because
+/// `String.prototype` exists. It does not exist here, so answering `undefined`
+/// would be the *right answer reached by the wrong route* -- and silently
+/// wrong the moment the property is one a prototype really has. The receiver
+/// test is `unbox_object`, so all four cases are one trap.
+///
+/// # Dispatch order
+///
+/// The receiver is tested for Object **first**, which departs from `repr`'s
+/// documented Number-then-String order. It is the departure that order's own
+/// rule asks for: in every non-erroneous program the receiver of a property
+/// access *is* an Object, so testing anything before it would put a test in
+/// front of the only path that ever succeeds.
+fn obj_get(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(WIDTH + 1);
+    let key = WIDTH;
+    let o = f.local(ValType::I32);
+    let idx = f.local(ValType::I32);
+    let e = f.local(ValType::I32);
+
+    unbox_object(0, &mut f.body);
+    f.body.push(Ins::LocalSet(o));
+
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Load(ALIGN_WORD, OBJ_ENTRIES));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Load(ALIGN_WORD, OBJ_LEN));
+    b.push(Ins::LocalGet(key));
+    b.push(ctx.call(Rt::ObjFind));
+    b.push(Ins::LocalSet(idx));
+
+    b.push(Ins::LocalGet(idx));
+    b.push(Ins::I32Const(-1));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    const_undefined(b);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Load(ALIGN_WORD, OBJ_ENTRIES));
+    b.push(Ins::LocalSet(e));
+    entry_at(b, e, idx);
+    b.push(Ins::LocalSet(e));
+    // The pair as it was stored, tag then payload -- not re-boxed, because
+    // re-boxing would mean deciding a type the record already recorded.
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::I32Load(ALIGN_WORD, ENTRY_TAG));
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::I64Load(ALIGN_WORD, ENTRY_PAYLOAD));
+    f
+}
+
+/// `__obj_set(value, key, value)`: ECMA-262 10.1.9.2 OrdinarySet, over an
+/// object with no prototype and no accessors.
+///
+/// A property that is already there is **overwritten where it is**: 10.1.9.2
+/// changes the value of the existing descriptor and nothing else, which is
+/// what keeps `{ a: 1, b: 2 }` with `o.a = 9` in the order `a`, `b`. A
+/// property that is not there is **appended**, which is what makes property
+/// order creation order (10.1.11.1 OrdinaryOwnPropertyKeys).
+///
+/// The receiver is tested for Object first, for the reason [`obj_get`] gives.
+fn obj_set(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH + 1);
+    let key = WIDTH;
+    let tag = WIDTH + 1;
+    let payload = WIDTH + 2;
+    let o = f.local(ValType::I32);
+    let idx = f.local(ValType::I32);
+    let e = f.local(ValType::I32);
+    let cap = f.local(ValType::I32);
+    let src = f.local(ValType::I32);
+    let dst = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+
+    unbox_object(0, &mut f.body);
+    f.body.push(Ins::LocalSet(o));
+
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Load(ALIGN_WORD, OBJ_ENTRIES));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Load(ALIGN_WORD, OBJ_LEN));
+    b.push(Ins::LocalGet(key));
+    b.push(ctx.call(Rt::ObjFind));
+    b.push(Ins::LocalSet(idx));
+
+    // Already there: overwrite in place, position untouched.
+    b.push(Ins::LocalGet(idx));
+    b.push(Ins::I32Const(-1));
+    b.push(Ins::I32Ne);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Load(ALIGN_WORD, OBJ_ENTRIES));
+    b.push(Ins::LocalSet(e));
+    entry_at(b, e, idx);
+    b.push(Ins::LocalSet(e));
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::LocalGet(tag));
+    b.push(Ins::I32Store(ALIGN_WORD, ENTRY_TAG));
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::LocalGet(payload));
+    b.push(Ins::I64Store(ALIGN_WORD, ENTRY_PAYLOAD));
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    // Not there: append, growing the vector first if it is full.
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Load(ALIGN_WORD, OBJ_LEN));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Load(ALIGN_WORD, OBJ_CAP));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Load(ALIGN_WORD, OBJ_CAP));
+    b.push(Ins::I32Const(GROWTH));
+    b.push(Ins::I32Mul);
+    b.push(Ins::LocalSet(cap));
+    b.push(Ins::LocalGet(cap));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(FIRST_CAP));
+    b.push(Ins::LocalSet(cap));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(cap));
+    b.push(Ins::I32Const(ENTRY_BYTES));
+    b.push(Ins::I32Mul);
+    b.push(ctx.call(Rt::Alloc));
+    b.push(Ins::LocalSet(dst));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Load(ALIGN_WORD, OBJ_ENTRIES));
+    b.push(Ins::LocalSet(src));
+    // Word by word, not byte by byte: an entry is four aligned words and the
+    // old vector came from the same allocator, so there is no unaligned tail
+    // to worry about. The old vector is left behind -- the heap has no free.
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Load(ALIGN_WORD, OBJ_LEN));
+    b.push(Ins::I32Const(ENTRY_BYTES));
+    b.push(Ins::I32Mul);
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(dst));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(src));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::I32Store(ALIGN_WORD, 0));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::LocalGet(dst));
+    b.push(Ins::I32Store(ALIGN_WORD, OBJ_ENTRIES));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::LocalGet(cap));
+    b.push(Ins::I32Store(ALIGN_WORD, OBJ_CAP));
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Load(ALIGN_WORD, OBJ_ENTRIES));
+    b.push(Ins::LocalSet(e));
+    // The append index is `len`. Read into `i` -- which the copy loop has
+    // finished with -- because `entry_at` wants it in a local, and because the
+    // count has to be read again to store `len + 1`.
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Load(ALIGN_WORD, OBJ_LEN));
+    b.push(Ins::LocalSet(i));
+    entry_at(b, e, i);
+    b.push(Ins::LocalSet(e));
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::LocalGet(key));
+    b.push(Ins::I32Store(ALIGN_WORD, ENTRY_KEY));
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::LocalGet(tag));
+    b.push(Ins::I32Store(ALIGN_WORD, ENTRY_TAG));
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::LocalGet(payload));
+    b.push(Ins::I64Store(ALIGN_WORD, ENTRY_PAYLOAD));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Store(ALIGN_WORD, OBJ_LEN));
+    f
+}
+
+/// `__to_key(value) -> i32`: ECMA-262 7.1.19 ToPropertyKey, over the five
+/// primitive types, answering with a string record.
+///
+/// # Dispatch order
+///
+/// String **first**, which departs from `repr`'s documented Number-then-String
+/// order, and the reason is the same shape as the reason for that order: this
+/// site's dominant input is a String. Every computed access whose key is
+/// already a string -- `o[k]` where `k` came out of another object, and the
+/// literal `o["a"]` -- pays one test instead of two, and the Number path pays
+/// a whole decimal conversion afterwards, so one extra test in front of it is
+/// noise. Only this function and [`obj_get`] depart, and only here is it
+/// written down twice.
+///
+/// # Symbols
+///
+/// 7.1.19 step 1 passes a Symbol through unchanged, and there are no Symbols
+/// in this engine, so the algorithm reduces to ToString of the primitive.
+fn to_key(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(WIDTH);
+
+    is_string(0, &mut f.body);
+    f.body.push(Ins::If(BlockType::Empty));
+    unbox_string(0, &mut f.body);
+    f.body.push(Ins::Return);
+    f.body.push(Ins::End);
+
+    is_number(0, &mut f.body);
+    f.body.push(Ins::If(BlockType::Empty));
+    unbox_number(0, &mut f.body);
+    f.body.push(ctx.call(Rt::NumToStr));
+    f.body.push(Ins::Return);
+    f.body.push(Ins::End);
+
+    // The three constant answers. `None` means the program contains no
+    // computed member access, so nothing calls this function at all and the
+    // records those arms would need should not be in the data segment.
+    if let Some(names) = ctx.key_names {
+        is_bool(0, &mut f.body);
+        f.body.push(Ins::If(BlockType::Empty));
+        unbox_bool(0, &mut f.body);
+        f.body.push(Ins::If(BlockType::Empty));
+        f.body.push(Ins::I32Const(names.yes));
+        f.body.push(Ins::Return);
+        f.body.push(Ins::End);
+        f.body.push(Ins::I32Const(names.no));
+        f.body.push(Ins::Return);
+        f.body.push(Ins::End);
+
+        for (test, at) in [
+            (is_null as fn(u32, &mut Vec<Ins>), names.null),
+            (is_undefined, names.undefined),
+        ] {
+            test(0, &mut f.body);
+            f.body.push(Ins::If(BlockType::Empty));
+            f.body.push(Ins::I32Const(at));
+            f.body.push(Ins::Return);
+            f.body.push(Ins::End);
+        }
+    }
+
+    // An Object key would need 7.1.1 ToPrimitive, which needs a prototype.
+    // Reached also by a Boolean, `null` or `undefined` key in a program the
+    // scan said had no computed access -- which cannot happen, because such a
+    // program never calls this.
+    f.body.push(Ins::Unreachable);
+    f
+}
+
+/// `__num_to_str(x) -> i32`: ECMA-262 6.1.6.1.20 Number::toString, for the
+/// integers it is exact on, as a fresh string record.
+///
+/// # What this implements, and what it refuses
+///
+/// The general algorithm needs the shortest decimal that round-trips -- the
+/// Ryū/Grisu problem -- and this engine does not have it; that is the
+/// `ToString` gap this module's header already names for `"a" + 1`. What it
+/// *does* have is the case the property-key rule actually needs: an
+/// integer-valued Number, whose decimal expansion is exact and short.
+///
+/// The accepted domain is the integers with |x| ≤ `i32::MAX`. Not a rounding
+/// of the spec's domain but a subset of it, refused loudly at the edge:
+/// a fractional value, a NaN, an infinity and anything larger each reach
+/// `unreachable` rather than a fabricated key. `-0` answers `"0"`, which is
+/// 6.1.6.1.20 step 2 and is why the sign is read off the `f64` and not off the
+/// truncated `i32`.
+///
+/// `i32::MIN` is outside the domain on purpose: `0 - i32::MIN` wraps rather
+/// than trapping in wasm, and a digit loop fed a negative accumulator would
+/// spin. Bounding by `i32::MAX` in `f64` before the truncation excludes it,
+/// and makes `i32.trunc_f64_s` unable to trap on its own -- every refusal here
+/// is this function's own `unreachable`.
+fn num_to_str(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(1);
+    let n = f.local(ValType::I32);
+    let neg = f.local(ValType::I32);
+    let len = f.local(ValType::I32);
+    let q = f.local(ValType::I32);
+    let p = f.local(ValType::I32);
+    let w = f.local(ValType::I32);
+    let b = &mut f.body;
+
+    // Not an integer -- which a NaN also fails, since `NaN != NaN`.
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::F64Trunc);
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::F64Ne);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::Unreachable);
+    b.push(Ins::End);
+    // Outside the exact domain -- which an infinity also fails.
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::F64Abs);
+    b.push(Ins::F64Const(f64::from(i32::MAX)));
+    b.push(Ins::F64Gt);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::Unreachable);
+    b.push(Ins::End);
+    // The sign comes off the double, so `-0` is not negative: 6.1.6.1.20
+    // step 2 gives `-0` the String "0".
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::F64Const(0.0));
+    b.push(Ins::F64Lt);
+    b.push(Ins::LocalSet(neg));
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32TruncF64S);
+    b.push(Ins::LocalSet(n));
+
+    // Zero has no digits to extract, so it is its own arm rather than a
+    // special case inside the loop.
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(STRING_HEADER + 1));
+    b.push(ctx.call(Rt::Alloc));
+    b.push(Ins::LocalSet(p));
+    b.push(Ins::LocalGet(p));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Store(ALIGN_WORD, 0));
+    b.push(Ins::LocalGet(p));
+    b.push(Ins::I32Const(i32::from(b'0')));
+    b.push(Ins::I32Store8(0, STRING_HEADER as u32));
+    b.push(Ins::LocalGet(p));
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(neg));
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Sub);
+    b.push(Ins::LocalSet(n));
+    b.push(Ins::End);
+
+    // How many digits, so the record can be allocated at its final size.
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(len));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::LocalSet(q));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(q));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(q));
+    b.push(Ins::I32Const(10));
+    b.push(Ins::I32DivS);
+    b.push(Ins::LocalSet(q));
+    b.push(Ins::LocalGet(len));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(len));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    // `w` is the total byte count, and then the cursor that walks back over it.
+    b.push(Ins::LocalGet(len));
+    b.push(Ins::LocalGet(neg));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(w));
+    b.push(Ins::I32Const(STRING_HEADER));
+    b.push(Ins::LocalGet(w));
+    b.push(Ins::I32Add);
+    b.push(ctx.call(Rt::Alloc));
+    b.push(Ins::LocalSet(p));
+    b.push(Ins::LocalGet(p));
+    b.push(Ins::LocalGet(w));
+    b.push(Ins::I32Store(ALIGN_WORD, 0));
+    b.push(Ins::LocalGet(neg));
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(p));
+    b.push(Ins::I32Const(i32::from(b'-')));
+    b.push(Ins::I32Store8(0, STRING_HEADER as u32));
+    b.push(Ins::End);
+
+    // Digits back to front, which is the order `% 10` produces them in.
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::LocalSet(q));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(q));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(w));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Sub);
+    b.push(Ins::LocalSet(w));
+    b.push(Ins::LocalGet(p));
+    b.push(Ins::LocalGet(w));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(q));
+    b.push(Ins::I32Const(10));
+    b.push(Ins::I32RemS);
+    b.push(Ins::I32Const(i32::from(b'0')));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Store8(0, STRING_HEADER as u32));
+    b.push(Ins::LocalGet(q));
+    b.push(Ins::I32Const(10));
+    b.push(Ins::I32DivS);
+    b.push(Ins::LocalSet(q));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(p));
     f
 }
 

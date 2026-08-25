@@ -35,7 +35,13 @@ pub enum Boundary {
     FullJs,
     /// A construct that would need a third world beyond the two bindings a
     /// [`crate::eval_qjs`] call has: the host import table and this call's
-    /// arguments. Property access, arrays, objects, host calls with arguments.
+    /// arguments. Arrays, the spread syntax, a mismatch against a declared
+    /// host table.
+    ///
+    /// Object literals and property access were on that list until they
+    /// landed; the boundary they now name is a narrower one, and the phrases
+    /// `[`crate::lex`]` keeps for a `.` or a `[` in a position the parser
+    /// cannot use are what is left of it.
     ThirdBinding,
     /// Inside the expression subset in shape, but not lowered yet -- or source
     /// the engine cannot read to the end.

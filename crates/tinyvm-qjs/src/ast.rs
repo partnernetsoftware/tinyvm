@@ -277,6 +277,41 @@ pub(crate) mod m1 {
         },
     }
 
+    /// One `key: value` of an ObjectLiteral.
+    ///
+    /// The key is a `String` and not an [`Expr`], because in ECMA-262 13.2.5 a
+    /// PropertyName is not an expression: `{ a: 1 }`, `{ "a": 1 }` and
+    /// `{ 1: x }` all name a String at parse time. The one form that *is* an
+    /// expression -- a ComputedPropertyName, `{ [k]: 1 }` -- is refused with a
+    /// capability diagnostic rather than being half-represented here.
+    #[derive(Debug, Clone, PartialEq)]
+    pub(crate) struct Property {
+        pub(crate) key: String,
+        pub(crate) value: Expr,
+        pub(crate) span: Span,
+    }
+
+    /// How a MemberExpression names its property.
+    ///
+    /// Two variants and not one `Expr`, because ECMA-262 gives them two
+    /// algorithms: 13.3.2.1 EvaluatePropertyAccessWithIdentifierKey takes the
+    /// *String value of the IdentifierName* -- there is no expression to
+    /// evaluate and no ToPropertyKey to run -- while 13.3.3.1
+    /// EvaluatePropertyAccessWithExpressionKey evaluates, GetValues and then
+    /// ToPropertyKeys.
+    ///
+    /// Collapsing them into one `Expr` and then recognising a string literal
+    /// in the lowering would be the same thing spelled as a static-type
+    /// exemption at a call site -- the shape `RESULTS.md` L2.5 records as the
+    /// disease. Spelled as two productions it is simply the grammar.
+    #[derive(Debug, Clone, PartialEq)]
+    pub(crate) enum MemberKey {
+        /// `o.a`, and the String it names.
+        Static(String),
+        /// `o[e]`.
+        Computed(Box<Expr>),
+    }
+
     /// One name of a declaration, with its initialiser if it has one.
     #[derive(Debug, Clone, PartialEq)]
     pub(crate) struct Declarator {
@@ -308,6 +343,16 @@ pub(crate) mod m1 {
         Name(Name),
         /// A function expression.
         Function(FuncId),
+        /// An ObjectLiteral, ECMA-262 13.2.5. The properties are in source
+        /// order, duplicates included: 13.2.5.5 evaluates each in turn and
+        /// each is a CreateDataPropertyOrThrow, so `{ a: 1, a: 2 }` is one
+        /// property written twice and not two properties.
+        Object(Vec<Property>),
+        /// A MemberExpression, ECMA-262 13.3.2 and 13.3.3.
+        Member {
+            object: Box<Expr>,
+            key: MemberKey,
+        },
         Call {
             callee: Box<Expr>,
             args: Vec<Expr>,

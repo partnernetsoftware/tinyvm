@@ -28,7 +28,8 @@ mod opts;
 mod parse;
 
 use ast::m1::{
-    BindingKind, Expr, ExprKind, LogicalOp, Program, Res, Stmt, StmtKind, UnaryOp, UpdateOp,
+    BindingKind, Expr, ExprKind, LogicalOp, MemberKey, Program, Res, Stmt, StmtKind, UnaryOp,
+    UpdateOp,
 };
 use diag::CompileError;
 
@@ -90,6 +91,20 @@ fn sexpr(e: &Expr) -> String {
         ExprKind::Arg(n) => format!("${n}"),
         ExprKind::Name(name) => name.text.clone(),
         ExprKind::Function(id) => format!("fn{}", id.0),
+        ExprKind::Object(properties) => {
+            let mut out = "(object".to_string();
+            for property in properties {
+                out.push_str(&format!(" {:?}:{}", property.key, sexpr(&property.value)));
+            }
+            out + ")"
+        }
+        // The two spellings print differently on purpose: they are two
+        // ECMA-262 productions (13.3.2 and 13.3.3), and a shape test that
+        // could not tell them apart could not state that.
+        ExprKind::Member { object, key } => match key {
+            MemberKey::Static(name) => format!("(. {} {name})", sexpr(object)),
+            MemberKey::Computed(key) => format!("(index {} {})", sexpr(object), sexpr(key)),
+        },
         ExprKind::Call { callee, args } => {
             let mut out = format!("(call {}", sexpr(callee));
             for arg in args {
@@ -668,14 +683,18 @@ fn every_refusal_speaks_for_the_engine() {
 #[test]
 fn what_the_front_end_cannot_read_yet_names_the_construct() {
     for (source, phrase) in [
-        ("$0.x;", "property access"),
+        // `$0.x` and `({})` left this table when M3 landed property access and
+        // object literals; the property forms still ahead of the engine took
+        // their place, and `tests/objects_m3.rs` asserts the rest.
+        ("({ [k]: 1 });", "computed property keys"),
+        ("({ f() { } });", "methods in object literals"),
+        ("$0.new;", "a property named with a reserved word"),
         ("[1];", "array"),
         ("1, 2;", "comma"),
         ("1 ? 2 : 3;", "conditional"),
         ("2 ** 3;", "exponentiation"),
         ("1 & 2;", "bitwise"),
         ("for (x of y) { 1; }", "of"),
-        ("({});", "object"),
     ] {
         let message = refuse(source);
         assert!(

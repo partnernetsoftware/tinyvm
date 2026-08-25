@@ -50,6 +50,21 @@ fn refuse(source: &str) -> CompileError {
     }
 }
 
+/// Run `source`, expect a String back, and read its bytes out of the instance
+/// the call ran in -- a `Value::String` is a pointer into that memory, not text.
+#[track_caller]
+fn text_of(source: &str) -> String {
+    let (out, instance) = run(source, &[]).unwrap_or_else(|e| panic!("{e}"));
+    let Value::String(ptr) = out else {
+        panic!("{source:?} answered {out:?}, want a String");
+    };
+    let view = instance.memory().expect("guest memory");
+    let bytes: &[u8] = &view;
+    let at = ptr as usize;
+    let len = u32::from_le_bytes(bytes[at..at + 4].try_into().expect("length header")) as usize;
+    String::from_utf8(bytes[at + 4..at + 4 + len].to_vec()).expect("utf-8")
+}
+
 /// The V1 boundary: one JavaScript value is two wasm values, in both
 /// directions, for every type the milestone has.
 #[test]
@@ -361,4 +376,52 @@ fn qjs_m1_reaches_a_declared_host_door_with_arguments() {
     let len = u32::from_le_bytes(bytes[at..at + 4].try_into().expect("length header")) as usize;
     assert_eq!(&bytes[at + 4..at + 4 + len], b"pong!");
     assert_eq!(*heard.borrow(), vec!["ping".to_string()]);
+}
+
+/// Objects: a literal, a dotted read, a computed read, an assignment that
+/// creates a property and one that overwrites it — through the shipped face,
+/// so the record is built on the guest's own heap and read back by the guest.
+///
+/// The shape is `fleet.js`'s, because that is what this milestone is for: a
+/// namespace table assembled by assignment, a nested one reached by a chain of
+/// dots, and a parameter object built from a function's arguments and read
+/// back field by field.
+#[test]
+fn qjs_m1_builds_objects_and_reads_their_properties() {
+    // A namespace table, assembled the way a binding library assembles one.
+    number(
+        "const fleet = {};
+         fleet.ui = {};
+         fleet.ui.tabs = {};
+         fleet.ui.tabs.width = 40;
+         fleet.ui.tabs.width = fleet.ui.tabs.width + 2;
+         return fleet.ui.tabs.width;",
+        42.0,
+    );
+    // A parameter object: built from arguments, read back by name, and by a
+    // computed key that is the same property.
+    number(
+        "function params(tab, note) { return { tab: tab, note: note }; }
+         const p = params(7, 8);
+         return p.tab * 10 + p[\"note\"];",
+        78.0,
+    );
+    // 10.1.8.1: a property that is not there reads as `undefined`, not a
+    // fault, and `typeof` says so.
+    assert_eq!(value("const o = { a: 1 }; return o.b;"), Value::Undefined);
+    assert_eq!(
+        text_of("const o = {}; return typeof o.missing;"),
+        "undefined"
+    );
+    assert_eq!(text_of("return typeof {};"), "object");
+    // 13.5.3: an Object's `typeof` is `"object"`, and 7.1.2 makes every one
+    // of them truthy, `{}` included.
+    number("const o = {}; if (o) { return 1; } return 0;", 1.0);
+    // 7.2.15 step 4: strict equality on two Objects is reference identity,
+    // which the V1 pair already answers without a new type test.
+    assert_eq!(
+        value("const a = {}; const b = a; return a === b;"),
+        Value::Bool(true)
+    );
+    assert_eq!(value("return {} === {};"), Value::Bool(false));
 }

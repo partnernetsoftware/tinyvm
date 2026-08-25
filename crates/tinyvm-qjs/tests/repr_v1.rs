@@ -79,6 +79,7 @@ impl Prog {
                 func_base: 0,
                 heap_global: 0,
                 type_names,
+                key_names: None,
             },
             main: FnBuild::new(0),
             results: vec![ValType::I32, ValType::I64],
@@ -278,6 +279,8 @@ fn ins_wat(ins: &Ins) -> String {
         Ins::I32Load8U(a, o) => format!("i32.load8_u{}", memarg(*a, *o)),
         Ins::I32Store(a, o) => format!("i32.store{}", memarg(*a, *o)),
         Ins::I32Store8(a, o) => format!("i32.store8{}", memarg(*a, *o)),
+        Ins::I64Load(a, o) => format!("i64.load{}", memarg(*a, *o)),
+        Ins::I64Store(a, o) => format!("i64.store{}", memarg(*a, *o)),
         Ins::MemorySize => "memory.size".into(),
         Ins::MemoryGrow => "memory.grow".into(),
         Ins::I32Const(v) => format!("i32.const {v}"),
@@ -453,6 +456,7 @@ fn add_tests_number_before_string() {
         func_base: 0,
         heap_global: 0,
         type_names: None,
+        key_names: None,
     };
     let funcs = runtime::build(&ctx);
     let add = funcs
@@ -491,6 +495,7 @@ fn a_new_type_costs_nothing_at_a_site_that_never_sees_it() {
         func_base: 0,
         heap_global: 0,
         type_names: None,
+        key_names: None,
     };
     let arms: Vec<&'static str> = runtime::build(&ctx)
         .iter()
@@ -697,6 +702,7 @@ fn typeof_costs_nothing_in_a_program_that_never_asks() {
         func_base: 0,
         heap_global: 0,
         type_names: None,
+        key_names: None,
     };
     let built = runtime::build(&ctx);
     let quiet_typeof = built

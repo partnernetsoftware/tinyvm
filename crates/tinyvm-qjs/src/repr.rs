@@ -27,6 +27,10 @@
 //! | 2   | Boolean   | 0 or 1                                     |
 //! | 3   | String    | guest pointer to `[len: i32][utf8 bytes]`  |
 //! | 4   | Null      | always 0                                   |
+//! | 5   | Object    | guest pointer to an object record          |
+//!
+//! `TAG_OBJECT` is 5 because it was the next free number when objects landed,
+//! and appending is the whole point: see *Dispatch order* below.
 //!
 //! `TAG_UNDEFINED` is 0 so that a zero-initialised pair -- a fresh wasm local,
 //! a zeroed word of linear memory -- reads as `undefined`, which is exactly
@@ -45,6 +49,13 @@
 //! 0/1, and Undefined/Null compare as 0/0. Any future producer of those two
 //! values must keep the payload at 0.
 //!
+//! Object arrived into that same arm and belongs there for a *different*
+//! reason, which is worth stating so nobody "fixes" it: two Objects are
+//! strictly equal exactly when they are the same object (ECMA-262 7.2.15 step
+//! 4, SameValueNonNumber), the payload is the object's address, and a bump
+//! allocator hands out one address per object. So the existing `i64.eq` is
+//! already reference identity, and no arm was added for it.
+//!
 //! # Dispatch order
 //!
 //! Every operator that inspects its operands' types pays one type test per arm
@@ -58,6 +69,15 @@
 //! is stated once, here, so that a new type is added by appending an arm and
 //! existing call sites keep paying what they paid. When a dispatch site departs
 //! from this order it says why at the site.
+//!
+//! Object was added under that rule and paid what the rule promises: every arm
+//! for it is **appended last**, after Boolean, Undefined and Null, so no
+//! existing type executes one more test than it did before objects existed. An
+//! Object itself pays the whole ladder at those sites -- and that is the right
+//! side of the trade, because the sites are `__typeof`, `__truthy` and
+//! `__to_number`, none of which an object-heavy script runs in a loop. The
+//! sites objects *do* run hot -- property get and set -- are functions of
+//! their own that test the receiver first, and say so there.
 
 use tinyvm::Val;
 
@@ -114,6 +134,8 @@ pub(crate) enum Ins {
     I32Load8U(u32, u32),
     I32Store(u32, u32),
     I32Store8(u32, u32),
+    I64Load(u32, u32),
+    I64Store(u32, u32),
     MemorySize,
     MemoryGrow,
     // constants
@@ -168,6 +190,10 @@ pub(crate) const TAG_NUMBER: i32 = 1;
 pub(crate) const TAG_BOOL: i32 = 2;
 pub(crate) const TAG_STRING: i32 = 3;
 pub(crate) const TAG_NULL: i32 = 4;
+/// An Object: the payload is a guest pointer to the record
+/// [`super::runtime`] lays out. Appended rather than slotted in, for the
+/// reason the module header's *Dispatch order* section gives.
+pub(crate) const TAG_OBJECT: i32 = 5;
 
 /// The wasm value types one JS value occupies, in stack order.
 pub(crate) const SLOTS: [ValType; 2] = [ValType::I32, ValType::I64];
@@ -180,6 +206,11 @@ pub(crate) const WIDTH: u32 = SLOTS.len() as u32;
 ///
 /// `String` is a guest pointer, not text: resolving it needs the instance's
 /// memory, which is the caller's to hold, not this module's.
+/// There is deliberately no `Object` variant. The public `crate::Value` this
+/// mirrors has none either, and adding one here without adding one there is a
+/// half-open door: a host would receive a pointer it has no layout for and no
+/// way to keep alive. [`host_decode`] therefore refuses the tag by name, which
+/// is a sentence a host can act on, rather than by an "unknown tag" it cannot.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum HostVal {
     Undefined,
@@ -213,6 +244,19 @@ pub(crate) fn box_bool(inner: &[Ins], out: &mut Vec<Ins>) {
 /// `inner` leaves exactly one `i32` guest pointer. Result: one JS String.
 pub(crate) fn box_string(inner: &[Ins], out: &mut Vec<Ins>) {
     out.push(Ins::I32Const(TAG_STRING));
+    out.extend_from_slice(inner);
+    out.push(Ins::I64ExtendI32U);
+}
+
+/// `inner` leaves exactly one `i32` guest pointer to an object record.
+/// Result: one JS Object.
+///
+/// Unused when this module is compiled without `emit`, which is what
+/// `tests/repr_v1.rs` does -- the only producer of an Object is an object
+/// literal, and that lives in the lowering.
+#[allow(dead_code)]
+pub(crate) fn box_object(inner: &[Ins], out: &mut Vec<Ins>) {
+    out.push(Ins::I32Const(TAG_OBJECT));
     out.extend_from_slice(inner);
     out.push(Ins::I64ExtendI32U);
 }
@@ -273,6 +317,15 @@ pub(crate) fn unbox_string(base: u32, out: &mut Vec<Ins>) {
     out.push(Ins::I32WrapI64);
 }
 
+/// -> `i32` guest pointer to an object record. Traps when the value is not an
+/// Object -- which is what makes `undefined.a` a fault and not a fabricated
+/// answer.
+pub(crate) fn unbox_object(base: u32, out: &mut Vec<Ins>) {
+    require_tag(base, TAG_OBJECT, out);
+    out.push(Ins::LocalGet(base + 1));
+    out.push(Ins::I32WrapI64);
+}
+
 pub(crate) fn is_number(base: u32, out: &mut Vec<Ins>) {
     tag_is(base, TAG_NUMBER, out);
 }
@@ -291,6 +344,10 @@ pub(crate) fn is_undefined(base: u32, out: &mut Vec<Ins>) {
 
 pub(crate) fn is_null(base: u32, out: &mut Vec<Ins>) {
     tag_is(base, TAG_NULL, out);
+}
+
+pub(crate) fn is_object(base: u32, out: &mut Vec<Ins>) {
+    tag_is(base, TAG_OBJECT, out);
 }
 
 /// `null` or `undefined` -- the one pair ECMA-262 7.2.14 lets `==` bridge.
@@ -369,6 +426,16 @@ pub(crate) fn host_decode(vals: &[Val]) -> Result<HostVal, String> {
         TAG_NUMBER => HostVal::Number(f64::from_bits(bits)),
         TAG_BOOL => HostVal::Bool(bits != 0),
         TAG_STRING => HostVal::String(bits as u32 as i32),
+        // Named rather than lumped into "unknown": the guest is fine and the
+        // value is real, but an Object is a reference into a heap the host has
+        // no layout for and no way to keep alive. A host that sees this
+        // sentence knows to ask the script for a property instead.
+        TAG_OBJECT => {
+            return Err(
+                "V1: an Object is a guest heap reference; `Value` has no variant for one yet"
+                    .to_string(),
+            );
+        }
         other => return Err(format!("V1: unknown tag {other}")),
     })
 }

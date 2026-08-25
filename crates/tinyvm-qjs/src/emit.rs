@@ -236,11 +236,11 @@ pub(crate) mod m1 {
     use crate::ir::m1 as ir;
     use crate::opts::{HostFn, HostParam, HostResult, Names, Options};
     use crate::repr::{
-        self, BlockType, Ins, ValType, WIDTH, box_bool, box_number, box_string, const_bool,
-        const_null, const_number, const_string, const_undefined, drop_value, load_local,
-        store_local, unbox_number, unbox_string,
+        self, BlockType, Ins, ValType, WIDTH, box_bool, box_number, box_object, box_string,
+        const_bool, const_null, const_number, const_string, const_undefined, drop_value,
+        load_local, store_local, unbox_number, unbox_string,
     };
-    use crate::runtime::{self, Ctx, FnBuild, Rt, StringPool};
+    use crate::runtime::{self, Ctx, FnBuild, Rt, STRING_HEADER, StringPool};
 
     /// The name every compiled script exports, as at M0.
     pub(crate) const ENTRY: &str = super::ENTRY;
@@ -275,10 +275,6 @@ pub(crate) mod m1 {
         }
         Ok(pages)
     }
-
-    /// The `[len: i32][utf8 bytes]` record's header, in bytes. A host reading
-    /// a string wants the bytes, which start after it.
-    const STRING_HEADER: i32 = 4;
 
     /// Global 0 is the bump-allocation pointer, which is what
     /// [`Ctx::heap_global`] names; the script's bindings take two globals each
@@ -352,6 +348,9 @@ pub(crate) mod m1 {
             func_base: table.imports(),
             heap_global: HEAP_GLOBAL,
             type_names: scan.type_of.then(|| runtime::TypeNames::intern(&mut pool)),
+            key_names: scan
+                .computed_key
+                .then(|| runtime::KeyNames::intern(&mut pool)),
         };
         let user_base = ctx.func_base + runtime::SET.len() as u32;
 
@@ -526,6 +525,8 @@ pub(crate) mod m1 {
                 Ins::I32Load8U(a, o) => ir::Ins::I32Load8U(a, o),
                 Ins::I32Store(a, o) => ir::Ins::I32Store(a, o),
                 Ins::I32Store8(a, o) => ir::Ins::I32Store8(a, o),
+                Ins::I64Load(a, o) => ir::Ins::I64Load(a, o),
+                Ins::I64Store(a, o) => ir::Ins::I64Store(a, o),
                 Ins::MemorySize => ir::Ins::MemorySize,
                 Ins::MemoryGrow => ir::Ins::MemoryGrow,
                 Ins::I32Const(v) => ir::Ins::I32Const(v),
@@ -742,6 +743,12 @@ pub(crate) mod m1 {
         /// 13.5.3 answers with are data-segment literals, so a program that
         /// never asks should not carry them -- see [`runtime::TypeNames`].
         type_of: bool,
+        /// Whether the program writes a *computed* member access, `o[e]`. A
+        /// dotted `o.a` does not count: ECMA-262 13.3.2.1 takes the String
+        /// value of the IdentifierName and never runs ToPropertyKey, so a
+        /// program with only dotted access needs none of the three constant
+        /// answers -- see [`runtime::KeyNames`].
+        computed_key: bool,
     }
 
     /// How one host name is used: the argument count every occurrence agrees
@@ -869,6 +876,19 @@ pub(crate) mod m1 {
                 }
                 args.iter().try_for_each(|a| host_expr(a, scan))
             }
+            ast::ExprKind::Object(properties) => properties
+                .iter()
+                .try_for_each(|property| host_expr(&property.value, scan)),
+            ast::ExprKind::Member { object, key } => {
+                host_expr(object, scan)?;
+                match key {
+                    ast::MemberKey::Static(_) => Ok(()),
+                    ast::MemberKey::Computed(key) => {
+                        scan.computed_key = true;
+                        host_expr(key, scan)
+                    }
+                }
+            }
             ast::ExprKind::Unary(op, operand) => {
                 scan.type_of |= *op == ast::UnaryOp::TypeOf;
                 host_expr(operand, scan)
@@ -894,6 +914,26 @@ pub(crate) mod m1 {
         Local(u32),
         /// Base index of a pair of globals.
         Global(u32),
+    }
+
+    /// What an assignment or an update writes to: ECMA-262's ~simple~
+    /// AssignmentTargetType, in the two forms 13.15.1 gives it here.
+    ///
+    /// A property target is not a *place*, which is why this exists beside
+    /// [`Place`] rather than as another variant of it: reading and writing one
+    /// are calls, and the receiver and the key have to be evaluated exactly
+    /// once and then held. They are held in scratch locals, taken by
+    /// [`Lower::target`] and given back by [`Lower::release`], which is what
+    /// makes `o.a += f()` evaluate `o` once and in the right order.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Target {
+        Binding(Place),
+        Member {
+            /// Base of the value local holding the receiver.
+            object: u32,
+            /// The raw `i32` local holding the key's string record.
+            key: u32,
+        },
     }
 
     struct Lower<'a> {
@@ -1284,6 +1324,18 @@ pub(crate) mod m1 {
                     Ok(())
                 }
                 ast::ExprKind::Name(name) => self.name(name, expr.span),
+                ast::ExprKind::Object(properties) => self.object_literal(properties),
+                // 13.3.2.1 and 13.3.3.1 both evaluate the object first and the
+                // key second, which is exactly the order the two words and the
+                // one word have to reach `__obj_get` in -- so a member read
+                // needs no scratch local at all.
+                ast::ExprKind::Member { object, key } => {
+                    self.expr(object)?;
+                    self.key(key)?;
+                    let call = self.ctx.call(Rt::ObjGet);
+                    self.push(call);
+                    Ok(())
+                }
                 ast::ExprKind::Function(_) => Err(unsupported(
                     Boundary::FullJs,
                     "using a function as a value",
@@ -1301,6 +1353,114 @@ pub(crate) mod m1 {
                 }
                 ast::ExprKind::Logical(op, lhs, rhs) => self.logical(*op, lhs, rhs),
                 ast::ExprKind::Assign { op, target, value } => self.assign(*op, target, value),
+            }
+        }
+
+        /// An ObjectLiteral, ECMA-262 13.2.5.5: a fresh object, then one
+        /// CreateDataPropertyOrThrow per PropertyDefinition, in source order.
+        ///
+        /// The properties go in through `__obj_set` rather than being written
+        /// straight into the record. That is a deliberate cost -- a scan of
+        /// what is already there, per property -- and it buys the one thing a
+        /// straight write would get wrong: `{ a: 1, a: 2 }` is *one* property
+        /// written twice, because 13.2.5.5 evaluates each definition in turn
+        /// against the same object. A literal that filled slots blindly would
+        /// produce two entries with the same key, and the second would be
+        /// unreachable by every later read.
+        ///
+        /// The record is sized to the property count, so a literal never
+        /// reallocates -- and a duplicate key leaves one slot unused, which is
+        /// the whole price of the rule above.
+        fn object_literal(&mut self, properties: &[ast::Property]) -> Result<(), CompileError> {
+            let slot = self.take();
+            let new = self.ctx.call(Rt::ObjNew);
+            let count = properties.len() as i32;
+            box_object(&[Ins::I32Const(count), new], &mut self.f.body);
+            store_local(slot, &mut self.f.body);
+            let set = self.ctx.call(Rt::ObjSet);
+            for property in properties {
+                let key = self.pool.intern(&property.key);
+                load_local(slot, &mut self.f.body);
+                self.push(Ins::I32Const(key));
+                self.expr(&property.value)?;
+                self.push(set);
+            }
+            load_local(slot, &mut self.f.body);
+            self.give(slot);
+            Ok(())
+        }
+
+        /// Leave one `i32` on the stack: the string record naming the property.
+        ///
+        /// The two arms are ECMA-262's two, not a fast path and a slow one. A
+        /// static key is 13.3.2.1, whose key is *the String value of the
+        /// IdentifierName* -- there is no expression and no ToPropertyKey in
+        /// that algorithm, so interning the literal is the whole of it. A
+        /// computed key is 13.3.3.1, which evaluates, GetValues and then runs
+        /// ToPropertyKey, and `__to_key` is that step.
+        ///
+        /// Written this way on purpose. The alternative -- one `Expr` key, and
+        /// a lowering that recognises a string literal and skips `__to_key` --
+        /// computes the same answers and is the shape `RESULTS.md` L2.5
+        /// records as the disease: an exemption granted per call site because
+        /// the compiler happens to know a type there. Following the grammar
+        /// instead makes it a property of the *node*, which no later change
+        /// can quietly widen.
+        fn key(&mut self, key: &ast::MemberKey) -> Result<(), CompileError> {
+            match key {
+                ast::MemberKey::Static(name) => {
+                    let pointer = self.pool.intern(name);
+                    self.push(Ins::I32Const(pointer));
+                }
+                ast::MemberKey::Computed(expr) => {
+                    self.expr(expr)?;
+                    let call = self.ctx.call(Rt::ToKey);
+                    self.push(call);
+                }
+            }
+            Ok(())
+        }
+
+        /// Push one JS value: what the target currently holds.
+        fn load_target(&mut self, target: &Target) {
+            match *target {
+                Target::Binding(place) => self.load(place),
+                Target::Member { object, key } => {
+                    load_local(object, &mut self.f.body);
+                    self.push(Ins::LocalGet(key));
+                    let call = self.ctx.call(Rt::ObjGet);
+                    self.push(call);
+                }
+            }
+        }
+
+        /// Write the JS value held in the locals at `slot` into the target.
+        ///
+        /// The value comes from a local rather than from the stack, because
+        /// `__obj_set` takes the receiver and the key *before* it -- and
+        /// because both callers already hold the value in a local, the
+        /// assignment's result being the value assigned.
+        fn store_target(&mut self, target: &Target, slot: u32) {
+            match *target {
+                Target::Binding(place) => {
+                    load_local(slot, &mut self.f.body);
+                    self.store(place);
+                }
+                Target::Member { object, key } => {
+                    load_local(object, &mut self.f.body);
+                    self.push(Ins::LocalGet(key));
+                    load_local(slot, &mut self.f.body);
+                    let call = self.ctx.call(Rt::ObjSet);
+                    self.push(call);
+                }
+            }
+        }
+
+        /// Give back the scratch a member target held, innermost first.
+        fn release(&mut self, target: Target) {
+            if let Target::Member { object, key } = target {
+                self.give_raw(key);
+                self.give(object);
             }
         }
 
@@ -1635,18 +1795,26 @@ pub(crate) mod m1 {
             Ok(())
         }
 
+        /// `=` and its compound forms, ECMA-262 13.15.2.
+        ///
+        /// The target is evaluated *first* and whole -- for `o.a` that means
+        /// the receiver and the key, into scratch -- and only then the value.
+        /// That is the spec's order (step 1.a evaluates the LeftHandSide, step
+        /// 1.d the right), and it is what makes `o[k()] = v()` call `k` before
+        /// `v`. It is also what makes a compound assignment read and write one
+        /// reference rather than evaluating `o` twice.
         fn assign(
             &mut self,
             op: Option<ast::BinaryOp>,
             target: &ast::Expr,
             value: &ast::Expr,
         ) -> Result<(), CompileError> {
-            let place = self.target(target)?;
+            let target = self.target(target)?;
             let slot = self.take();
             match op {
                 None => self.expr(value)?,
                 Some(op) => {
-                    self.load(place);
+                    self.load_target(&target);
                     self.expr(value)?;
                     let call = self.ctx.call(binary(op));
                     self.push(call);
@@ -1656,10 +1824,10 @@ pub(crate) mod m1 {
             // stored once and read twice rather than duplicated on the stack:
             // wasm has no two-word `dup`.
             store_local(slot, &mut self.f.body);
-            load_local(slot, &mut self.f.body);
-            self.store(place);
+            self.store_target(&target, slot);
             load_local(slot, &mut self.f.body);
             self.give(slot);
+            self.release(target);
             Ok(())
         }
 
@@ -1672,13 +1840,13 @@ pub(crate) mod m1 {
             prefix: bool,
             target: &ast::Expr,
         ) -> Result<(), CompileError> {
-            let place = self.target(target)?;
+            let target = self.target(target)?;
             let old = self.take();
             let new = self.take();
 
             let to_number = self.ctx.call(Rt::ToNumber);
             let inner = self.detached(|me| {
-                me.load(place);
+                me.load_target(&target);
                 me.push(to_number);
                 Ok(())
             })?;
@@ -1694,25 +1862,43 @@ pub(crate) mod m1 {
             self.push(call);
             store_local(new, &mut self.f.body);
 
-            load_local(new, &mut self.f.body);
-            self.store(place);
+            self.store_target(&target, new);
             // The one difference between the two spellings is which of the
             // two values the expression is.
             load_local(if prefix { new } else { old }, &mut self.f.body);
             self.give(new);
             self.give(old);
+            self.release(target);
             Ok(())
         }
 
-        /// The storage an assignment or an update writes to. The front end
-        /// guarantees the target is a name, and that the name is neither a
-        /// `const`, a function, nor a host import.
-        fn target(&mut self, target: &ast::Expr) -> Result<Place, CompileError> {
+        /// Evaluate what an assignment or an update writes to, once.
+        ///
+        /// The front end guarantees the target is a name or a member
+        /// expression, and that a name is neither a `const`, a function, nor a
+        /// host import. A name needs nothing evaluated -- its storage is an
+        /// index. A member expression needs both halves of its reference put
+        /// somewhere the write can reach after the value has been computed,
+        /// which is what the two scratch locals are; [`Lower::release`] gives
+        /// them back.
+        fn target(&mut self, target: &ast::Expr) -> Result<Target, CompileError> {
             match &target.kind {
                 ast::ExprKind::Name(ast::Name {
                     res: ast::Res::Local(id) | ast::Res::Global(id),
                     ..
-                }) => Ok(self.place(*id)),
+                }) => Ok(Target::Binding(self.place(*id))),
+                ast::ExprKind::Member { object, key } => {
+                    let slot = self.take();
+                    self.expr(object)?;
+                    store_local(slot, &mut self.f.body);
+                    let raw = self.take_raw();
+                    self.key(key)?;
+                    self.push(Ins::LocalSet(raw));
+                    Ok(Target::Member {
+                        object: slot,
+                        key: raw,
+                    })
+                }
                 _ => unreachable!("the parser refuses every other assignment target"),
             }
         }
@@ -1739,6 +1925,7 @@ pub(crate) mod m1 {
             ast::ExprKind::Int(_) => "a Number",
             ast::ExprKind::Str(_) => "a String",
             ast::ExprKind::Bool(_) => "a Boolean",
+            ast::ExprKind::Object(_) => "an Object",
             ast::ExprKind::Null => "Null",
             ast::ExprKind::Undefined => "Undefined",
             // 13.5.4 and 13.5.5: both are ToNumber of the operand.

@@ -293,7 +293,7 @@ pub(crate) mod m1 {
     use crate::ast::m1::BinaryOp;
     use crate::ast::m1::{
         Binding, BindingId, BindingKind, Declarator, Expr, ExprKind, FuncId, Function, LogicalOp,
-        Name, Program, Res, Span, Stmt, StmtKind, UnaryOp, UpdateOp,
+        MemberKey, Name, Program, Property, Res, Span, Stmt, StmtKind, UnaryOp, UpdateOp,
     };
     use crate::diag::{Boundary, CompileError, malformed, unsupported};
     use crate::lex::{
@@ -666,6 +666,24 @@ pub(crate) mod m1 {
                     self.pending[name.occurrence as usize].role = role;
                     true
                 }
+                _ => false,
+            }
+        }
+
+        /// Is this expression a target an assignment or an update may write
+        /// to? ECMA-262 13.15.1: an AssignmentTargetType of ~simple~, which
+        /// for this subset is an IdentifierReference or a MemberExpression.
+        ///
+        /// A name is relabelled on the way past, because writing to one asks
+        /// resolution a different question than reading it -- a `const`, a
+        /// function binding and a host import are all readable and none of
+        /// them is writable. A property is not relabelled: what a property may
+        /// hold is not a question resolution can answer, and the object it
+        /// hangs off is an ordinary read.
+        fn assignable(&mut self, expr: &Expr) -> bool {
+            match &expr.kind {
+                ExprKind::Name(_) => self.relabel(expr, Role::Write),
+                ExprKind::Member { .. } => true,
                 _ => false,
             }
         }
@@ -1106,9 +1124,9 @@ pub(crate) mod m1 {
                     Infix::Binary(op) => ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)),
                     Infix::Logical(op) => ExprKind::Logical(op, Box::new(lhs), Box::new(rhs)),
                     Infix::Assign(op) => {
-                        if !self.relabel(&lhs, Role::Write) {
+                        if !self.assignable(&lhs) {
                             return Err(malformed(
-                                "needs a name on the left of an assignment; this engine has nothing else to assign to yet",
+                                "needs a name or a property on the left of an assignment; this engine has nothing else to assign to yet",
                                 at,
                             ));
                         }
@@ -1204,9 +1222,9 @@ pub(crate) mod m1 {
             target: Expr,
             span: Span,
         ) -> Result<Expr, CompileError> {
-            if !self.relabel(&target, Role::Write) {
+            if !self.assignable(&target) {
                 return Err(malformed(
-                    "needs a name to increment or decrement; this engine has nothing else to write back to yet",
+                    "needs a name or a property to increment or decrement; this engine has nothing else to write back to yet",
                     span.offset(),
                 ));
             }
@@ -1220,16 +1238,63 @@ pub(crate) mod m1 {
             })
         }
 
-        /// A primary expression and whatever trails it: a call, an update.
+        /// A primary expression and whatever trails it: a member access, a
+        /// call, an update.
         ///
-        /// `.` and `[` are still [`TokenKind::Unsupported`], so member access
-        /// has no token to parse; the loop simply ends there and the statement
-        /// that wanted a `;` names the boundary.
+        /// Each link of the chain is charged a frame even though the loop is
+        /// iterative, for the reason [`Parser::expression`] charges its infix
+        /// chain: `a.b.c.d` leans one node deeper per link, and every consumer
+        /// of the tree walks it recursively.
         fn postfix(&mut self) -> Result<Expr, CompileError> {
             self.deeper(1)?;
             let mut expr = self.primary()?;
+            let mut chain = 0;
             loop {
                 match self.kind() {
+                    // 13.3.2: `o.a`, where `a` is an IdentifierName -- which
+                    // includes every keyword, so `o.for` is legal JavaScript.
+                    TokenKind::Dot => {
+                        self.deeper(1)?;
+                        chain += 1;
+                        let span = expr.span;
+                        self.advance();
+                        let token = self.peek().clone();
+                        let Some(name) = identifier_name(&token.kind) else {
+                            return Err(
+                                self.not_a_property_name("needs a property name after the `.`")
+                            );
+                        };
+                        self.advance();
+                        expr = Expr {
+                            kind: ExprKind::Member {
+                                object: Box::new(expr),
+                                key: MemberKey::Static(name),
+                            },
+                            span,
+                        };
+                    }
+                    // 13.3.3: `o[e]`, where `e` is a full Expression.
+                    TokenKind::LBracket => {
+                        self.deeper(1)?;
+                        chain += 1;
+                        let span = expr.span;
+                        let open = self.peek().offset;
+                        self.advance();
+                        let key = self.expression(0)?;
+                        self.expect(
+                            &TokenKind::RBracket,
+                            &format!(
+                                "needs a `]` to close the property access opened at byte {open}"
+                            ),
+                        )?;
+                        expr = Expr {
+                            kind: ExprKind::Member {
+                                object: Box::new(expr),
+                                key: MemberKey::Computed(Box::new(key)),
+                            },
+                            span,
+                        };
+                    }
                     TokenKind::LParen => {
                         let span = expr.span;
                         let is_name = self.relabel(&expr, Role::Call);
@@ -1262,7 +1327,7 @@ pub(crate) mod m1 {
                     _ => break,
                 }
             }
-            self.shallower(1);
+            self.shallower(1 + chain);
             Ok(expr)
         }
 
@@ -1355,20 +1420,177 @@ pub(crate) mod m1 {
                     self.shallower(1);
                     return Ok(inner);
                 }
-                // In statement position a `{` opens a block, and `statement`
-                // has already taken it. Here it can only be an object body,
-                // which is a world beyond the two bindings a call has.
-                TokenKind::LBrace => {
-                    return Err(unsupported(
-                        Boundary::ThirdBinding,
-                        "object literals",
-                        token.offset,
-                    ));
-                }
+                // In statement position a `{` opens a Block, and `statement`
+                // has already taken it (ECMA-262 14.2 wins over 13.2.5 there,
+                // which is why `{}` alone is an empty block and `({})` is the
+                // object). Here it can only be an ObjectLiteral.
+                TokenKind::LBrace => self.object_literal()?,
                 _ => return Err(self.cannot_use("needs an operand here")),
             };
             self.shallower(1);
             Ok(Expr { kind, span })
+        }
+
+        // -- object literals -------------------------------------------------
+
+        /// An ObjectLiteral, ECMA-262 13.2.5. The `{` is under the cursor.
+        ///
+        /// Two frames: this one and [`Parser::property`], which a nested
+        /// literal spends again at every level.
+        fn object_literal(&mut self) -> Result<ExprKind, CompileError> {
+            self.deeper(2)?;
+            let open = self.peek().offset;
+            self.advance();
+            let mut properties = Vec::new();
+            while !self.eat(&TokenKind::RBrace) {
+                properties.push(self.property()?);
+                if !self.eat(&TokenKind::Comma) {
+                    // ECMA-262 12.9.6 allows the trailing comma, which is why
+                    // the `}` is looked for after the separator and not
+                    // instead of it.
+                    self.expect(
+                        &TokenKind::RBrace,
+                        &format!(
+                            "needs a `,` or a `}}` in the object literal opened at byte {open}"
+                        ),
+                    )?;
+                    break;
+                }
+            }
+            self.shallower(2);
+            Ok(ExprKind::Object(properties))
+        }
+
+        /// One PropertyDefinition.
+        ///
+        /// The forms this engine reads are `key: value` and the shorthand
+        /// `key`. Every other form 13.2.5 defines -- a method, an accessor, a
+        /// ComputedPropertyName, a spread -- is refused by name here rather
+        /// than being read as one of the two and failing somewhere else. A
+        /// half-implemented accessor is worse than an absent one: it would
+        /// store the function under the name `get` and never call it.
+        fn property(&mut self) -> Result<Property, CompileError> {
+            let token = self.peek().clone();
+            let span = Span(token.offset);
+            if token.kind == TokenKind::LBracket {
+                return Err(unsupported(
+                    Boundary::FullJs,
+                    "computed property keys",
+                    token.offset,
+                ));
+            }
+            // 13.2.5.1: a PropertyName is a String, whichever of the three
+            // ways it is written. Only the third can also be a shorthand.
+            let mut shorthand = false;
+            let key = match &token.kind {
+                TokenKind::Str(text) => {
+                    let text = text.clone();
+                    self.advance();
+                    text
+                }
+                TokenKind::Int(magnitude) => {
+                    let magnitude = *magnitude;
+                    if magnitude > i32::MAX as u64 {
+                        return Err(unsupported(
+                            Boundary::Subset,
+                            OUT_OF_I32_RANGE,
+                            token.offset,
+                        ));
+                    }
+                    self.advance();
+                    // The String of the Number the literal denotes -- which for
+                    // an integer is its decimal digits, the same answer
+                    // `__to_key` computes at run time for `o[1]`.
+                    magnitude.to_string()
+                }
+                _ => {
+                    let Some(name) = identifier_name(&token.kind) else {
+                        return Err(
+                            self.not_a_property_name("needs a property name in the object literal")
+                        );
+                    };
+                    self.advance();
+                    shorthand = matches!(token.kind, TokenKind::Ident(_));
+                    name
+                }
+            };
+
+            // `{ f() {} }`. Named before the `:` is looked for, because
+            // otherwise the reader is told a `:` is missing from something
+            // that never wanted one.
+            if self.at(&TokenKind::LParen) {
+                return Err(unsupported(
+                    Boundary::FullJs,
+                    "methods in object literals",
+                    self.peek().offset,
+                ));
+            }
+            // `{ get a() {} }` and `{ set a(v) {} }`: two property names in a
+            // row is an accessor and nothing else.
+            if (key == "get" || key == "set") && self.at_property_name() {
+                return Err(unsupported(
+                    Boundary::FullJs,
+                    "getters and setters in object literals",
+                    span.offset(),
+                ));
+            }
+            // ECMA-262 B.3.1: `__proto__: v` in an object literal sets the
+            // prototype instead of creating a property. This engine has no
+            // prototypes, so reading it as an ordinary property would be
+            // silently wrong rather than merely absent. The shorthand
+            // `{ __proto__ }` is an ordinary property even in B.3.1, so it is
+            // deliberately not refused here.
+            if key == "__proto__" && self.at(&TokenKind::Colon) {
+                return Err(unsupported(
+                    Boundary::FullJs,
+                    "the `__proto__` property",
+                    span.offset(),
+                ));
+            }
+
+            if self.eat(&TokenKind::Colon) {
+                let value = self.expression(BP_ASSIGN)?;
+                return Ok(Property { key, value, span });
+            }
+            // 13.2.5: the shorthand is an IdentifierReference, so only a plain
+            // identifier may stand alone -- `{ if }` is not a property.
+            if shorthand && (self.at(&TokenKind::Comma) || self.at(&TokenKind::RBrace)) {
+                let occurrence = self.occurrence(&key, span.offset(), Role::Read);
+                let value = Expr {
+                    kind: ExprKind::Name(occurrence),
+                    span,
+                };
+                return Ok(Property { key, value, span });
+            }
+            Err(self.cannot_use("needs a `:` after the property name"))
+        }
+
+        /// Is the cursor on something that could be a PropertyName? Used only
+        /// to tell an accessor from a property called `get`.
+        fn at_property_name(&self) -> bool {
+            matches!(self.kind(), TokenKind::Str(_) | TokenKind::Int(_))
+                || identifier_name(self.kind()).is_some()
+        }
+
+        /// The refusal for a token that cannot be read as a property name.
+        ///
+        /// A reserved word *is* an IdentifierName in ECMA-262, so `o.delete`
+        /// and `{ class: 1 }` are legal JavaScript. Letting the generic
+        /// diagnostic speak would answer "does not support the `delete`
+        /// keyword", which is true of a construct that is not the one written.
+        fn not_a_property_name(&self, what: &str) -> CompileError {
+            let token = self.peek();
+            if let TokenKind::Unsupported(u) = &token.kind
+                && u.boundary == Boundary::FullJs
+                && u.phrase.ends_with(" keyword")
+            {
+                return unsupported(
+                    Boundary::FullJs,
+                    "a property named with a reserved word",
+                    token.offset,
+                );
+            }
+            self.cannot_use(what)
         }
 
         // -- resolution ------------------------------------------------------
@@ -1503,6 +1725,35 @@ pub(crate) mod m1 {
         Ok(ExprKind::Int(value))
     }
 
+    /// The spelling of a token that may stand as an ECMA-262 IdentifierName:
+    /// a plain identifier, or one of the keywords this engine spells.
+    ///
+    /// IdentifierName is not Identifier: it admits every reserved word, which
+    /// is why `o.for` and `{ null: 1 }` are grammar. The words this lexer
+    /// still refuses outright never reach here, and
+    /// [`Parser::not_a_property_name`] is what names *them*.
+    fn identifier_name(kind: &TokenKind) -> Option<String> {
+        let word = match kind {
+            TokenKind::Ident(name) => return Some(name.clone()),
+            TokenKind::Function => "function",
+            TokenKind::Return => "return",
+            TokenKind::If => "if",
+            TokenKind::Else => "else",
+            TokenKind::While => "while",
+            TokenKind::For => "for",
+            TokenKind::Let => "let",
+            TokenKind::Const => "const",
+            TokenKind::Var => "var",
+            TokenKind::Typeof => "typeof",
+            TokenKind::True => "true",
+            TokenKind::False => "false",
+            TokenKind::Null => "null",
+            TokenKind::Undefined => "undefined",
+            _ => return None,
+        };
+        Some(word.to_string())
+    }
+
     /// What an infix token builds.
     enum Infix {
         Binary(BinaryOp),
@@ -1617,6 +1868,17 @@ pub(crate) mod m1 {
             | ExprKind::Arg(_)
             | ExprKind::Function(_) => {}
             ExprKind::Name(name) => name.res = res[name.occurrence as usize].clone(),
+            ExprKind::Object(properties) => {
+                for property in properties {
+                    fill_expr(&mut property.value, res);
+                }
+            }
+            ExprKind::Member { object, key } => {
+                fill_expr(object, res);
+                if let MemberKey::Computed(key) = key {
+                    fill_expr(key, res);
+                }
+            }
             ExprKind::Call { callee, args } => {
                 fill_expr(callee, res);
                 for arg in args {

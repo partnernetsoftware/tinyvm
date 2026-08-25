@@ -79,8 +79,18 @@ pub(crate) enum TokenKind {
     RParen,
     LBrace,
     RBrace,
+    LBracket,
+    RBracket,
     Semi,
     Comma,
+    /// `.` -- the member access, and nothing else. A `.` inside a numeric
+    /// literal never reaches here: `number` consumes the whole literal.
+    Dot,
+    /// `:` -- the separator of an ObjectLiteral's PropertyDefinition. It is
+    /// also the second half of a conditional expression, which is why
+    /// [`TokenKind::capability`] still names that when the parser has no use
+    /// for one here.
+    Colon,
 
     // Operators.
     Plus,
@@ -147,6 +157,10 @@ impl TokenKind {
             Self::RParen => "a `)`",
             Self::LBrace => "a `{`",
             Self::RBrace => "a `}`",
+            Self::LBracket => "a `[`",
+            Self::RBracket => "a `]`",
+            Self::Dot => "a `.`",
+            Self::Colon => "a `:`",
             Self::Semi => "a `;`",
             Self::Comma => "a `,`",
             Self::Plus => "a `+`",
@@ -207,6 +221,14 @@ impl TokenKind {
                 (Boundary::Subset, "the increment and decrement operators")
             }
             Self::AmpAmp | Self::PipePipe => (Boundary::Subset, "logical operators"),
+            // `[` graduated for `o[k]`, so a `[` the parser cannot use is the
+            // other thing it spells, which is still ahead of the engine.
+            Self::LBracket | Self::RBracket => (Boundary::ThirdBinding, "array literals"),
+            Self::Dot => (Boundary::ThirdBinding, "property access"),
+            // `:` graduated for an ObjectLiteral. Everywhere else it is the
+            // second half of `?:`, or a label -- and `?` already names the
+            // first of those, so this only speaks when a `:` arrives alone.
+            Self::Colon => (Boundary::Subset, "conditional expressions"),
             Self::Bang => (Boundary::Subset, "the logical `!` operator"),
             Self::Comma => (Boundary::Subset, "the comma operator"),
             Self::Str(_) => (Boundary::Subset, "string literals"),
@@ -732,12 +754,12 @@ impl Lexer<'_> {
             [b'}', ..] => (1, TokenKind::RBrace),
             [b';', ..] => (1, TokenKind::Semi),
             [b',', ..] => (1, TokenKind::Comma),
-            // The two that would still need a world beyond the two bindings:
-            // an array, a property of something.
-            [b'[' | b']', ..] => (1, third("array literals")),
-            [b'.', ..] => (1, third("property access")),
+            [b'[', ..] => (1, TokenKind::LBracket),
+            [b']', ..] => (1, TokenKind::RBracket),
+            [b'.', ..] => (1, TokenKind::Dot),
+            [b':', ..] => (1, TokenKind::Colon),
             [b'&' | b'|' | b'^' | b'~', ..] => (1, subset(BITWISE)),
-            [b'?' | b':', ..] => (1, subset("conditional expressions")),
+            [b'?', ..] => (1, subset("conditional expressions")),
             _ => {
                 // Not ASCII punctuation the engine knows. Name the character
                 // itself, decoded as a `char` so a multi-byte one prints whole.
@@ -925,6 +947,10 @@ fn ends_lhs(kind: &TokenKind) -> bool {
             | TokenKind::Null
             | TokenKind::Undefined
             | TokenKind::RParen
+            // `o[k]` is a MemberExpression, so a `]` can end one. `}` is
+            // deliberately absent: at statement position it closes a block,
+            // and `{ }\n++x` is a block followed by a prefix increment.
+            | TokenKind::RBracket
     )
 }
 
