@@ -210,11 +210,12 @@ fn qjs_m1_tells_an_exhausted_heap_from_a_broken_script() {
         "let s = \"abcdefghijklmnop\"; let i = 0; while (i < 8000) { s + s; i = i + 1; } return i;",
         one_page,
     );
-    // A trap the heap had nothing to do with: `"a" + 1` needs ToString of a
-    // Number (ECMA-262 7.1.17), which this milestone does not have, and the
-    // runtime traps rather than fabricate a string. Same instruction, same
-    // budget, entirely different cause.
-    let semantic = trap_in("return \"a\" + 1;", one_page);
+    // A trap the heap had nothing to do with: `"x" + o` needs ToPrimitive
+    // (ECMA-262 7.1.1), which reaches the `valueOf`/`toString` a prototype
+    // would carry, and there is no prototype -- so the runtime traps rather
+    // than fabricate a string. Same instruction, same budget, entirely
+    // different cause. (It used to be `"a" + 1`; that one has an answer now.)
+    let semantic = trap_in("const o = {}; return \"x\" + o;", one_page);
 
     // The VM cannot tell them apart, and does not pretend to.
     assert_eq!(exhausted.message, semantic.message);

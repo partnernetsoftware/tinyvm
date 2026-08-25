@@ -318,11 +318,6 @@ pub(crate) mod m1 {
     /// Unary and update, above every infix level: `-a * 2` is `(-a) * 2`.
     const BP_PREFIX: u8 = 16;
 
-    /// Naming a call target this milestone cannot reach. One phrase, because
-    /// two sites reject it: a callee that is not a name at all, and a name
-    /// that is bound to something other than a known function.
-    const CALL_TARGET: &str = "calling a value that is not a known function";
-
     /// How much native stack one script's syntax may spend, counted in frames
     /// of recursive descent.
     ///
@@ -409,8 +404,10 @@ pub(crate) mod m1 {
     }
 
     /// What the occurrence does to the binding. The three answers differ:
-    /// only a write can hit a `const`, only a call can reach a function, and
-    /// only a read of a function is a function *value*.
+    /// only a write can hit a `const`, and only a call can be lowered as a
+    /// *direct* call when the binding turns out to name a known function. A
+    /// read of such a binding is the same function as a value, which is why
+    /// the two share one [`Res`].
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Role {
         Read,
@@ -1297,14 +1294,17 @@ pub(crate) mod m1 {
                     }
                     TokenKind::LParen => {
                         let span = expr.span;
-                        let is_name = self.relabel(&expr, Role::Call);
-                        if !is_name && !matches!(expr.kind, ExprKind::Function(_)) {
-                            return Err(unsupported(
-                                Boundary::FullJs,
-                                CALL_TARGET,
-                                self.peek().offset,
-                            ));
-                        }
+                        // A *name* followed by `(` asks resolution a different
+                        // question than a name read for its value: only a call
+                        // can reach a known function directly. Every other
+                        // callee -- a property, a call's result, a
+                        // parenthesised function expression -- is an ordinary
+                        // value expression, and the lowering calls it through
+                        // the table. Nothing is rejected here any more: what a
+                        // value turns out to hold is not a question the text
+                        // can answer, and ECMA-262 13.3.6.1 makes it a
+                        // run-time TypeError rather than a syntax one.
+                        self.relabel(&expr, Role::Call);
                         let args = self.arguments()?;
                         expr = Expr {
                             kind: ExprKind::Call {
@@ -1661,15 +1661,13 @@ pub(crate) mod m1 {
                 ));
             }
             match (p.role, binding.kind) {
-                // A call to a known function names a function index rather
-                // than storage, so it reaches out of any depth: no capture.
-                (Role::Call, BindingKind::Function(_)) => Ok(Res::Callee(id)),
-                (Role::Call, _) => Err(unsupported(Boundary::FullJs, CALL_TARGET, p.offset)),
-                (Role::Read, BindingKind::Function(_)) => Err(unsupported(
-                    Boundary::FullJs,
-                    "using a function as a value",
-                    p.offset,
-                )),
+                // A name bound to a known function names that function and
+                // nothing else -- it has no storage, it can never be
+                // reassigned, and it is the same function from every depth. So
+                // both a call and a read reach it out of any depth and neither
+                // is a capture: the call is direct, and the read is the
+                // constant function value.
+                (Role::Call | Role::Read, BindingKind::Function(_)) => Ok(Res::Callee(id)),
                 (Role::Write, BindingKind::Const) => Err(malformed(
                     &format!(
                         "cannot assign to `{}`, which is declared `const` at byte {}",

@@ -608,27 +608,44 @@ fn a_function_expression_is_an_expression() {
     assert!(matches!(p.binding(binding).kind, BindingKind::Function(_)));
 }
 
+/// Calling anything at all now parses and resolves. What the callee turns out
+/// to hold is a property of the run, not of the text, so the front end has
+/// nothing to refuse -- ECMA-262 13.3.6.1 makes a non-callable callee a
+/// run-time TypeError, and `tests/function_values.rs` is where the trap is
+/// shown.
 #[test]
-fn calling_a_value_that_is_not_a_known_function_is_refused() {
-    let message = refuse("let f = 1; f();");
+fn calling_a_value_that_is_not_a_known_function_now_resolves() {
+    program("let f = 1; f();");
+    program("let f = function () { return 1; }; f();");
+    program("const o = {}; o.m();");
+    // The one thing resolution still settles about a callee: a name that is
+    // declared nowhere is still nowhere.
+    let message = refuse("nope();");
     assert!(
-        message.starts_with("this engine does not support "),
-        "{message}"
-    );
-    let message = refuse("let f = function () { return 1; }; f();");
-    assert!(
-        message.starts_with("this engine does not support "),
+        message.contains("finds no declaration of `nope`"),
         "{message}"
     );
 }
 
+/// A name bound to a known function resolves to the same [`Res::Callee`]
+/// whether it is called or read -- the binding names the function rather than
+/// storage, so neither use is a capture.
 #[test]
-fn a_function_used_as_a_value_is_refused() {
-    let message = refuse("function f() { return 1; } f;");
-    assert!(
-        message.starts_with("this engine does not support "),
-        "{message}"
-    );
+fn a_function_used_as_a_value_resolves_to_the_function_it_names() {
+    let p = program("function f() { return 1; } f;");
+    let e = match &body(&p)[1].kind {
+        StmtKind::Expr(e) => e,
+        other => panic!("expected an expression statement, got {other:?}"),
+    };
+    match &e.kind {
+        ExprKind::Name(name) => {
+            assert!(matches!(name.res, Res::Callee(_)), "got {:?}", name.res);
+        }
+        other => panic!("expected a name, got {other:?}"),
+    }
+    // And from inside a nested function, where storage would have been a
+    // capture and a function index is not.
+    program("function f() { return 1; } function g() { return f; } g();");
 }
 
 // -- spans and diagnostics ---------------------------------------------------

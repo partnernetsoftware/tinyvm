@@ -415,12 +415,26 @@ fn a_number_key_this_engine_cannot_spell_traps() {
     // written as a computation, because a script that *spells* one of them is
     // refused by the lexer or the parser first -- which is the better answer,
     // and is asserted just below.
-    traps("const o = {}; const k = 1 / 2; o[k] = 1; return 0;");
-    traps("const o = {}; const k = 1 / 0; o[k] = 1; return 0;");
-    traps("const o = {}; const k = 0 / 0; o[k] = 1; return 0;");
-    traps("const o = {}; const k = 2147483647 + 1; o[k] = 1; return 0;");
-    traps("const o = {}; const k = 0 - 2147483647 - 1; o[k] = 1; return 0;");
-    // An Object key would need ToPrimitive, which is not implemented either.
+    // Each of these names a property now -- `__to_string` runs the whole of
+    // 6.1.6.1.20 -- so what is left in this test is the one key with no
+    // ToString at all.
+    number(
+        "const o = {}; const k = 1 / 2; o[k] = 4; return o[\"0.5\"];",
+        4.0,
+    );
+    number(
+        "const o = {}; const k = 1 / 0; o[k] = 4; return o[\"Infinity\"];",
+        4.0,
+    );
+    number(
+        "const o = {}; const k = 0 / 0; o[k] = 4; return o[\"NaN\"];",
+        4.0,
+    );
+    number(
+        "const o = {}; const k = 2147483647 + 1; o[k] = 4; return o[\"2147483648\"];",
+        4.0,
+    );
+    // An Object key needs 7.1.1 ToPrimitive, which needs a prototype.
     traps("const o = {}; const k = {}; o[k] = 1; return 0;");
     // Written out, the same values never reach the run: the front end already
     // knows the engine has no literal for them.
@@ -680,11 +694,13 @@ fn object_literal_forms_this_engine_refuses() {
         "the spread and rest syntax",
         Boundary::ThirdBinding,
     );
-    // A function value is still a function value, wherever it is written.
-    refuses_capability(
-        "const o = { f: function () { return 1; } }; return 0;",
-        "using a function as a value",
-        Boundary::FullJs,
+    // A function value used to be refused here, wherever it was written. It
+    // is a value now -- see `tests/function_values.rs` -- so what this file
+    // keeps is the one claim that is about *objects*: a property holds one,
+    // and the object is still an Object.
+    text(
+        "const o = { f: function () { return 1; } }; return typeof o + \"|\" + typeof o.f;",
+        "object|function",
     );
 }
 
@@ -713,15 +729,22 @@ fn object_facilities_this_engine_refuses() {
         Boundary::FullJs,
     );
     refuses_capability("return [1, 2];", "array literals", Boundary::ThirdBinding);
-    // `Object.keys(o)` stops at the *call*: a property is not a known
-    // function, and function values are the next milestone.
-    refuses_capability(
+    // `Object.keys(o)` now stops one step earlier and says something better:
+    // the call itself is a capability the engine has, so what is missing is
+    // the *binding*. There is no global scope for `Object` to be in, and the
+    // sentence is about that rather than about the author.
+    for source in [
         "const o = {}; return Object.keys(o);",
-        "calling a value that is not a known function",
-        Boundary::FullJs,
-    );
-    // Without the call, `Object` is an ordinary name and there is no global
-    // scope for it to be in. The sentence is about the binding, not the author.
+        "const o = {}; return Object.keys;",
+    ] {
+        let error = refuse(source);
+        assert!(
+            error.message.contains("finds no declaration of `Object`"),
+            "{source:?}: got {:?}",
+            error.message
+        );
+        assert_eq!(error.boundary, Boundary::Subset, "{source:?}");
+    }
     let error = refuse("const o = {}; return Object.keys;");
     assert!(
         error.message.contains("finds no declaration of `Object`"),

@@ -410,16 +410,19 @@ fn typeof_names_the_language_type() {
 }
 
 /// `typeof` is a UnaryExpression operator (13.5), so it binds tighter than
-/// every infix rung -- and the readable proof is that `typeof 2 * 3` reaches
-/// `"number" * 3`, which is the unimplemented StringToNumber and traps. Were
-/// it looser, `typeof (2 * 3)` would be `"number"` and nothing would trap.
+/// every infix rung -- and the proof is what `typeof 1 + 1` answers. It used
+/// to be that the answer was a *trap*, because `"number" + 1` reached the
+/// unimplemented ToString; now the answer is `"number1"`, which says the same
+/// thing and says it in one piece rather than by the absence of one.
 #[test]
 fn typeof_binds_where_a_unary_operator_binds() {
     boolean("typeof 1 === \"number\"", true);
-    // `(typeof 1) + 1` is `"number" + 1`, which needs ToString of a Number and
-    // traps; `typeof (1 + 1)` would be `"number"` and would not.
-    traps("typeof 1 + 1");
-    traps("typeof 2 * 3");
+    // `(typeof 1) + 1` is `"number" + 1`, which is `"number1"`;
+    // `typeof (1 + 1)` would be `"number"`.
+    text("typeof 1 + 1", "number1");
+    // `(typeof 2) * 3` is `ToNumber("number") * 3`, which is NaN;
+    // `typeof (2 * 3)` would be the String `"number"`.
+    number("typeof 2 * 3", f64::NAN);
     // It nests, because its own result is a String and Strings have a type.
     text("typeof typeof 1", "string");
     // A non-empty String is truthy, so every `typeof` is.
@@ -687,15 +690,27 @@ fn a_line_break_alone_does_not_end_a_statement() {
 
 /// The trap ASI is famous for: a `(` on the next line is a *call*, so no
 /// semicolon is inserted and `1(2)` is what the engine is asked to compile.
-/// It refuses by naming the call target, which is the honest answer.
+///
+/// It used to be provable by the diagnostic. Now that calling a value is a
+/// capability, it is provable by the *trap*: the engine compiles `a(2)`,
+/// evaluates the argument, tests the callee's tag, and faults -- which is
+/// exactly what ECMA-262 says `1(2)` does, and is stronger evidence that no
+/// semicolon was inserted than a refusal was.
 #[test]
 fn a_parenthesis_on_the_next_line_is_a_call_and_not_a_new_statement() {
-    let e = refuse("let a = 1\n(2)\nreturn a;");
-    assert_eq!(
-        e.message,
-        "this engine does not support calling a value that is not a known function yet"
+    let wasm =
+        compile_qjs_m1("let a = 1\n(2)\nreturn a;").expect("`a(2)` is a call this engine lowers");
+    let module =
+        WasmModule::from_bytes_with(&wasm, Limits::default()).expect("clears the load gate");
+    let mut instance = module.instantiate().expect("instantiates");
+    let outcome = instance.invoke_by_name("main", &Value::args(&[]));
+    assert!(
+        outcome.is_err(),
+        "calling the Number 1 has to fault, not answer: {outcome:?}"
     );
-    assert_eq!(e.boundary, Boundary::FullJs);
+    // And with a semicolon written, the same source is two statements and
+    // never calls anything.
+    assert_eq!(run("let a = 1;\n(2)\nreturn a;"), Out::Number(1.0));
 }
 
 /// 12.10's two overrides: an inserted semicolon may never become an empty
@@ -1195,31 +1210,45 @@ fn only_the_empty_string_is_falsy() {
     text("\"a\" && \"b\"", "b");
 }
 
-/// DIVERGENCE: three ECMA-262 conversions are unimplemented, and each one
-/// **traps** rather than fabricating a value -- ToString of a Number
-/// (6.1.6.1.20), StringToNumber (7.1.4.1) and String relational comparison
-/// (7.2.13). In JavaScript every one of these has an answer: `"a" + 1` is
-/// `"a1"`, `"1" - 1` is `0`, `"a" < "b"` is `true`, `1 == "1"` is `true`.
-/// Retire when those three algorithms land in `runtime.rs`.
+/// The three ECMA-262 conversions that used to be unimplemented, each
+/// answering. ToString of a Number (6.1.6.1.20), StringToNumber (7.1.4.1) and
+/// String relational comparison (7.2.13) are now `convert.rs`, wired into
+/// `__add`, `__to_number` and the four relational operators.
+///
+/// This test is the previous milestone's
+/// `the_unimplemented_string_conversions_trap_rather_than_guess` with every
+/// line turned over: each `traps(...)` became the value JavaScript gives.
 #[test]
-fn the_unimplemented_string_conversions_trap_rather_than_guess() {
-    traps("return \"a\" + 1;");
-    traps("return 1 + \"a\";");
-    traps("return \"a\" + true;");
-    traps("return \"a\" + null;");
-    traps("return \"1\" - 1;");
-    traps("return \"2\" * 2;");
-    traps("return -\"1\";");
-    traps("return \"a\" < \"b\";");
-    traps("return \"a\" > \"b\";");
-    traps("return 1 == \"1\";");
-    traps("return \"1\" == 1;");
-    traps("return \"a\" < 1;");
-    // What does *not* trap: strict equality never converts, and `==` between
-    // a String and null/undefined is settled by 7.2.14 steps 2 and 3.
+fn the_three_string_conversions_answer() {
+    // 13.15.3: either side a String makes `+` concatenation, and both sides
+    // then run ToString.
+    text("return \"a\" + 1;", "a1");
+    text("return 1 + \"a\";", "1a");
+    text("return \"a\" + true;", "atrue");
+    text("return \"a\" + null;", "anull");
+    text("return \"a\" + undefined;", "aundefined");
+    // 7.1.4.1, reached through `__to_number`.
+    number("return \"1\" - 1;", 0.0);
+    number("return \"2\" * 2;", 4.0);
+    number("return -\"1\";", -1.0);
+    // 7.2.13 step 3, both sides Strings.
+    boolean("\"a\" < \"b\"", true);
+    boolean("\"a\" > \"b\"", false);
+    // 7.2.14 steps 4 and 5.
+    boolean("1 == \"1\"", true);
+    boolean("\"1\" == 1", true);
+    // 7.2.13 step 4: one String and one Number is *not* the code-unit path.
+    boolean("\"a\" < 1", false);
+    // What still does not convert: strict equality never does, and `==`
+    // between a String and null/undefined is settled by 7.2.14 steps 2 and 3
+    // before any conversion is reached.
     boolean("\"1\" === 1", false);
     boolean("\"\" == null", false);
     boolean("\"\" == undefined", false);
+    // And the conversion that is still missing, which is a fourth one and not
+    // one of these three: 7.1.1 ToPrimitive reaches the `valueOf`/`toString` a
+    // prototype would carry, and there is no prototype.
+    traps("const o = {}; return \"x\" + o;");
 }
 
 // =========================================================================
@@ -1474,18 +1503,6 @@ const UNSUPPORTED: &[(&str, &str)] = &[
         "an argument reference inside a nested function",
     ),
     (
-        "function f() { return 1; } let g = f; return 0;",
-        "using a function as a value",
-    ),
-    (
-        "let a = 1; return a();",
-        "calling a value that is not a known function",
-    ),
-    (
-        "return 1();",
-        "calling a value that is not a known function",
-    ),
-    (
         "function outer() { let a = 1; function inner() { return a; } return inner(); } return outer();",
         "closures that capture a variable",
     ),
@@ -1548,10 +1565,6 @@ fn the_boundary_is_classified_not_just_worded() {
     assert_eq!(
         refuse("let a = [1]; return 0;").boundary,
         Boundary::ThirdBinding
-    );
-    assert_eq!(
-        refuse("const o = {}; return o.a.b.c(1);").boundary,
-        Boundary::FullJs
     );
     assert_eq!(refuse("this;").boundary, Boundary::FullJs);
     assert_eq!(refuse("class C { }").boundary, Boundary::FullJs);

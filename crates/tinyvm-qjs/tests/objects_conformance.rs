@@ -996,25 +996,47 @@ fn only_some_reserved_words_may_name_a_property() {
 }
 
 /// 7.1.19 ToPropertyKey runs 7.1.17 ToString, and 6.1.6.1.20 gives every
-/// Number a String. This engine's `__num_to_str` implements the integer case
-/// only, because the general one needs the shortest round-tripping decimal.
+/// Number a String. `__to_string` now calls the whole of 6.1.6.1.20, so there
+/// is no integer boundary left: the divergence this test used to record --
+/// `o[0.5]`, `o[NaN]` and `o[1/0]` trapping -- is gone, and each names the
+/// property JavaScript names.
 ///
-/// DIVERGENCE: in JavaScript `o[0.5]` is the property `"0.5"`, `o[NaN]` is
-/// `"NaN"`, and `o[1/0]` is `"Infinity"`. Here each traps.
-///
-/// A trap rather than a wrong key is the right half of the trade: a
-/// fabricated `"0"` for `0.5` would collide with a real property.
+/// The integer-only `__num_to_str` that made it a boundary is gone with it.
 #[test]
-fn a_number_key_outside_the_integer_range_faults() {
-    traps("const o = {}; const k = 1 / 2; o[k] = 1; return 0;");
-    traps("const o = {}; const k = 0 / 0; o[k] = 1; return 0;");
-    traps("const o = {}; const k = 1 / 0; o[k] = 1; return 0;");
-    traps("const o = {}; const k = 0 - 1 / 0; o[k] = 1; return 0;");
-    traps("const o = {}; const k = 2147483647 + 1; o[k] = 1; return 0;");
-    // Reading is the same conversion, so it faults at the same boundary.
-    traps("const o = { a: 1 }; const k = 1 / 2; return o[k];");
-    // The integers on either side of the boundary do work, which is what
-    // makes the boundary a boundary and not an absence.
+fn every_number_key_is_the_property_its_tostring_names() {
+    number(
+        "const o = {}; const k = 1 / 2; o[k] = 7; return o[\"0.5\"];",
+        7.0,
+    );
+    number(
+        "const o = {}; const k = 0 / 0; o[k] = 7; return o[\"NaN\"];",
+        7.0,
+    );
+    number(
+        "const o = {}; const k = 1 / 0; o[k] = 7; return o[\"Infinity\"];",
+        7.0,
+    );
+    number(
+        "const o = {}; const k = 0 - 1 / 0; o[k] = 7; return o[\"-Infinity\"];",
+        7.0,
+    );
+    number(
+        "const o = {}; const k = 2147483647 + 1; o[k] = 7; return o[\"2147483648\"];",
+        7.0,
+    );
+    // Reading is the same conversion, so it finds the same slot.
+    number(
+        "const o = {}; o[\"0.5\"] = 7; const k = 1 / 2; return o[k];",
+        7.0,
+    );
+    // 6.1.6.1.20 step 5: the shortest decimal that reads back, which is why
+    // this key is `"0.1"` and not the exact expansion of the double.
+    number(
+        "const o = {}; const k = 1 / 10; o[k] = 7; return o[\"0.1\"];",
+        7.0,
+    );
+    // Steps 6 to 9 pick the layout, and a key past the threshold is
+    // exponential -- which is a property name like any other.
     text(
         "const o = {}; o[2147483647] = \"hi\"; return o[\"2147483647\"];",
         "hi",
@@ -1071,13 +1093,14 @@ fn there_is_no_prototype_to_inherit_from() {
     // And an inherited member is not an own key, so nothing is hidden in the
     // record either -- the object really is empty.
     assert_eq!(returned_keys("return {};"), Vec::<String>::new());
-    // Calling one is refused at compile time rather than reaching a trap,
-    // because a property is not a name bound to a known function.
-    refuses_capability(
-        "const o = {}; return o.toString();",
-        "calling a value that is not a known function",
-        Boundary::FullJs,
-    );
+    // Calling one is a *trap*, which is the answer that used to be a compile
+    // diagnostic. The call itself is a capability the engine has now; what is
+    // absent is the prototype the method would have come from, so `o.toString`
+    // reads `undefined` and calling `undefined` faults -- which is what
+    // ECMA-262 makes it, a TypeError, and the closest thing to one this engine
+    // has.
+    traps("const o = {}; return o.toString();");
+    traps("const o = {}; return o.hasOwnProperty(\"a\");");
 }
 
 /// B.2.2.1: `__proto__` is an accessor property on `Object.prototype`.
@@ -1140,28 +1163,23 @@ fn a_property_of_a_primitive_faults() {
 /// 13.15.3 ApplyStringOrNumericBinaryOperator: when either operand is a
 /// String, `+` is concatenation after ToString on both sides.
 ///
-/// DIVERGENCE: `"x" + 2` is `"x2"` in JavaScript and traps here. So does
-/// `"x" + o` (`"x[object Object]"`).
-///
-/// The Number half is worth a second look: the objects milestone added
-/// `__num_to_str` for the integer case of 6.1.6.1.20, and `o[1234]` proves it
-/// runs -- but `+` still faults on an integer operand it could now spell.
-/// The capability landed; the operator was not rewired to it. That is why
-/// `objects_m3.rs`'s `fleet` test has to pass its tab id as the *string*
-/// `"7"`, and why `JSON.stringify` cannot be built on `+` as it stands.
+/// Every primitive operand converts. The one that does not is an Object:
+/// 7.1.1 ToPrimitive reaches the `valueOf`/`toString` a prototype would carry,
+/// and there is no prototype here, so `"x" + o` traps where JavaScript answers
+/// `"x[object Object]"`. That is the remaining DIVERGENCE, and it is one
+/// algorithm rather than three.
 #[test]
-fn concatenating_a_non_string_faults() {
-    traps("return \"x\" + 2;");
-    traps("return 2 + \"x\";");
-    traps("const o = { n: 1 }; return \"n=\" + o.n;");
+fn concatenating_a_primitive_converts_and_an_object_faults() {
+    text("return \"x\" + 2;", "x2");
+    text("return 2 + \"x\";", "2x");
+    text("const o = { n: 1 }; return \"n=\" + o.n;", "n=1");
+    text("return \"x\" + true;", "xtrue");
+    text("return \"x\" + null;", "xnull");
+    text("return \"x\" + undefined;", "xundefined");
+    text("const o = { s: \"b\" }; return \"a\" + o.s + \"c\";", "abc");
+    // The one operand with no ToPrimitive.
     traps("const o = {}; return \"x\" + o;");
     traps("const o = {}; return o + \"\";");
-    traps("return \"x\" + true;");
-    traps("return \"x\" + null;");
-    traps("return \"x\" + undefined;");
-    // String + String is the case that works, which is the whole of the
-    // `fleet.js` path that can be built today.
-    text("const o = { s: \"b\" }; return \"a\" + o.s + \"c\";", "abc");
 }
 
 /// 7.1.4 ToNumber of an Object is ToPrimitive then ToNumber, and for a plain
@@ -1233,20 +1251,22 @@ fn prototypes_are_refused() {
         Boundary::FullJs,
     );
     // `Object.create` / `Object.getPrototypeOf` / `Object.setPrototypeOf` stop
-    // at the call: a property is not a name bound to a known function.
+    // at the *name*. The call is a capability the engine has; `Object` is a
+    // binding it does not have, and the sentence is about that rather than
+    // about the author.
     for source in [
         "const o = Object.create(null); return 0;",
         "const o = {}; return Object.getPrototypeOf(o);",
         "const o = {}; Object.setPrototypeOf(o, null); return 0;",
     ] {
-        refuses_capability(
-            source,
-            "calling a value that is not a known function",
-            Boundary::FullJs,
+        let error = refuse(source);
+        assert!(
+            error.message.contains("finds no declaration of `Object`"),
+            "{source:?}: got {:?}",
+            error.message
         );
     }
-    // Without the call, `Object` is a name with nothing to resolve against --
-    // and the sentence is about the missing binding, not about the author.
+    // And without the call, the same sentence.
     let error = refuse("return Object;");
     assert!(
         error.message.contains("finds no declaration of `Object`"),
@@ -1275,10 +1295,12 @@ fn getters_and_setters_are_refused() {
         "getters and setters in object literals",
         Boundary::FullJs,
     );
-    refuses_capability(
-        "const o = {}; Object.defineProperty(o, \"a\", { get: 1 }); return 0;",
-        "calling a value that is not a known function",
-        Boundary::FullJs,
+    // `Object.defineProperty` stops at the missing `Object` binding now that
+    // the call is a capability the engine has.
+    assert!(
+        refuse("const o = {}; Object.defineProperty(o, \"a\", { get: 1 }); return 0;")
+            .message
+            .contains("finds no declaration of `Object`")
     );
     // A method is the same problem wearing shorthand.
     refuses_capability(
@@ -1308,21 +1330,30 @@ fn delete_is_refused() {
 /// loud -- which is also why the divergence above is currently free.
 #[test]
 fn enumeration_is_refused() {
-    for source in [
-        "const o = {}; return Object.keys(o);",
-        "const o = {}; return Object.values(o);",
-        "const o = {}; return Object.entries(o);",
-        "const o = {}; return Object.assign({}, o);",
-        "const o = {}; return Object.freeze(o);",
-        "const o = {}; return JSON.stringify(o);",
-        "const o = {}; return o.hasOwnProperty(\"a\");",
+    // Every one of these stops at a name this engine has no binding for --
+    // `Object` and `JSON` alike. The refusal moved from the call to the name
+    // when calling a value became a capability, and it is the better sentence:
+    // the engine can make the call, it just has nothing to make it on.
+    for (source, missing) in [
+        ("const o = {}; return Object.keys(o);", "Object"),
+        ("const o = {}; return Object.values(o);", "Object"),
+        ("const o = {}; return Object.entries(o);", "Object"),
+        ("const o = {}; return Object.assign({}, o);", "Object"),
+        ("const o = {}; return Object.freeze(o);", "Object"),
+        ("const o = {}; return JSON.stringify(o);", "JSON"),
     ] {
-        refuses_capability(
-            source,
-            "calling a value that is not a known function",
-            Boundary::FullJs,
+        let error = refuse(source);
+        assert!(
+            error
+                .message
+                .contains(&format!("finds no declaration of `{missing}`")),
+            "{source:?}: got {:?}",
+            error.message
         );
     }
+    // `o.hasOwnProperty("a")` names nothing that is missing -- `o` is right
+    // there -- so it compiles and faults on the absent property instead.
+    traps("const o = {}; return o.hasOwnProperty(\"a\");");
     refuses_capability(
         "const o = {}; return \"a\" in o;",
         "the `in` keyword",
@@ -1406,13 +1437,15 @@ fn the_neighbouring_syntax_is_refused_by_name() {
         "computed property keys",
         Boundary::FullJs,
     );
-    // A function as a property value is the next milestone, wherever written.
+    // A function as a property value was the next milestone and is now this
+    // one, wherever written. What was a refusal corpus is a behaviour claim:
+    // the property holds the function, and calling through it runs it.
     for source in [
-        "const o = { f: function () { return 1; } }; return 0;",
-        "const o = {}; o.f = function () { return 1; }; return 0;",
-        "function g() { return 1; } const o = { f: g }; return 0;",
+        "const o = { f: function () { return 1; } }; return o.f();",
+        "const o = {}; o.f = function () { return 1; }; return o.f();",
+        "function g() { return 1; } const o = { f: g }; return o.f();",
     ] {
-        refuses_capability(source, "using a function as a value", Boundary::FullJs);
+        number(source, 1.0);
     }
 }
 
@@ -1433,12 +1466,10 @@ fn every_refusal_names_a_boundary_and_a_place() {
         "const o = {}; return \"a\" in o;",
         "const o = {}; return o instanceof Object;",
         "const o = {}; return new Object();",
-        "const o = {}; return Object.keys(o);",
         "const o = {}; return o?.a;",
         "const o = {}; const { a } = o; return 0;",
         "const o = {}; for (const k in o) { } return 0;",
         "const o = {}; return o.a ? 1 : 2;",
-        "const o = {}; o.f = function () { return 1; }; return 0;",
         "return [1, 2];",
         "const o = {}; return o.;",
         "const o = {}; return o[;",

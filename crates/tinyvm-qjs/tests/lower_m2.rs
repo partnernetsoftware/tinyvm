@@ -587,13 +587,19 @@ fn a_host_name_used_at_two_arities_is_refused() {
 
 /// Every refusal says what the *engine* cannot do, never that the script is
 /// wrong. These are the ones the lowering itself raises.
+///
+/// The lowering used to raise one more -- a function in a value position --
+/// and it does not any more: a function value is a table element index and a
+/// call through one is `call_indirect`. What is left here is the capture, and
+/// it is the one that matters: a captured binding needs an environment, and a
+/// silently miscompiled closure is the failure this refusal exists to prevent.
 #[test]
 fn the_lowering_names_its_own_boundary() {
-    let value = refuse("let f = function () { return 1; }; return 0;");
+    let e = refuse("function o() { let a = 1; function i() { return a; } return i(); }");
     assert!(
-        value.message.starts_with("this engine does not support "),
+        e.message.starts_with("this engine does not support "),
         "got {:?}",
-        value.message
+        e.message
     );
 }
 
@@ -613,7 +619,6 @@ fn a_capture_is_refused_rather_than_miscompiled() {
 fn every_refusal_speaks_for_the_engine() {
     for source in [
         "return 2 ** 3;",
-        "let f = function () { return 1; }; return 0;",
         "function o() { let a = 1; function i() { return a; } return i(); }",
     ] {
         let e = refuse(source);
@@ -926,23 +931,27 @@ fn the_remainder_operator_runs_in_both_spellings() {
     assert_eq!(run("let x = -5; return (x %= 3);"), Out::Number(-2.0));
 }
 
-/// The three conversions `runtime.rs` does not implement are reachable from
-/// source and must **trap**, not fabricate a value. A wrong number that flows
-/// on is indistinguishable from a real one.
+/// The three conversions are reachable from source and each one answers.
+/// `convert.rs` holds the algorithms; `runtime.rs` calls them from `__add`,
+/// `__to_number` and the relational four.
 #[test]
-fn an_unimplemented_conversion_traps_rather_than_guessing() {
-    for source in [
-        "return \"a\" + 1;",     // ToString of a Number
-        "return \"1\" - 1;",     // StringToNumber
-        "return \"a\" < \"b\";", // String relational comparison
-    ] {
-        match call(source, &[], &[]) {
-            Err(message) => assert!(
-                message.contains("trap in"),
-                "{source:?} failed for the wrong reason: {message}"
-            ),
-            Ok(value) => panic!("{source:?} produced {value:?} instead of trapping"),
-        }
+fn each_conversion_is_reachable_from_source() {
+    // ToString of a Number, StringToNumber, String relational comparison --
+    // reached through `+`, through `-`, and through `<`.
+    assert_eq!(
+        call("return \"a\" + 1;", &[], &[]),
+        Ok(Out::Str("a1".to_string()))
+    );
+    assert_eq!(call("return \"1\" - 1;", &[], &[]), Ok(Out::Number(0.0)));
+    assert_eq!(call("return \"a\" < \"b\";", &[], &[]), Ok(Out::Bool(true)));
+    // The conversion that is still missing is 7.1.1 ToPrimitive, which needs
+    // a prototype. Its operand is an Object, and it traps.
+    match call("const o = {}; return \"x\" + o;", &[], &[]) {
+        Err(message) => assert!(
+            message.contains("trap in"),
+            "an Object operand failed for the wrong reason: {message}"
+        ),
+        Ok(value) => panic!("\"x\" + o produced {value:?} instead of trapping"),
     }
 }
 

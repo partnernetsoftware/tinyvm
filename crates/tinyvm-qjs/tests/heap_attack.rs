@@ -531,7 +531,7 @@ fn overwriting_changes_type_without_moving() {
 }
 
 // =========================================================================
-// A8. Number keys, and the boundary `__num_to_str` refuses
+// A8. Number keys, over the whole of Number::toString
 // =========================================================================
 
 #[test]
@@ -553,14 +553,21 @@ fn a_number_key_and_its_string_are_one_property() {
     number("var o = {}; o[10 * 10] = 1; return o[\"100\"];", 1.0);
 }
 
-/// Outside the exact integer domain `__num_to_str` refuses loudly.
+/// There is no integer domain any more: `__to_string` runs the whole of
+/// 6.1.6.1.20, so a fractional, infinite or NaN key names a property.
 #[test]
-fn a_number_key_outside_the_exact_domain_traps() {
-    traps("var o = {}; return o[1/2];");
-    traps("var o = {}; return o[0/0];");
-    traps("var o = {}; return o[1/0];");
-    traps("var o = {}; return o[(0 - 2147483647) - 1];");
-    traps("var o = {}; o[1/2] = 1; return 0;");
+fn a_number_key_outside_the_integers_names_a_property() {
+    number("var o = {}; o[1/2] = 3; return o[\"0.5\"];", 3.0);
+    number("var o = {}; o[0/0] = 3; return o[\"NaN\"];", 3.0);
+    number("var o = {}; o[1/0] = 3; return o[\"Infinity\"];", 3.0);
+    number(
+        "var o = {}; o[(0 - 2147483647) - 1] = 3; return o[\"-2147483648\"];",
+        3.0,
+    );
+    // Reading an absent one is still `undefined` rather than a fault.
+    let (len, _, keys) = returned_record("var o = {}; o[1/2] = 1; return o;");
+    assert_eq!(len, 1);
+    assert_eq!(keys, vec!["0.5".to_string()]);
 }
 
 /// An Object as a key needs `ToPrimitive`, which needs a prototype.
@@ -574,7 +581,7 @@ fn an_object_key_traps() {
 // A9. Three hundred computed keys in a loop
 // =========================================================================
 
-/// Every key is a fresh `__num_to_str` record, so this is the object heap and
+/// Every key is a fresh `__num_to_string` record, so this is the object heap and
 /// the string heap interleaved three hundred times, plus seven reallocations.
 #[test]
 fn three_hundred_computed_keys_in_a_loop() {

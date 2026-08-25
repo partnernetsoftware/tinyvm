@@ -28,9 +28,19 @@
 //! | 3   | String    | guest pointer to `[len: i32][utf8 bytes]`  |
 //! | 4   | Null      | always 0                                   |
 //! | 5   | Object    | guest pointer to an object record          |
+//! | 6   | Function  | index of an element of the module's funcref table |
 //!
 //! `TAG_OBJECT` is 5 because it was the next free number when objects landed,
-//! and appending is the whole point: see *Dispatch order* below.
+//! and appending is the whole point: see *Dispatch order* below. `TAG_FUNCTION`
+//! is 6 for the same reason.
+//!
+//! A Function's payload is **not** a heap pointer, which is what makes it the
+//! one payload with no memory behind it. wasm MVP has no first-class function
+//! reference an `i64` could hold, so the only thing a value can carry that a
+//! call can act on is an index into the module's table, and `call_indirect` is
+//! the instruction that acts on it. The index is assigned by
+//! [`super::emit`] when a function first becomes a value, and element 0 is left
+//! null so that a zeroed payload is never a callable element.
 //!
 //! `TAG_UNDEFINED` is 0 so that a zero-initialised pair -- a fresh wasm local,
 //! a zeroed word of linear memory -- reads as `undefined`, which is exactly
@@ -56,6 +66,11 @@
 //! allocator hands out one address per object. So the existing `i64.eq` is
 //! already reference identity, and no arm was added for it.
 //!
+//! Function arrived into that same arm on the same terms. One function gets one
+//! element index however many times it is read, and two function expressions
+//! get two, so the payload comparison already is 7.2.15 step 4 -- and `===`
+//! again needed no new arm.
+//!
 //! # Dispatch order
 //!
 //! Every operator that inspects its operands' types pays one type test per arm
@@ -78,6 +93,15 @@
 //! `__to_number`, none of which an object-heavy script runs in a loop. The
 //! sites objects *do* run hot -- property get and set -- are functions of
 //! their own that test the receiver first, and say so there.
+//!
+//! Function was added under the same rule and cost the same: one arm appended
+//! last in `__typeof`, `__truthy` and `__to_number`, and nothing anywhere else.
+//! The site a function value *does* run hot is the call, and that site is not
+//! a dispatch ladder at all -- it is one [`require_tag`] against
+//! `TAG_FUNCTION`, which is one test whatever the tag domain grows to. That is
+//! the measured growth law's best case, and it is worth saying why it is
+//! reachable here and not at `__add`: a call has exactly one callable type to
+//! accept, where an operator has a matrix of operand pairs to sort.
 
 use tinyvm::Val;
 
@@ -121,6 +145,10 @@ pub(crate) enum Ins {
     BrIf(u32),
     Return,
     Call(u32),
+    /// `call_indirect(type, table)`: pop an element index off the stack, look
+    /// the funcref up in the table, and call it only if its signature is
+    /// *exactly* the named type (spec 4.4.8).
+    CallIndirect(u32, u32),
     Unreachable,
     Drop,
     // variables
@@ -196,6 +224,10 @@ pub(crate) const TAG_NULL: i32 = 4;
 /// [`super::runtime`] lays out. Appended rather than slotted in, for the
 /// reason the module header's *Dispatch order* section gives.
 pub(crate) const TAG_OBJECT: i32 = 5;
+/// A Function: the payload is the index of an element of the module's funcref
+/// table, and calling it is `call_indirect`. Appended rather than slotted in,
+/// for the reason the module header's *Dispatch order* section gives.
+pub(crate) const TAG_FUNCTION: i32 = 6;
 
 /// The wasm value types one JS value occupies, in stack order.
 pub(crate) const SLOTS: [ValType; 2] = [ValType::I32, ValType::I64];
@@ -208,7 +240,7 @@ pub(crate) const WIDTH: u32 = SLOTS.len() as u32;
 ///
 /// `String` is a guest pointer, not text: resolving it needs the instance's
 /// memory, which is the caller's to hold, not this module's.
-/// There is deliberately no `Object` variant. The public `crate::Value` this
+/// There is deliberately no `Object` variant and no `Function` one. The public `crate::Value` this
 /// mirrors has none either, and adding one here without adding one there is a
 /// half-open door: a host would receive a pointer it has no layout for and no
 /// way to keep alive. [`host_decode`] therefore refuses the tag by name, which
@@ -261,6 +293,20 @@ pub(crate) fn box_object(inner: &[Ins], out: &mut Vec<Ins>) {
     out.push(Ins::I32Const(TAG_OBJECT));
     out.extend_from_slice(inner);
     out.push(Ins::I64ExtendI32U);
+}
+
+/// A function value: `element` is the index of an element of the module's
+/// funcref table.
+///
+/// Unused when this module is compiled without `emit`, which is what
+/// `tests/repr_v1.rs` does -- the only producer of a function value is the
+/// lowering, because only the lowering knows which element a function took. A constant, like a string literal's address and unlike every
+/// other reference this engine has -- there is nothing to allocate, because a
+/// function has no per-value state to keep.
+#[allow(dead_code)]
+pub(crate) fn const_function(element: i32, out: &mut Vec<Ins>) {
+    out.push(Ins::I32Const(TAG_FUNCTION));
+    out.push(Ins::I64Const(i64::from(element)));
 }
 
 /// Bit-exact: the payload is the double's bits, so nothing is lost -- not the
@@ -328,6 +374,18 @@ pub(crate) fn unbox_object(base: u32, out: &mut Vec<Ins>) {
     out.push(Ins::I32WrapI64);
 }
 
+/// -> `i32` table element index. Traps when the value is not a Function --
+/// which is what makes `undefined()` a clean fault, raised before any table is
+/// touched, rather than a `call_indirect` into whatever the payload was.
+///
+/// Unused without `emit`, for the reason [`const_function`] gives.
+#[allow(dead_code)]
+pub(crate) fn unbox_function(base: u32, out: &mut Vec<Ins>) {
+    require_tag(base, TAG_FUNCTION, out);
+    out.push(Ins::LocalGet(base + 1));
+    out.push(Ins::I32WrapI64);
+}
+
 pub(crate) fn is_number(base: u32, out: &mut Vec<Ins>) {
     tag_is(base, TAG_NUMBER, out);
 }
@@ -350,6 +408,10 @@ pub(crate) fn is_null(base: u32, out: &mut Vec<Ins>) {
 
 pub(crate) fn is_object(base: u32, out: &mut Vec<Ins>) {
     tag_is(base, TAG_OBJECT, out);
+}
+
+pub(crate) fn is_function(base: u32, out: &mut Vec<Ins>) {
+    tag_is(base, TAG_FUNCTION, out);
 }
 
 /// `null` or `undefined` -- the one pair ECMA-262 7.2.14 lets `==` bridge.
@@ -435,6 +497,16 @@ pub(crate) fn host_decode(vals: &[Val]) -> Result<HostVal, String> {
         TAG_OBJECT => {
             return Err(
                 "V1: an Object is a guest heap reference; `Value` has no variant for one yet"
+                    .to_string(),
+            );
+        }
+        // Named rather than lumped into "unknown", for the reason the Object
+        // arm gives, and for one more: a function value is an index into
+        // *this module's* table, so it has no meaning at all on the other side
+        // of the boundary -- not even a meaning the host could learn.
+        TAG_FUNCTION => {
+            return Err(
+                "V1: a function is an index into this module's own table; `Value` has no variant for one"
                     .to_string(),
             );
         }

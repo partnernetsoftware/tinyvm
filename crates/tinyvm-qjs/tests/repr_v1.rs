@@ -31,13 +31,15 @@
 //! - `Ctx::func_base` is new: the experiment's modules had no imports, this
 //!   compiler's have `js.<name>`.
 
+#[path = "../src/convert.rs"]
+mod convert;
 #[path = "../src/repr.rs"]
 mod repr;
 #[path = "../src/runtime.rs"]
 mod runtime;
 
 use repr::{BlockType, HostVal, Ins, ValType};
-use runtime::{Ctx, FnBuild, Rt, StringPool, TypeNames};
+use runtime::{Conversions, Ctx, FnBuild, PrimNames, Rt, StringPool, TypeNames};
 use tinyvm::{Limits, Val, WasmModule};
 
 // =========================================================================
@@ -48,9 +50,23 @@ use tinyvm::{Limits, Val, WasmModule};
 struct Prog {
     pool: StringPool,
     ctx: Ctx,
+    cv: convert::Ctx,
     main: FnBuild,
     /// `main`'s results. One JS value unless the test says otherwise.
     results: Vec<ValType>,
+}
+
+/// The conversions are placed after the runtime, so `Rt`'s offsets are what
+/// they always were and `__alloc` is reached at its existing index.
+const CONVERT_BASE: u32 = runtime::SET.len() as u32;
+
+/// The three function indices [`Ctx`] names, given where the set was placed.
+fn conversions_at(base: u32) -> Conversions {
+    Conversions {
+        num_to_string: base + convert::Cv::NumToString.offset(),
+        str_to_num: base + convert::Cv::StrToNum.offset(),
+        str_cmp: base + convert::Cv::StrCmp.offset(),
+    }
 }
 
 /// What `main` returned.
@@ -71,6 +87,8 @@ impl Prog {
         // dispatch-order tests below build directly.
         let mut pool = StringPool::default();
         let type_names = Some(TypeNames::intern(&mut pool));
+        let prim_names = PrimNames::intern(&mut pool);
+        let cv_names = convert::Names::intern(&mut pool);
         Prog {
             pool,
             // No imports in these modules, so the runtime starts at 0, and one
@@ -79,7 +97,13 @@ impl Prog {
                 func_base: 0,
                 heap_global: 0,
                 type_names,
-                key_names: None,
+                prim_names,
+                conversions: conversions_at(CONVERT_BASE),
+            },
+            cv: convert::Ctx {
+                func_base: CONVERT_BASE,
+                runtime_base: 0,
+                names: cv_names,
             },
             main: FnBuild::new(0),
             results: vec![ValType::I32, ValType::I64],
@@ -100,7 +124,8 @@ impl Prog {
     }
 
     fn wat(&self) -> String {
-        let funcs = runtime::build(&self.ctx);
+        let mut funcs = runtime::build(&self.ctx);
+        funcs.extend(convert::build(&self.cv));
         let mut out = String::from("(module\n  (memory 1 16)\n");
         out.push_str(&format!(
             "  (global (mut i32) (i32.const {}))\n",
@@ -268,6 +293,7 @@ fn ins_wat(ins: &Ins) -> String {
         Ins::BrIf(d) => format!("br_if {d}"),
         Ins::Return => "return".into(),
         Ins::Call(i) => format!("call {i}"),
+        Ins::CallIndirect(ty, table) => format!("call_indirect {table} (type {ty})"),
         Ins::Unreachable => "unreachable".into(),
         Ins::Drop => "drop".into(),
         Ins::LocalGet(i) => format!("local.get {i}"),
@@ -458,7 +484,8 @@ fn add_tests_number_before_string() {
         func_base: 0,
         heap_global: 0,
         type_names: None,
-        key_names: None,
+        prim_names: PrimNames::intern(&mut StringPool::default()),
+        conversions: conversions_at(CONVERT_BASE),
     };
     let funcs = runtime::build(&ctx);
     let add = funcs
@@ -492,12 +519,18 @@ fn add_tests_number_before_string() {
 fn a_new_type_costs_nothing_at_a_site_that_never_sees_it() {
     // Null is the type this milestone added. Nothing that dispatches on Number
     // or String gained an arm for it: the arms live in `__to_number`,
-    // `__truthy` and the two equalities, which is where the cost is paid once.
+    // `__truthy`, the two equalities and `__to_string`, which is where the
+    // cost is paid once. `__to_string` is on that list because ToString has a
+    // fixed answer for `null` -- it always did, when it was called `__to_key`
+    // and its four constant records were gated on a computed member access;
+    // what changed is that the records are now unconditional, so the arm is
+    // there in a program that never writes one.
     let ctx = Ctx {
         func_base: 0,
         heap_global: 0,
         type_names: None,
-        key_names: None,
+        prim_names: PrimNames::intern(&mut StringPool::default()),
+        conversions: conversions_at(CONVERT_BASE),
     };
     let arms: Vec<&'static str> = runtime::build(&ctx)
         .iter()
@@ -512,7 +545,7 @@ fn a_new_type_costs_nothing_at_a_site_that_never_sees_it() {
         })
         .map(|f| f.name)
         .collect();
-    assert_eq!(arms, vec!["__eq", "__to_number", "__truthy"]);
+    assert_eq!(arms, vec!["__eq", "__to_number", "__truthy", "__to_string"]);
 }
 
 // =========================================================================
@@ -704,7 +737,8 @@ fn typeof_costs_nothing_in_a_program_that_never_asks() {
         func_base: 0,
         heap_global: 0,
         type_names: None,
-        key_names: None,
+        prim_names: PrimNames::intern(&mut StringPool::default()),
+        conversions: conversions_at(CONVERT_BASE),
     };
     let built = runtime::build(&ctx);
     let quiet_typeof = built
@@ -895,37 +929,79 @@ fn to_boolean_is_complete_over_the_five_types() {
 // =========================================================================
 
 #[test]
-fn the_three_unimplemented_conversions_trap_instead_of_guessing() {
-    // ToString of a Number: `"a" + 1`.
-    assert!(
-        Prog::binary(Rt::Add, V::Str("a"), V::Num(1.0))
-            .run()
-            .is_err()
+fn the_three_conversions_answer_where_they_used_to_trap() {
+    // This test is the previous milestone's
+    // `the_three_unimplemented_conversions_trap_instead_of_guessing`, turned
+    // over. Each line asserted a trap; each now asserts the answer, because
+    // `convert.rs` is wired into the operators that used to reach an
+    // `unreachable`.
+
+    // ToString of a Number, 6.1.6.1.20, at `__add`'s string branch.
+    assert_eq!(
+        Prog::binary(Rt::Add, V::Str("a"), V::Num(1.0)).string(),
+        "a1"
     );
-    assert!(
-        Prog::binary(Rt::Add, V::Num(1.0), V::Str("a"))
-            .run()
-            .is_err()
+    assert_eq!(
+        Prog::binary(Rt::Add, V::Num(1.0), V::Str("a")).string(),
+        "1a"
     );
-    // StringToNumber: `"1" - 1`, and `1 == "1"`.
-    assert!(
-        Prog::binary(Rt::Sub, V::Str("1"), V::Num(1.0))
-            .run()
-            .is_err()
+    // And the three answers 6.1.6.1.20 gives before its step 5.
+    assert_eq!(
+        Prog::binary(Rt::Add, V::Str(""), V::Num(f64::NAN)).string(),
+        "NaN"
     );
-    assert!(
-        Prog::binary(Rt::Eq, V::Num(1.0), V::Str("1"))
-            .run()
-            .is_err()
+    assert_eq!(
+        Prog::binary(Rt::Add, V::Str(""), V::Num(f64::INFINITY)).string(),
+        "Infinity"
     );
-    // String relational comparison: `"a" < "b"`.
-    assert!(
-        Prog::binary(Rt::Lt, V::Str("a"), V::Str("b"))
-            .run()
-            .is_err()
+    assert_eq!(
+        Prog::binary(Rt::Add, V::Str(""), V::Num(-0.0)).string(),
+        "0",
+        "step 2 gives -0 the String \"0\""
     );
-    // But `===` never coerces, so it answers all of these without trapping.
+
+    // StringToNumber, 7.1.4.1: `"1" - 1`, and `1 == "1"`.
+    assert_eq!(
+        Prog::binary(Rt::Sub, V::Str("1"), V::Num(1.0)).number(),
+        0.0
+    );
+    assert!(Prog::binary(Rt::Eq, V::Num(1.0), V::Str("1")).boolean());
+    assert!(Prog::binary(Rt::Eq, V::Num(0.0), V::Str("  ")).boolean());
+    assert!(
+        Prog::binary(Rt::Sub, V::Str("nope"), V::Num(1.0))
+            .number()
+            .is_nan(),
+        "a string the grammar does not accept is NaN, not a trap"
+    );
+
+    // String relational comparison, 7.2.13: `"a" < "b"`.
+    assert!(Prog::binary(Rt::Lt, V::Str("a"), V::Str("b")).boolean());
+    assert!(!Prog::binary(Rt::Lt, V::Str("b"), V::Str("a")).boolean());
+    assert!(Prog::binary(Rt::Le, V::Str("a"), V::Str("a")).boolean());
+    assert!(Prog::binary(Rt::Ge, V::Str("a"), V::Str("a")).boolean());
+    assert!(Prog::binary(Rt::Gt, V::Str("b"), V::Str("a")).boolean());
+    // Only *both* Strings take that path (7.2.13 step 3). A mixed pair runs
+    // ToNumeric on each, which is why this is `10 < 9` and not `"10" < "9"`.
+    assert!(!Prog::binary(Rt::Lt, V::Str("10"), V::Num(9.0)).boolean());
+    assert!(Prog::binary(Rt::Lt, V::Str("10"), V::Str("9")).boolean());
+
+    // `===` still never coerces.
     assert!(!Prog::binary(Rt::StrictEq, V::Num(1.0), V::Str("1")).boolean());
+}
+
+/// The one conversion still missing, and it is not one of the three: 7.1.1
+/// ToPrimitive needs the `valueOf`/`toString` a prototype would carry.
+#[test]
+fn coercing_an_object_still_traps_because_there_is_no_prototype() {
+    let mut p = Prog::new();
+    let a = p.text("");
+    p.emit(|b| repr::const_string(a, b));
+    p.emit(|b| {
+        b.push(Ins::I32Const(repr::TAG_OBJECT));
+        b.push(Ins::I64Const(0));
+    });
+    p.call(Rt::Add);
+    assert!(p.run().is_err(), "\"\" + {{}} has no ToPrimitive to run");
 }
 
 // ---- small helpers ------------------------------------------------------

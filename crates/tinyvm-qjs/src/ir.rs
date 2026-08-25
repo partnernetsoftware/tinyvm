@@ -134,6 +134,12 @@ pub(crate) mod m1 {
         BrIf(u32),
         Return,
         Call(u32),
+        /// `call_indirect(type, table)`. The type index is what the callee's
+        /// signature is matched against, exactly (spec 4.4.8), so this
+        /// instruction is only as expressive as the type section is -- which
+        /// is why [`super::super::emit`] interns one uniform signature for
+        /// every call through a value and adapts the arity around it.
+        CallIndirect(u32, u32),
         Unreachable,
         Drop,
         // variables
@@ -253,6 +259,27 @@ pub(crate) mod m1 {
         pub(crate) init: Const,
     }
 
+    /// A defined table. `funcref` is the only element type this compiler
+    /// emits: the table exists so a function value can be called, and a
+    /// function value is the only reference the representation has.
+    ///
+    /// No declared maximum, for the reason [`Memory`]'s minimum gives from the
+    /// other side: the table's size is fixed at compile time by how many
+    /// functions became values, so a maximum would restate the minimum.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct Table {
+        pub(crate) min: u32,
+        pub(crate) max: Option<u32>,
+    }
+
+    /// An active element segment in table 0: function indices written at
+    /// `offset` when the module instantiates.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct Elem {
+        pub(crate) offset: u32,
+        pub(crate) funcs: Vec<u32>,
+    }
+
     /// An active data segment in memory 0.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) struct Data {
@@ -273,9 +300,11 @@ pub(crate) mod m1 {
     pub(crate) struct Module {
         pub(crate) types: Vec<FuncType>,
         pub(crate) imports: Vec<Import>,
+        pub(crate) table: Option<Table>,
         pub(crate) memory: Option<Memory>,
         pub(crate) globals: Vec<Global>,
         pub(crate) funcs: Vec<Func>,
+        pub(crate) elements: Vec<Elem>,
         pub(crate) data: Vec<Data>,
         pub(crate) exports: Vec<Export>,
     }
@@ -289,8 +318,8 @@ pub(crate) mod m1 {
     // file, and it moves there whole.
 
     use crate::encode::{
-        self, ConstExpr, Data as EncData, FuncBody, ImportDesc, ImportEntry, MemOp, Op, Signature,
-        ValueType,
+        self, ConstExpr, Data as EncData, Element, FuncBody, ImportDesc, ImportEntry, MemOp, Op,
+        Signature, ValueType,
     };
 
     pub(crate) fn assemble(module: &Module) -> Vec<u8> {
@@ -344,6 +373,15 @@ pub(crate) mod m1 {
                 },
             })
             .collect();
+        let elements: Vec<Element> = module
+            .elements
+            .iter()
+            .map(|e| Element::ActiveFuncs {
+                table: 0,
+                offset: ConstExpr::I32(e.offset as i32),
+                funcs: e.funcs.clone(),
+            })
+            .collect();
         let data: Vec<EncData> = module
             .data
             .iter()
@@ -361,6 +399,18 @@ pub(crate) mod m1 {
             encode::import_section(&mut out, &imports);
         }
         encode::function_section(&mut out, &type_indices);
+        if let Some(table) = module.table {
+            encode::table_section(
+                &mut out,
+                &[encode::TableType {
+                    element: ValueType::FuncRef,
+                    limits: encode::Limits {
+                        min: table.min,
+                        max: table.max,
+                    },
+                }],
+            );
+        }
         if let Some(memory) = module.memory {
             encode::memory_section(
                 &mut out,
@@ -374,6 +424,9 @@ pub(crate) mod m1 {
             encode::global_section(&mut out, &globals);
         }
         encode::export_section(&mut out, &exports);
+        if !elements.is_empty() {
+            encode::element_section(&mut out, &elements);
+        }
         encode::code_section(&mut out, &bodies);
         // No data-count section: it is required only by `memory.init` and
         // `data.drop`, and this compiler emits neither.
@@ -450,6 +503,7 @@ pub(crate) mod m1 {
             Ins::BrIf(depth) => encode::br_if(out, depth),
             Ins::Return => encode::op(out, Op::Return),
             Ins::Call(index) => encode::call(out, index),
+            Ins::CallIndirect(ty, table) => encode::call_indirect(out, ty, table),
             Ins::Unreachable => encode::op(out, Op::Unreachable),
             Ins::Drop => encode::op(out, Op::Drop),
             Ins::LocalGet(i) => encode::local_get(out, i),

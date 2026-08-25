@@ -55,9 +55,9 @@
 
 use super::repr::{
     self, BlockType, Ins, ValType, WIDTH, box_bool, box_number, box_string, const_bool,
-    const_string, const_undefined, is_bool, is_null, is_nullish, is_number, is_object, is_string,
-    is_undefined, load_local, same_type, store_local, unbox_bool, unbox_number, unbox_object,
-    unbox_string,
+    const_string, const_undefined, is_bool, is_function, is_null, is_nullish, is_number, is_object,
+    is_string, is_undefined, load_local, same_type, store_local, unbox_bool, unbox_number,
+    unbox_object, unbox_string,
 };
 
 /// Byte 0..8 is left out of the data segment so a null pointer is never a
@@ -138,9 +138,8 @@ pub(crate) enum Rt {
     Alloc,
     StrConcat,
     StrEq,
-    // Objects. Appended, so every existing function keeps its index.
-    NumToStr,
-    ToKey,
+    // Objects, and the ToString every property key runs through.
+    ToStr,
     ObjNew,
     ObjFind,
     ObjGet,
@@ -170,8 +169,7 @@ pub(crate) const SET: &[Rt] = &[
     Rt::Alloc,
     Rt::StrConcat,
     Rt::StrEq,
-    Rt::NumToStr,
-    Rt::ToKey,
+    Rt::ToStr,
     Rt::ObjNew,
     Rt::ObjFind,
     Rt::ObjGet,
@@ -205,8 +203,7 @@ impl Rt {
             Rt::Alloc => "__alloc",
             Rt::StrConcat => "__str_concat",
             Rt::StrEq => "__str_eq",
-            Rt::NumToStr => "__num_to_str",
-            Rt::ToKey => "__to_key",
+            Rt::ToStr => "__to_string",
             Rt::ObjNew => "__obj_new",
             Rt::ObjFind => "__obj_find",
             Rt::ObjGet => "__obj_get",
@@ -248,6 +245,10 @@ pub(crate) struct TypeNames {
     pub(crate) undefined: i32,
     /// 13.5.3 step 3: the name of the Null type is `"object"`.
     pub(crate) object: i32,
+    /// 13.5.3 step 6: a callable answers `"function"` -- the one answer that
+    /// is not the name of an ECMA-262 language type, because a function *is*
+    /// an Object in the spec and is its own tag here.
+    pub(crate) function: i32,
 }
 
 impl TypeNames {
@@ -259,30 +260,35 @@ impl TypeNames {
             boolean: pool.intern("boolean"),
             undefined: pool.intern("undefined"),
             object: pool.intern("object"),
+            function: pool.intern("function"),
         }
     }
 }
 
-/// The three fixed Strings `ToPropertyKey` answers with for a Boolean, `null`
-/// and `undefined` (ECMA-262 7.1.19 over 7.1.17), as guest addresses.
+/// The four fixed Strings `ToString` answers with for a Boolean, `null` and
+/// `undefined` (ECMA-262 7.1.17), as guest addresses.
 ///
-/// Interned only for a program that writes a *computed* member access: a
-/// static `o.a` never runs `ToPropertyKey` at all -- 13.3.2.1 takes the String
-/// value of the IdentifierName directly -- so a program with only dotted
-/// access should not carry these records.
+/// **Interned unconditionally, and that is a change from when they were
+/// `ToPropertyKey`'s.** They used to be gated on the program writing a
+/// *computed* member access, which a scan settles exactly. `__to_string` is
+/// now also what `+` reaches when either operand is a String, and the gate
+/// for *that* is "does this program contain an addition anywhere", counting
+/// `+=` and every desugaring of it. An over-approximation costs the four
+/// records; an under-approximation is a trap where an answer was due. Four
+/// records are about 30 bytes against the 6.8 KiB of conversions every module
+/// already carries, so the predicate is not worth its own risk.
+///
+/// [`TypeNames`] keeps its gate, because `typeof` is a syntactic construct and
+/// the scan settles it with no approximation at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct KeyNames {
+pub(crate) struct PrimNames {
     pub(crate) yes: i32,
     pub(crate) no: i32,
     pub(crate) null: i32,
     pub(crate) undefined: i32,
 }
 
-impl KeyNames {
-    /// Unused when this module is compiled without `emit`, which is what
-    /// `tests/repr_v1.rs` does -- only the lowering's scan knows whether a
-    /// program has a computed access.
-    #[allow(dead_code)]
+impl PrimNames {
     pub(crate) fn intern(pool: &mut StringPool) -> Self {
         Self {
             yes: pool.intern("true"),
@@ -291,6 +297,24 @@ impl KeyNames {
             undefined: pool.intern("undefined"),
         }
     }
+}
+
+/// Where the three ECMA-262 conversions [`super::convert`] emits live, as
+/// function indices in the module being built.
+///
+/// Indices and not a `Cv`, so this module does not depend on that one. The
+/// runtime needs *three functions*; which set they came from and where that
+/// set was placed is the lowering's business. It is also what lets
+/// `tests/repr_v1.rs` keep including this file without including the 23
+/// functions of bignum beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Conversions {
+    /// `(f64) -> i32`: 6.1.6.1.20 Number::toString, shortest round-tripping.
+    pub(crate) num_to_string: u32,
+    /// `(i32) -> f64`: 7.1.4.1 StringToNumber over the whole grammar.
+    pub(crate) str_to_num: u32,
+    /// `(i32, i32) -> i32`: 7.2.13's code-unit order, as -1, 0 or 1.
+    pub(crate) str_cmp: u32,
 }
 
 /// What the runtime needs to know about the module it is being spliced into.
@@ -309,15 +333,29 @@ pub(crate) struct Ctx {
     /// of guest memory and shift every other literal's address, in a module
     /// that may have no `typeof` in it at all.
     pub(crate) type_names: Option<TypeNames>,
-    /// Where `__to_key`'s three constant answers live, or `None` for a program
-    /// that never writes a computed member access. See [`KeyNames`].
-    pub(crate) key_names: Option<KeyNames>,
+    /// Where `__to_string`'s four constant answers live. See [`PrimNames`]
+    /// for why this one is not an `Option`.
+    pub(crate) prim_names: PrimNames,
+    /// Where the three conversions live. See [`Conversions`].
+    pub(crate) conversions: Conversions,
 }
 
 impl Ctx {
     /// The call every lowering site emits.
     pub(crate) fn call(&self, rt: Rt) -> Ins {
         Ins::Call(self.func_base + rt.offset())
+    }
+
+    fn num_to_string(&self) -> Ins {
+        Ins::Call(self.conversions.num_to_string)
+    }
+
+    fn str_to_num(&self) -> Ins {
+        Ins::Call(self.conversions.str_to_num)
+    }
+
+    fn str_cmp(&self) -> Ins {
+        Ins::Call(self.conversions.str_cmp)
     }
 }
 
@@ -357,8 +395,7 @@ fn one(ctx: &Ctx, rt: Rt) -> RtFunc {
             vec![ValType::I32],
             str_eq(),
         ),
-        Rt::NumToStr => (vec![ValType::F64], vec![ValType::I32], num_to_str(ctx)),
-        Rt::ToKey => (values(1), vec![ValType::I32], to_key(ctx)),
+        Rt::ToStr => (values(1), vec![ValType::I32], to_string(ctx)),
         Rt::ObjNew => (vec![ValType::I32], vec![ValType::I32], obj_new(ctx)),
         Rt::ObjFind => (
             vec![ValType::I32, ValType::I32, ValType::I32],
@@ -584,6 +621,9 @@ fn type_of(ctx: &Ctx) -> FnBuild {
         // ordinary Object the same one. Two arms, one string.
         (is_null, names.object),
         (is_object, names.object),
+        // Appended last, so no type that existed before functions did pays a
+        // test for them -- the rule `repr`'s *Dispatch order* states.
+        (is_function, names.function),
     ] {
         test(0, &mut f.body);
         f.body.push(Ins::If(BlockType::Empty));
@@ -622,24 +662,22 @@ fn add(ctx: &Ctx) -> FnBuild {
     f.body.push(Ins::Return);
     f.body.push(Ins::End);
 
+    // 13.15.3 step 1.d: *either* side a String makes this the string branch,
+    // and both sides then run ToString. Not "both sides already Strings" --
+    // that was this arm while `__to_string` could only answer for one type,
+    // and it is the narrowing the README used to describe.
     is_string(0, &mut f.body);
     is_string(WIDTH, &mut f.body);
     f.body.push(Ins::I32Or);
     f.body.push(Ins::If(BlockType::Empty));
-    is_string(0, &mut f.body);
-    is_string(WIDTH, &mut f.body);
-    f.body.push(Ins::I32And);
-    f.body.push(Ins::If(BlockType::Empty));
     let mut inner = Vec::new();
-    unbox_string(0, &mut inner);
-    unbox_string(WIDTH, &mut inner);
+    load_local(0, &mut inner);
+    inner.push(ctx.call(Rt::ToStr));
+    load_local(WIDTH, &mut inner);
+    inner.push(ctx.call(Rt::ToStr));
     inner.push(ctx.call(Rt::StrConcat));
     box_string(&inner, &mut f.body);
     f.body.push(Ins::Return);
-    f.body.push(Ins::End);
-    // One side is a String and the other is not: ToString of a Number, a
-    // Boolean, null or undefined is not implemented yet.
-    f.body.push(Ins::Unreachable);
     f.body.push(Ins::End);
 
     // Neither side is a String, so this is the numeric branch of the spec.
@@ -672,11 +710,20 @@ fn relational(ctx: &Ctx, op: Ins) -> FnBuild {
     f.body.push(Ins::Return);
     f.body.push(Ins::End);
 
+    // 7.2.13 step 3: the code-unit comparison happens only when *both* sides
+    // are Strings. A mixed pair falls through to step 4 and runs ToNumeric on
+    // each, which is why this test is an `and` where `__add`'s is an `or`.
     is_string(0, &mut f.body);
     is_string(WIDTH, &mut f.body);
-    f.body.push(Ins::I32Or);
+    f.body.push(Ins::I32And);
     f.body.push(Ins::If(BlockType::Empty));
-    f.body.push(Ins::Unreachable);
+    let mut inner = Vec::new();
+    unbox_string(0, &mut inner);
+    unbox_string(WIDTH, &mut inner);
+    inner.push(ctx.str_cmp());
+    inner.extend_from_slice(sign_test(op));
+    box_bool(&inner, &mut f.body);
+    f.body.push(Ins::Return);
     f.body.push(Ins::End);
 
     let mut inner = Vec::new();
@@ -685,6 +732,29 @@ fn relational(ctx: &Ctx, op: Ins) -> FnBuild {
     inner.push(op);
     box_bool(&inner, &mut f.body);
     f
+}
+
+/// Turn `__str_cmp`'s answer into the answer the operator wants. The stack
+/// already holds it when this run starts.
+///
+/// `__str_cmp` answers with exactly -1, 0 or 1 -- its own doc comment says so
+/// and every `return` in it pushes one of the three -- so each of the four
+/// tests is one equality against one constant rather than a signed
+/// comparison. That is not a shortcut around a missing opcode; it is what a
+/// three-valued answer makes true. `repr`'s instruction set does happen to
+/// lack `i32.gt_s` and `i32.le_s`, which is how the narrowness got noticed.
+fn sign_test(op: Ins) -> &'static [Ins] {
+    match op {
+        // c < 0, and over {-1, 0, 1} that is c == -1.
+        Ins::F64Lt => &[Ins::I32Const(-1), Ins::I32Eq],
+        // c > 0
+        Ins::F64Gt => &[Ins::I32Const(1), Ins::I32Eq],
+        // c <= 0, that is c != 1
+        Ins::F64Le => &[Ins::I32Const(1), Ins::I32Ne],
+        // c >= 0, that is c != -1
+        Ins::F64Ge => &[Ins::I32Const(-1), Ins::I32Ne],
+        _ => unreachable!("relational is built with one of the four f64 comparisons"),
+    }
 }
 
 // ---- equality -----------------------------------------------------------
@@ -763,13 +833,9 @@ fn loose_eq(ctx: &Ctx) -> FnBuild {
     f.body.push(Ins::Return);
     f.body.push(Ins::End);
 
-    is_string(0, &mut f.body);
-    is_string(WIDTH, &mut f.body);
-    f.body.push(Ins::I32Or);
-    f.body.push(Ins::If(BlockType::Empty));
-    f.body.push(Ins::Unreachable);
-    f.body.push(Ins::End);
-
+    // Steps 4 to 9: a String opposite a Number or a Boolean is settled by
+    // ToNumber on each, and `__to_number` now has the String arm 7.1.4.1
+    // needs. No arm of its own: the two-sided ToNumber below *is* those steps.
     let mut inner = Vec::new();
     to_number_of(ctx, 0, &mut inner);
     to_number_of(ctx, WIDTH, &mut inner);
@@ -799,7 +865,7 @@ fn negated(ctx: &Ctx, of: Rt) -> FnBuild {
 /// ECMA-262 7.1.4, ToNumber. One arm per type, so no other function needs a
 /// numeric-coercion arm of its own -- which is why the type count costs
 /// `__sub`, `__mul`, `__div` and `__neg` nothing.
-fn to_number(_ctx: &Ctx) -> FnBuild {
+fn to_number(ctx: &Ctx) -> FnBuild {
     let mut f = FnBuild::new(WIDTH);
 
     is_number(0, &mut f.body);
@@ -808,11 +874,13 @@ fn to_number(_ctx: &Ctx) -> FnBuild {
     f.body.push(Ins::Return);
     f.body.push(Ins::End);
 
-    // 7.1.4.1 StringToNumber: the StringNumericLiteral grammar is not
-    // implemented, so a String reaching arithmetic is a hard stop.
+    // 7.1.4 step 3 over 7.1.4.1 StringToNumber, which is the whole
+    // `StringNumericLiteral` grammar and lives in [`super::convert`].
     is_string(0, &mut f.body);
     f.body.push(Ins::If(BlockType::Empty));
-    f.body.push(Ins::Unreachable);
+    unbox_string(0, &mut f.body);
+    f.body.push(ctx.str_to_num());
+    f.body.push(Ins::Return);
     f.body.push(Ins::End);
 
     is_bool(0, &mut f.body);
@@ -839,6 +907,15 @@ fn to_number(_ctx: &Ctx) -> FnBuild {
     // not have. Written as its own arm rather than left to the fallthrough, so
     // that the fallthrough keeps meaning "not built by this engine".
     is_object(0, &mut f.body);
+    f.body.push(Ins::If(BlockType::Empty));
+    f.body.push(Ins::Unreachable);
+    f.body.push(Ins::End);
+
+    // A function is an Object for the same step, and reaches the same missing
+    // algorithm -- `Function.prototype.toString` is a prototype method and
+    // there is no prototype. Appended last, and written out for the same
+    // reason the Object arm is.
+    is_function(0, &mut f.body);
     f.body.push(Ins::If(BlockType::Empty));
     f.body.push(Ins::Unreachable);
     f.body.push(Ins::End);
@@ -894,6 +971,14 @@ fn truthy(_ctx: &Ctx) -> FnBuild {
     // 7.1.2 step 8: an Object is always true. Not "an object with properties"
     // -- `{}` is truthy, which is the case an emptiness shortcut gets wrong.
     is_object(0, &mut f.body);
+    f.body.push(Ins::If(BlockType::Empty));
+    f.body.push(Ins::I32Const(1));
+    f.body.push(Ins::Return);
+    f.body.push(Ins::End);
+
+    // The same step 8: a function is an Object, so it is true -- including a
+    // function with no parameters and an empty body. Appended last.
+    is_function(0, &mut f.body);
     f.body.push(Ins::If(BlockType::Empty));
     f.body.push(Ins::I32Const(1));
     f.body.push(Ins::Return);
@@ -1252,7 +1337,7 @@ fn obj_new(ctx: &Ctx) -> FnBuild {
 ///
 /// Byte equality through `__str_eq`, not pointer equality: the string pool
 /// interns equal *literals*, but a key computed at run time -- `o["a" + "b"]`,
-/// or the digits `__num_to_str` just allocated -- is a fresh record. Comparing
+/// or the digits `__num_to_string` just allocated -- is a fresh record. Comparing
 /// pointers would make `o[1]` and `o["1"]` two properties, which is the exact
 /// thing ECMA-262 7.1.19 says they are not.
 fn obj_find(ctx: &Ctx) -> FnBuild {
@@ -1507,8 +1592,14 @@ fn obj_set(ctx: &Ctx) -> FnBuild {
     f
 }
 
-/// `__to_key(value) -> i32`: ECMA-262 7.1.19 ToPropertyKey, over the five
+/// `__to_string(value) -> i32`: ECMA-262 7.1.17 ToString, over the five
 /// primitive types, answering with a string record.
+///
+/// This is also 7.1.19 ToPropertyKey. Step 1 passes a Symbol through
+/// unchanged and there are no Symbols here, so ToPropertyKey *reduces* to
+/// ToString and the two are one function rather than two that agree. It used
+/// to be called `__to_key`, because a computed member access was the only
+/// caller; `+` is now the other one.
 ///
 /// # Dispatch order
 ///
@@ -1521,11 +1612,16 @@ fn obj_set(ctx: &Ctx) -> FnBuild {
 /// noise. Only this function and [`obj_get`] depart, and only here is it
 /// written down twice.
 ///
-/// # Symbols
+/// # The Number arm is the whole algorithm now
 ///
-/// 7.1.19 step 1 passes a Symbol through unchanged, and there are no Symbols
-/// in this engine, so the algorithm reduces to ToString of the primitive.
-fn to_key(ctx: &Ctx) -> FnBuild {
+/// It calls `__num_to_string`, [`super::convert`]'s shortest-round-tripping
+/// 6.1.6.1.20. The integer-only `__num_to_str` this arm used to call is gone
+/// with it: it existed because the general algorithm did not, and keeping a
+/// second Number::toString that is exact on a subset would be two answers to
+/// one question. `o[0.5]`, `o[NaN]` and `o[1/0]` therefore name the properties
+/// `"0.5"`, `"NaN"` and `"Infinity"`, which is what the spec says and what
+/// three tests used to record as a divergence.
+fn to_string(ctx: &Ctx) -> FnBuild {
     let mut f = FnBuild::new(WIDTH);
 
     is_string(0, &mut f.body);
@@ -1537,201 +1633,38 @@ fn to_key(ctx: &Ctx) -> FnBuild {
     is_number(0, &mut f.body);
     f.body.push(Ins::If(BlockType::Empty));
     unbox_number(0, &mut f.body);
-    f.body.push(ctx.call(Rt::NumToStr));
+    f.body.push(ctx.num_to_string());
     f.body.push(Ins::Return);
     f.body.push(Ins::End);
 
-    // The three constant answers. `None` means the program contains no
-    // computed member access, so nothing calls this function at all and the
-    // records those arms would need should not be in the data segment.
-    if let Some(names) = ctx.key_names {
-        is_bool(0, &mut f.body);
-        f.body.push(Ins::If(BlockType::Empty));
-        unbox_bool(0, &mut f.body);
-        f.body.push(Ins::If(BlockType::Empty));
-        f.body.push(Ins::I32Const(names.yes));
-        f.body.push(Ins::Return);
-        f.body.push(Ins::End);
-        f.body.push(Ins::I32Const(names.no));
-        f.body.push(Ins::Return);
-        f.body.push(Ins::End);
+    let names = ctx.prim_names;
+    is_bool(0, &mut f.body);
+    f.body.push(Ins::If(BlockType::Empty));
+    unbox_bool(0, &mut f.body);
+    f.body.push(Ins::If(BlockType::Empty));
+    f.body.push(Ins::I32Const(names.yes));
+    f.body.push(Ins::Return);
+    f.body.push(Ins::End);
+    f.body.push(Ins::I32Const(names.no));
+    f.body.push(Ins::Return);
+    f.body.push(Ins::End);
 
-        for (test, at) in [
-            (is_null as fn(u32, &mut Vec<Ins>), names.null),
-            (is_undefined, names.undefined),
-        ] {
-            test(0, &mut f.body);
-            f.body.push(Ins::If(BlockType::Empty));
-            f.body.push(Ins::I32Const(at));
-            f.body.push(Ins::Return);
-            f.body.push(Ins::End);
-        }
+    for (test, at) in [
+        (is_null as fn(u32, &mut Vec<Ins>), names.null),
+        (is_undefined, names.undefined),
+    ] {
+        test(0, &mut f.body);
+        f.body.push(Ins::If(BlockType::Empty));
+        f.body.push(Ins::I32Const(at));
+        f.body.push(Ins::Return);
+        f.body.push(Ins::End);
     }
 
-    // An Object key would need 7.1.1 ToPrimitive, which needs a prototype.
-    // Reached also by a Boolean, `null` or `undefined` key in a program the
-    // scan said had no computed access -- which cannot happen, because such a
-    // program never calls this.
+    // An Object or a Function would need 7.1.1 ToPrimitive, which needs the
+    // `toString`/`valueOf` a prototype would carry, and there is no prototype.
+    // The one conversion this milestone did *not* bring in, and the reason
+    // `"" + {}` and `o[{}]` both still trap.
     f.body.push(Ins::Unreachable);
-    f
-}
-
-/// `__num_to_str(x) -> i32`: ECMA-262 6.1.6.1.20 Number::toString, for the
-/// integers it is exact on, as a fresh string record.
-///
-/// # What this implements, and what it refuses
-///
-/// The general algorithm needs the shortest decimal that round-trips -- the
-/// Ryū/Grisu problem -- and this engine does not have it; that is the
-/// `ToString` gap this module's header already names for `"a" + 1`. What it
-/// *does* have is the case the property-key rule actually needs: an
-/// integer-valued Number, whose decimal expansion is exact and short.
-///
-/// The accepted domain is the integers with |x| ≤ `i32::MAX`. Not a rounding
-/// of the spec's domain but a subset of it, refused loudly at the edge:
-/// a fractional value, a NaN, an infinity and anything larger each reach
-/// `unreachable` rather than a fabricated key. `-0` answers `"0"`, which is
-/// 6.1.6.1.20 step 2 and is why the sign is read off the `f64` and not off the
-/// truncated `i32`.
-///
-/// `i32::MIN` is outside the domain on purpose: `0 - i32::MIN` wraps rather
-/// than trapping in wasm, and a digit loop fed a negative accumulator would
-/// spin. Bounding by `i32::MAX` in `f64` before the truncation excludes it,
-/// and makes `i32.trunc_f64_s` unable to trap on its own -- every refusal here
-/// is this function's own `unreachable`.
-fn num_to_str(ctx: &Ctx) -> FnBuild {
-    let mut f = FnBuild::new(1);
-    let n = f.local(ValType::I32);
-    let neg = f.local(ValType::I32);
-    let len = f.local(ValType::I32);
-    let q = f.local(ValType::I32);
-    let p = f.local(ValType::I32);
-    let w = f.local(ValType::I32);
-    let b = &mut f.body;
-
-    // Not an integer -- which a NaN also fails, since `NaN != NaN`.
-    b.push(Ins::LocalGet(0));
-    b.push(Ins::F64Trunc);
-    b.push(Ins::LocalGet(0));
-    b.push(Ins::F64Ne);
-    b.push(Ins::If(BlockType::Empty));
-    b.push(Ins::Unreachable);
-    b.push(Ins::End);
-    // Outside the exact domain -- which an infinity also fails.
-    b.push(Ins::LocalGet(0));
-    b.push(Ins::F64Abs);
-    b.push(Ins::F64Const(f64::from(i32::MAX)));
-    b.push(Ins::F64Gt);
-    b.push(Ins::If(BlockType::Empty));
-    b.push(Ins::Unreachable);
-    b.push(Ins::End);
-    // The sign comes off the double, so `-0` is not negative: 6.1.6.1.20
-    // step 2 gives `-0` the String "0".
-    b.push(Ins::LocalGet(0));
-    b.push(Ins::F64Const(0.0));
-    b.push(Ins::F64Lt);
-    b.push(Ins::LocalSet(neg));
-    b.push(Ins::LocalGet(0));
-    b.push(Ins::I32TruncF64S);
-    b.push(Ins::LocalSet(n));
-
-    // Zero has no digits to extract, so it is its own arm rather than a
-    // special case inside the loop.
-    b.push(Ins::LocalGet(n));
-    b.push(Ins::I32Eqz);
-    b.push(Ins::If(BlockType::Empty));
-    b.push(Ins::I32Const(STRING_HEADER + 1));
-    b.push(ctx.call(Rt::Alloc));
-    b.push(Ins::LocalSet(p));
-    b.push(Ins::LocalGet(p));
-    b.push(Ins::I32Const(1));
-    b.push(Ins::I32Store(ALIGN_WORD, 0));
-    b.push(Ins::LocalGet(p));
-    b.push(Ins::I32Const(i32::from(b'0')));
-    b.push(Ins::I32Store8(0, STRING_HEADER as u32));
-    b.push(Ins::LocalGet(p));
-    b.push(Ins::Return);
-    b.push(Ins::End);
-
-    b.push(Ins::LocalGet(neg));
-    b.push(Ins::If(BlockType::Empty));
-    b.push(Ins::I32Const(0));
-    b.push(Ins::LocalGet(n));
-    b.push(Ins::I32Sub);
-    b.push(Ins::LocalSet(n));
-    b.push(Ins::End);
-
-    // How many digits, so the record can be allocated at its final size.
-    b.push(Ins::I32Const(0));
-    b.push(Ins::LocalSet(len));
-    b.push(Ins::LocalGet(n));
-    b.push(Ins::LocalSet(q));
-    b.push(Ins::Block(BlockType::Empty));
-    b.push(Ins::Loop(BlockType::Empty));
-    b.push(Ins::LocalGet(q));
-    b.push(Ins::I32Eqz);
-    b.push(Ins::BrIf(1));
-    b.push(Ins::LocalGet(q));
-    b.push(Ins::I32Const(10));
-    b.push(Ins::I32DivS);
-    b.push(Ins::LocalSet(q));
-    b.push(Ins::LocalGet(len));
-    b.push(Ins::I32Const(1));
-    b.push(Ins::I32Add);
-    b.push(Ins::LocalSet(len));
-    b.push(Ins::Br(0));
-    b.push(Ins::End);
-    b.push(Ins::End);
-
-    // `w` is the total byte count, and then the cursor that walks back over it.
-    b.push(Ins::LocalGet(len));
-    b.push(Ins::LocalGet(neg));
-    b.push(Ins::I32Add);
-    b.push(Ins::LocalSet(w));
-    b.push(Ins::I32Const(STRING_HEADER));
-    b.push(Ins::LocalGet(w));
-    b.push(Ins::I32Add);
-    b.push(ctx.call(Rt::Alloc));
-    b.push(Ins::LocalSet(p));
-    b.push(Ins::LocalGet(p));
-    b.push(Ins::LocalGet(w));
-    b.push(Ins::I32Store(ALIGN_WORD, 0));
-    b.push(Ins::LocalGet(neg));
-    b.push(Ins::If(BlockType::Empty));
-    b.push(Ins::LocalGet(p));
-    b.push(Ins::I32Const(i32::from(b'-')));
-    b.push(Ins::I32Store8(0, STRING_HEADER as u32));
-    b.push(Ins::End);
-
-    // Digits back to front, which is the order `% 10` produces them in.
-    b.push(Ins::LocalGet(n));
-    b.push(Ins::LocalSet(q));
-    b.push(Ins::Block(BlockType::Empty));
-    b.push(Ins::Loop(BlockType::Empty));
-    b.push(Ins::LocalGet(q));
-    b.push(Ins::I32Eqz);
-    b.push(Ins::BrIf(1));
-    b.push(Ins::LocalGet(w));
-    b.push(Ins::I32Const(1));
-    b.push(Ins::I32Sub);
-    b.push(Ins::LocalSet(w));
-    b.push(Ins::LocalGet(p));
-    b.push(Ins::LocalGet(w));
-    b.push(Ins::I32Add);
-    b.push(Ins::LocalGet(q));
-    b.push(Ins::I32Const(10));
-    b.push(Ins::I32RemS);
-    b.push(Ins::I32Const(i32::from(b'0')));
-    b.push(Ins::I32Add);
-    b.push(Ins::I32Store8(0, STRING_HEADER as u32));
-    b.push(Ins::LocalGet(q));
-    b.push(Ins::I32Const(10));
-    b.push(Ins::I32DivS);
-    b.push(Ins::LocalSet(q));
-    b.push(Ins::Br(0));
-    b.push(Ins::End);
-    b.push(Ins::End);
-    b.push(Ins::LocalGet(p));
     f
 }
 

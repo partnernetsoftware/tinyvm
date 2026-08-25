@@ -188,9 +188,12 @@ fn emit(expr: &Expr, hosts: &[String], out: &mut Vec<Ins>) {
 /// ```text
 /// function index 0..I     the host imports, `js.<name>`, sorted by name
 ///                 I..I+R  the emitted runtime, in `runtime::SET` order
-///                 I+R..   the script, then every nested function by FuncId
+///                 I+R..U  the script, then every nested function by FuncId
+///                 U..     one adapter per function that became a value
 /// global    index 0       the bump-allocation pointer
 ///                 1..     two globals per script binding
+/// table     element 0     left null on purpose
+///                 1..     the adapters, in the order the values asked for them
 /// ```
 ///
 /// The script is exported as [`ENTRY`]. It is an ordinary function of the
@@ -206,8 +209,6 @@ fn emit(expr: &Expr, hosts: &[String], out: &mut Vec<Ins>) {
 /// made from the *binding*, never from the `Res` variant: `Res::Local` and
 /// `Res::Global` say where the reference is, not where the storage is.
 ///
-/// # Where the `end`s come from
-///
 /// Nothing here emits `else`. [`super::repr`]'s instruction set has no such
 /// variant, and the two-block form below needs none:
 ///
@@ -222,6 +223,42 @@ fn emit(expr: &Expr, hosts: &[String], out: &mut Vec<Ins>) {
 /// end
 /// ```
 ///
+/// # Calling a value, and why there is an adapter
+///
+/// wasm MVP has no first-class function reference, so a function *value* is an
+/// index into the module's funcref table and calling one is `call_indirect`.
+/// `call_indirect` matches the callee's signature exactly (spec 4.4.8);
+/// JavaScript's calls do not match anything -- a missing argument is
+/// `undefined` (ECMA-262 8.6.1) and a surplus one is evaluated and dropped
+/// (13.3.8.1). Those two facts cannot both be true of one instruction, so
+/// something has to reconcile them, and the choice of *where* is the whole
+/// design:
+///
+/// * **At the call site**, by dispatching on the callee's arity at run time.
+///   Rejected: the arity would have to ride in the payload, and every call site
+///   would grow one `call_indirect` per arity the module contains.
+/// * **In the callee**, by giving every user function one wide signature.
+///   Rejected: a single eight-parameter function anywhere in a script would
+///   then make every zero-argument *direct* call push eight `undefined` pairs.
+///   The cost of the new capability would land on code that never uses it.
+/// * **In an adapter**, which is what this does. The table holds one adapter
+///   per function that became a value, all of one uniform signature; the
+///   adapter forwards as many arguments as its target declares and lets the
+///   rest fall away. Direct calls are untouched, a script that makes no
+///   function a value emits no table, no element segment and no adapter, and
+///   the arity reconciliation lives in one place per function instead of one
+///   place per call.
+///
+/// The uniform arity is a **bound**, not a measurement: the widest parameter
+/// list in the program, or the widest indirect call site, whichever is more.
+/// A conservative bound and not the exact maximum over table entries, because
+/// the exact answer is only known after lowering and the call sites need it
+/// during. What it costs when it is loose is a few `undefined` pairs at an
+/// indirect call site; what an exact answer would cost is a second pass whose
+/// disagreement with the first would be silent.
+///
+/// # Where the `end`s come from
+///
 /// Every branch this module emits targets a label it opened itself, at a
 /// nesting it knows statically, so no depth is ever computed from a stack of
 /// enclosing labels. That is deliberate: the M1 statement set has no `break`
@@ -232,15 +269,16 @@ pub(crate) mod m1 {
     use std::collections::BTreeMap;
 
     use crate::ast::m1 as ast;
+    use crate::convert;
     use crate::diag::{Boundary, CompileError, host_table, unsupported};
     use crate::ir::m1 as ir;
     use crate::opts::{HostFn, HostParam, HostResult, Names, Options};
     use crate::repr::{
         self, BlockType, Ins, ValType, WIDTH, box_bool, box_number, box_object, box_string,
-        const_bool, const_null, const_number, const_string, const_undefined, drop_value,
-        load_local, store_local, unbox_number, unbox_string,
+        const_bool, const_function, const_null, const_number, const_string, const_undefined,
+        drop_value, load_local, store_local, unbox_function, unbox_number, unbox_string,
     };
-    use crate::runtime::{self, Ctx, FnBuild, Rt, STRING_HEADER, StringPool};
+    use crate::runtime::{self, Conversions, Ctx, FnBuild, Rt, STRING_HEADER, StringPool};
 
     /// The name every compiled script exports, as at M0.
     pub(crate) const ENTRY: &str = super::ENTRY;
@@ -274,6 +312,48 @@ pub(crate) mod m1 {
             ));
         }
         Ok(pages)
+    }
+
+    /// The module's funcref table, built as the lowering discovers which
+    /// functions become values.
+    ///
+    /// Discovered rather than declared, because "is this function used as a
+    /// value" is exactly the question the lowering answers by emitting
+    /// [`const_function`] -- and asking it twice, once in a pre-pass and once
+    /// here, is two chances to disagree. [`Scan`] predicts only the *yes or no*
+    /// of it, and a debug assertion at the end of [`lower`] holds the two
+    /// together.
+    #[derive(Debug, Default)]
+    struct FnTable {
+        entries: Vec<ast::FuncId>,
+    }
+
+    impl FnTable {
+        /// The element index of `id`, assigning one on its first use as a
+        /// value. Element 0 is left null, so the index is one past the
+        /// position -- which is what makes a zeroed payload uncallable even if
+        /// something ever reached `call_indirect` without the tag test.
+        fn element(&mut self, id: ast::FuncId) -> i32 {
+            let position = self
+                .entries
+                .iter()
+                .position(|entry| *entry == id)
+                .unwrap_or_else(|| {
+                    self.entries.push(id);
+                    self.entries.len() - 1
+                });
+            position as i32 + 1
+        }
+    }
+
+    /// The one signature every call through a value speaks, and the arity it
+    /// carries. `None` for a program with no function values and no indirect
+    /// call sites, which is what keeps such a program's type section, table
+    /// section and byte count exactly what they were.
+    #[derive(Debug, Clone, Copy)]
+    struct Uniform {
+        type_index: u32,
+        arity: u32,
     }
 
     /// Global 0 is the bump-allocation pointer, which is what
@@ -342,17 +422,30 @@ pub(crate) mod m1 {
         // five names go in first when the program asks for them, and not at
         // all when it does not.
         let mut pool = StringPool::default();
+        // Imported functions take the first indices, so the runtime starts
+        // exactly where the import table ends, and the conversions start
+        // exactly where the runtime ends. Both bases are arithmetic on two
+        // constant set lengths, which is what lets the runtime name a
+        // conversion by index before either set is built.
+        let runtime_base = table.imports();
+        let convert_base = runtime_base + runtime::SET.len() as u32;
+        let user_base = convert_base + convert::SET.len() as u32;
         let ctx = Ctx {
-            // Imported functions take the first indices, so the runtime
-            // starts exactly where the import table ends.
-            func_base: table.imports(),
+            func_base: runtime_base,
             heap_global: HEAP_GLOBAL,
             type_names: scan.type_of.then(|| runtime::TypeNames::intern(&mut pool)),
-            key_names: scan
-                .computed_key
-                .then(|| runtime::KeyNames::intern(&mut pool)),
+            prim_names: runtime::PrimNames::intern(&mut pool),
+            conversions: Conversions {
+                num_to_string: convert_base + convert::Cv::NumToString.offset(),
+                str_to_num: convert_base + convert::Cv::StrToNum.offset(),
+                str_cmp: convert_base + convert::Cv::StrCmp.offset(),
+            },
         };
-        let user_base = ctx.func_base + runtime::SET.len() as u32;
+        let cv = convert::Ctx {
+            func_base: convert_base,
+            runtime_base,
+            names: convert::Names::intern(&mut pool),
+        };
 
         let mut types: Vec<ir::FuncType> = Vec::new();
         let imports: Vec<ir::Import> = match &table {
@@ -368,7 +461,7 @@ pub(crate) mod m1 {
         };
 
         let mut funcs: Vec<ir::Func> = Vec::new();
-        for built in runtime::build(&ctx) {
+        for built in runtime::build(&ctx).into_iter().chain(convert::build(&cv)) {
             let type_index = intern(&mut types, built.params.clone(), built.results.clone());
             funcs.push(func(
                 built.name.to_string(),
@@ -377,10 +470,27 @@ pub(crate) mod m1 {
                 built.body,
             ));
         }
+        debug_assert_eq!(
+            funcs.len() as u32,
+            user_base - runtime_base,
+            "the two set lengths are what every index above was computed from"
+        );
 
+        // The uniform signature has to exist before the first call site names
+        // it, and only for a program that has one: an unused type-section entry
+        // would make every script pay a byte for a capability it never used.
+        let uniform = (scan.function_values || scan.indirect).then(|| Uniform {
+            type_index: intern(&mut types, values(scan.uniform_arity(program)), values(1)),
+            arity: scan.uniform_arity(program),
+        });
+
+        let mut fns = FnTable::default();
         for (index, function) in program.functions.iter().enumerate() {
             let id = ast::FuncId(index as u32);
-            let built = Lower::new(program, &ctx, &mut pool, &table, user_base, id).function()?;
+            let built = Lower::new(
+                program, &ctx, &mut pool, &table, &mut fns, uniform, user_base, id,
+            )
+            .function()?;
             let arity = if id == ast::Program::SCRIPT {
                 program.arg_count
             } else {
@@ -393,6 +503,51 @@ pub(crate) mod m1 {
                 built.local_groups(),
                 built.body,
             ));
+        }
+
+        debug_assert_eq!(
+            scan.function_values,
+            !fns.entries.is_empty(),
+            "the scan and the lowering disagree about whether this program makes a function a value"
+        );
+
+        // One adapter per table entry, appended after every user function so
+        // no existing index moves. Its body is the whole of the arity
+        // reconciliation: forward what the target declares, and let the rest of
+        // the uniform parameter list fall away unread.
+        let adapter_base = user_base + program.functions.len() as u32;
+        let mut elements = Vec::new();
+        let mut table_type = None;
+        if !fns.entries.is_empty() || scan.indirect {
+            let uniform = uniform.expect("a table means the uniform signature exists");
+            let mut in_table = Vec::new();
+            for (position, id) in fns.entries.iter().enumerate() {
+                let arity = program.func(*id).params.len() as u32;
+                debug_assert!(
+                    arity <= uniform.arity,
+                    "the uniform arity bounds every parameter list"
+                );
+                let mut body: Vec<Ins> = (0..arity * WIDTH).map(Ins::LocalGet).collect();
+                body.push(Ins::Call(user_base + id.0));
+                funcs.push(func(
+                    format!("<adapter of {}>", debug_name(program, *id)),
+                    uniform.type_index,
+                    Vec::new(),
+                    body,
+                ));
+                in_table.push(adapter_base + position as u32);
+            }
+            if !in_table.is_empty() {
+                elements.push(ir::Elem {
+                    offset: 1,
+                    funcs: in_table,
+                });
+            }
+            // One past the last element, because element 0 is the null one.
+            table_type = Some(ir::Table {
+                min: fns.entries.len() as u32 + 1,
+                max: None,
+            });
         }
 
         // The bump pointer starts after the literals, so the pool has to be
@@ -430,12 +585,14 @@ pub(crate) mod m1 {
         Ok(ir::Module {
             types,
             imports,
+            table: table_type,
             memory: Some(ir::Memory {
                 min: memory_pages(&pool)?,
                 max: None,
             }),
             globals,
             funcs,
+            elements,
             data,
             exports: vec![ir::Export {
                 name: ENTRY.to_string(),
@@ -514,6 +671,7 @@ pub(crate) mod m1 {
                 Ins::BrIf(depth) => ir::Ins::BrIf(depth),
                 Ins::Return => ir::Ins::Return,
                 Ins::Call(index) => ir::Ins::Call(index),
+                Ins::CallIndirect(ty, table) => ir::Ins::CallIndirect(ty, table),
                 Ins::Unreachable => ir::Ins::Unreachable,
                 Ins::Drop => ir::Ins::Drop,
                 Ins::LocalGet(i) => ir::Ins::LocalGet(i),
@@ -751,6 +909,19 @@ pub(crate) mod m1 {
         /// program with only dotted access needs none of the three constant
         /// answers -- see [`runtime::KeyNames`].
         computed_key: bool,
+        /// Whether the program ever puts a function where a value goes. The
+        /// yes-or-no of what [`FnTable`] then counts exactly, and the reason
+        /// a program that never does emits no table and no uniform signature.
+        function_values: bool,
+        /// Whether the program calls anything that is not a statically known
+        /// function. Tracked separately from `function_values` because a
+        /// module can need the table for one without the other -- a script
+        /// that only ever calls `o.m()` on an object a host built has indirect
+        /// calls and no values of its own -- and `call_indirect` needs table 0
+        /// to exist either way.
+        indirect: bool,
+        /// The widest argument list at an indirect call site.
+        call_arity: u32,
     }
 
     /// How one host name is used: the argument count every occurrence agrees
@@ -777,13 +948,42 @@ pub(crate) mod m1 {
         fn at(&self, name: &str) -> usize {
             self.hosts.get(name).map_or(0, |use_| use_.at)
         }
+
+        /// How many JavaScript arguments the one uniform signature carries.
+        ///
+        /// A bound rather than a measurement, and deliberately a coarse one:
+        /// the widest parameter list in the program -- not the widest among the
+        /// functions that turn out to be values -- or the widest indirect call
+        /// site, whichever is more. The exact answer is only knowable after
+        /// lowering, which is after the call sites that name this type have
+        /// already been emitted. See this module's header for what the
+        /// looseness costs.
+        ///
+        /// The script's own `$N` are not parameters of a *function* the table
+        /// can hold, so they do not enter: `Function::params` is empty for the
+        /// script.
+        fn uniform_arity(&self, program: &ast::Program) -> u32 {
+            program
+                .functions
+                .iter()
+                .map(|f| f.params.len() as u32)
+                .max()
+                .unwrap_or(0)
+                .max(self.call_arity)
+        }
+
+        /// One call that has to go through the table.
+        fn note_indirect(&mut self, args: u32) {
+            self.indirect = true;
+            self.call_arity = self.call_arity.max(args);
+        }
     }
 
     fn scan(program: &ast::Program) -> Result<Scan, CompileError> {
         let mut out = Scan::default();
         for function in &program.functions {
             for stmt in &function.body {
-                host_stmt(stmt, &mut out)?;
+                host_stmt(program, stmt, &mut out)?;
             }
         }
         Ok(out)
@@ -817,23 +1017,43 @@ pub(crate) mod m1 {
         }
     }
 
-    fn host_stmt(stmt: &ast::Stmt, scan: &mut Scan) -> Result<(), CompileError> {
+    fn host_stmt(
+        program: &ast::Program,
+        stmt: &ast::Stmt,
+        scan: &mut Scan,
+    ) -> Result<(), CompileError> {
         match &stmt.kind {
             ast::StmtKind::Empty | ast::StmtKind::Func { .. } => Ok(()),
             ast::StmtKind::Expr(e) => host_expr(e, scan),
-            ast::StmtKind::Decl(declarators) => declarators
-                .iter()
-                .filter_map(|d| d.init.as_ref())
-                .try_for_each(|e| host_expr(e, scan)),
-            ast::StmtKind::Block(stmts) => stmts.iter().try_for_each(|s| host_stmt(s, scan)),
+            ast::StmtKind::Decl(declarators) => declarators.iter().try_for_each(|d| {
+                match (&d.init, program.binding(d.binding).kind) {
+                    // `const f = function () {}`: the name *is* the function,
+                    // so [`Lower::declarator`] emits nothing at all -- and a
+                    // function that is never emitted is not a value. Mirrored
+                    // here rather than over-approximated, so a script that
+                    // only declares functions still carries no table.
+                    (
+                        Some(ast::Expr {
+                            kind: ast::ExprKind::Function(_),
+                            ..
+                        }),
+                        ast::BindingKind::Function(_),
+                    ) => Ok(()),
+                    (Some(init), _) => host_expr(init, scan),
+                    (None, _) => Ok(()),
+                }
+            }),
+            ast::StmtKind::Block(stmts) => {
+                stmts.iter().try_for_each(|s| host_stmt(program, s, scan))
+            }
             ast::StmtKind::If { test, then, alt } => {
                 host_expr(test, scan)?;
-                host_stmt(then, scan)?;
-                alt.iter().try_for_each(|s| host_stmt(s, scan))
+                host_stmt(program, then, scan)?;
+                alt.iter().try_for_each(|s| host_stmt(program, s, scan))
             }
             ast::StmtKind::While { test, body } => {
                 host_expr(test, scan)?;
-                host_stmt(body, scan)
+                host_stmt(program, body, scan)
             }
             ast::StmtKind::For {
                 init,
@@ -841,15 +1061,24 @@ pub(crate) mod m1 {
                 update,
                 body,
             } => {
-                init.iter().try_for_each(|s| host_stmt(s, scan))?;
+                init.iter().try_for_each(|s| host_stmt(program, s, scan))?;
                 test.iter().try_for_each(|e| host_expr(e, scan))?;
                 update.iter().try_for_each(|e| host_expr(e, scan))?;
-                host_stmt(body, scan)
+                host_stmt(program, body, scan)
             }
             ast::StmtKind::Return(value) => value.iter().try_for_each(|e| host_expr(e, scan)),
         }
     }
 
+    /// Walk one expression in the same shape [`Lower::expr`] walks it.
+    ///
+    /// The two must agree about exactly one thing -- where a function reaches a
+    /// value position -- and the three places they could disagree are the
+    /// three exceptions written out below: a host call's callee, a direct
+    /// call's callee, and an immediately-invoked function expression. The
+    /// fourth, `const f = function () {}`, is in [`host_stmt`], which is why
+    /// that one takes the program and this one does not. A debug assertion in
+    /// [`lower`] checks the agreement rather than trusting it.
     fn host_expr(expr: &ast::Expr, scan: &mut Scan) -> Result<(), CompileError> {
         match &expr.kind {
             ast::ExprKind::Int(_)
@@ -857,24 +1086,45 @@ pub(crate) mod m1 {
             | ast::ExprKind::Bool(_)
             | ast::ExprKind::Null
             | ast::ExprKind::Undefined
-            | ast::ExprKind::Arg(_)
-            | ast::ExprKind::Function(_) => Ok(()),
+            | ast::ExprKind::Arg(_) => Ok(()),
+            // Reached here rather than as a callee: this one is a value.
+            ast::ExprKind::Function(_) => {
+                scan.function_values = true;
+                Ok(())
+            }
             // A bare host name is a zero-argument call, as it is at M0.
             ast::ExprKind::Name(name) => match &name.res {
                 ast::Res::Host(text) => note_host(scan, text, 0, expr.span),
+                // A name bound to a known function, read and not called. The
+                // read is the constant function value.
+                ast::Res::Callee(_) => {
+                    scan.function_values = true;
+                    Ok(())
+                }
                 _ => Ok(()),
             },
             ast::ExprKind::Call { callee, args } => {
-                // The callee of a host call is the call, not a use of the
-                // name on its own, so it is not walked as one.
+                // The callee of a host call, of a direct call, and of an
+                // immediately-invoked function expression is the *call* and
+                // not a value, so none of the three is walked as one. Every
+                // other callee is an ordinary value expression, and the call
+                // through it needs the table.
                 match &callee.kind {
                     ast::ExprKind::Name(name) => match &name.res {
                         ast::Res::Host(text) => {
                             note_host(scan, text, args.len() as u32, expr.span)?;
                         }
-                        _ => host_expr(callee, scan)?,
+                        ast::Res::Callee(_) => {}
+                        _ => {
+                            scan.note_indirect(args.len() as u32);
+                            host_expr(callee, scan)?;
+                        }
                     },
-                    _ => host_expr(callee, scan)?,
+                    ast::ExprKind::Function(_) => {}
+                    _ => {
+                        scan.note_indirect(args.len() as u32);
+                        host_expr(callee, scan)?;
+                    }
                 }
                 args.iter().try_for_each(|a| host_expr(a, scan))
             }
@@ -943,6 +1193,12 @@ pub(crate) mod m1 {
         ctx: &'a Ctx,
         pool: &'a mut StringPool,
         table: &'a Table,
+        /// The funcref table, which every function value in the program shares
+        /// and which grows as they are found.
+        fns: &'a mut FnTable,
+        /// The signature every call through a value speaks, or `None` for a
+        /// program the scan said has no such call and no such value.
+        uniform: Option<Uniform>,
         user_base: u32,
         id: ast::FuncId,
         f: FnBuild,
@@ -960,11 +1216,14 @@ pub(crate) mod m1 {
     }
 
     impl<'a> Lower<'a> {
+        #[allow(clippy::too_many_arguments)]
         fn new(
             program: &'a ast::Program,
             ctx: &'a Ctx,
             pool: &'a mut StringPool,
             table: &'a Table,
+            fns: &'a mut FnTable,
+            uniform: Option<Uniform>,
             user_base: u32,
             id: ast::FuncId,
         ) -> Self {
@@ -1006,6 +1265,8 @@ pub(crate) mod m1 {
                 ctx,
                 pool,
                 table,
+                fns,
+                uniform,
                 user_base,
                 id,
                 f,
@@ -1325,7 +1586,7 @@ pub(crate) mod m1 {
                     load_local(index * WIDTH, &mut self.f.body);
                     Ok(())
                 }
-                ast::ExprKind::Name(name) => self.name(name, expr.span),
+                ast::ExprKind::Name(name) => self.name(name),
                 ast::ExprKind::Object(properties) => self.object_literal(properties),
                 // 13.3.2.1 and 13.3.3.1 both evaluate the object first and the
                 // key second, which is exactly the order the two words and the
@@ -1338,12 +1599,15 @@ pub(crate) mod m1 {
                     self.push(call);
                     Ok(())
                 }
-                ast::ExprKind::Function(_) => Err(unsupported(
-                    Boundary::FullJs,
-                    "using a function as a value",
-                    expr.span.offset(),
-                )),
-                ast::ExprKind::Call { callee, args } => self.call(callee, args, expr.span),
+                // A function expression reached here rather than as a
+                // callee: the value is the table element index its adapter
+                // will occupy, which is a constant and needs no allocation.
+                ast::ExprKind::Function(id) => {
+                    let element = self.fns.element(*id);
+                    const_function(element, &mut self.f.body);
+                    Ok(())
+                }
+                ast::ExprKind::Call { callee, args } => self.call(callee, args),
                 ast::ExprKind::Unary(op, operand) => self.unary(*op, operand),
                 ast::ExprKind::Update { op, prefix, target } => self.update(*op, *prefix, target),
                 ast::ExprKind::Binary(op, lhs, rhs) => {
@@ -1416,7 +1680,7 @@ pub(crate) mod m1 {
                 }
                 ast::MemberKey::Computed(expr) => {
                     self.expr(expr)?;
-                    let call = self.ctx.call(Rt::ToKey);
+                    let call = self.ctx.call(Rt::ToStr);
                     self.push(call);
                 }
             }
@@ -1466,7 +1730,7 @@ pub(crate) mod m1 {
             }
         }
 
-        fn name(&mut self, name: &ast::Name, span: ast::Span) -> Result<(), CompileError> {
+        fn name(&mut self, name: &ast::Name) -> Result<(), CompileError> {
             match &name.res {
                 ast::Res::Local(id) | ast::Res::Global(id) => {
                     let place = self.place(*id);
@@ -1475,25 +1739,38 @@ pub(crate) mod m1 {
                 }
                 // As at M0: a bare host name is the zero-argument call.
                 ast::Res::Host(text) => self.host_call(text, &[]),
-                // The front end refuses a read of a function binding, so a
-                // `Callee` only ever reaches `call` below.
-                ast::Res::Callee(_) => Err(unsupported(
-                    Boundary::FullJs,
-                    "using a function as a value",
-                    span.offset(),
-                )),
+                // A name bound to a known function, read rather than called.
+                // The binding has no storage -- `declarator` writes nothing
+                // for it -- because the name *is* the function, so the read is
+                // the same constant a function expression would be.
+                ast::Res::Callee(id) => {
+                    let target = self.func_of(*id);
+                    let element = self.fns.element(target);
+                    const_function(element, &mut self.f.body);
+                    Ok(())
+                }
                 ast::Res::Unresolved => {
                     unreachable!("the parser resolves every occurrence before it returns")
                 }
             }
         }
 
-        fn call(
-            &mut self,
-            callee: &ast::Expr,
-            args: &[ast::Expr],
-            span: ast::Span,
-        ) -> Result<(), CompileError> {
+        /// The function a `Callee` binding names. The parser only ever
+        /// classifies a [`ast::BindingKind::Function`] binding as one.
+        fn func_of(&self, id: ast::BindingId) -> ast::FuncId {
+            match self.program.binding(id).kind {
+                ast::BindingKind::Function(func) => func,
+                _ => unreachable!("the parser only classifies a function binding as a callee"),
+            }
+        }
+
+        /// A call, in the three shapes ECMA-262 13.3.6.1 collapses into one.
+        ///
+        /// Three of the four callee forms name a function the compiler already
+        /// knows, and each of those is a plain `call` at the exact arity the
+        /// callee declares. Everything else -- a property, a call's result, a
+        /// name holding a value -- goes through the table.
+        fn call(&mut self, callee: &ast::Expr, args: &[ast::Expr]) -> Result<(), CompileError> {
             let target = match &callee.kind {
                 ast::ExprKind::Name(ast::Name {
                     res: ast::Res::Host(text),
@@ -1502,23 +1779,58 @@ pub(crate) mod m1 {
                 ast::ExprKind::Name(ast::Name {
                     res: ast::Res::Callee(id),
                     ..
-                }) => match self.program.binding(*id).kind {
-                    ast::BindingKind::Function(func) => func,
-                    _ => unreachable!("the parser only classifies a function binding as a callee"),
-                },
+                }) => self.func_of(*id),
                 // `(function () {})()`.
                 ast::ExprKind::Function(func) => *func,
-                _ => {
-                    return Err(unsupported(
-                        Boundary::FullJs,
-                        "calling a value that is not a known function",
-                        span.offset(),
-                    ));
-                }
+                _ => return self.indirect_call(callee, args),
             };
             let arity = self.program.func(target).params.len() as u32;
             self.arguments(args, arity)?;
             self.push(Ins::Call(self.user_base + target.0));
+            Ok(())
+        }
+
+        /// A call through a value: `call_indirect` on the one uniform
+        /// signature, with the tag test standing in front of it.
+        ///
+        /// ```text
+        /// <evaluate the callee into a scratch pair>
+        /// <evaluate every argument, padded to the uniform arity>
+        /// <trap unless the callee's tag is TAG_FUNCTION>
+        /// <push the element index>
+        /// call_indirect
+        /// ```
+        ///
+        /// The order is 13.3.6.1's, exactly: the callee is evaluated first
+        /// (step 1), then every argument (EvaluateCall step 3), and only then
+        /// is the callee checked for callability (step 4). So a script whose
+        /// arguments have side effects sees them happen even though the call
+        /// is about to fail -- which is what the specification says, and is
+        /// why the tag test is not hoisted in front of the arguments where it
+        /// would read more naturally.
+        ///
+        /// **No receiver is passed.** 13.3.6.1 step 2 makes `o.m()`'s `this`
+        /// the object `o`; this engine has no `this` -- the keyword is a
+        /// capability refusal -- so `o.m()` calls the function `o.m` holds and
+        /// the function cannot see `o`. That is a real divergence and not an
+        /// oversight; it is inert for a method that never writes `this`, which
+        /// is every method in the library this milestone exists to compile,
+        /// and it is what the `this` milestone has to fix.
+        fn indirect_call(
+            &mut self,
+            callee: &ast::Expr,
+            args: &[ast::Expr],
+        ) -> Result<(), CompileError> {
+            let uniform = self
+                .uniform
+                .expect("the scan finds every call that is not to a known function");
+            let slot = self.take();
+            self.expr(callee)?;
+            store_local(slot, &mut self.f.body);
+            self.arguments(args, uniform.arity)?;
+            unbox_function(slot, &mut self.f.body);
+            self.push(Ins::CallIndirect(uniform.type_index, 0));
+            self.give(slot);
             Ok(())
         }
 
@@ -1730,8 +2042,14 @@ pub(crate) mod m1 {
         /// Reconcile a JavaScript argument list with a wasm one.
         ///
         /// wasm calls are arity-exact; JavaScript's are not. A missing
-        /// argument is `undefined`, and a surplus one is still *evaluated* --
-        /// it can assign, or call -- and only then discarded.
+        /// argument is `undefined` (ECMA-262 8.6.1), and a surplus one is
+        /// still *evaluated* -- it can assign, or call -- and only then
+        /// discarded (13.3.8.1 evaluates the whole list; 10.2.11 binds what
+        /// the function declares).
+        ///
+        /// `arity` is the callee's own for a direct call and the uniform one
+        /// for a call through the table, where the adapter does the second
+        /// half of the same reconciliation.
         fn arguments(&mut self, args: &[ast::Expr], arity: u32) -> Result<(), CompileError> {
             for arg in args {
                 self.expr(arg)?;
@@ -1948,6 +2266,10 @@ pub(crate) mod m1 {
             ast::ExprKind::Str(_) => "a String",
             ast::ExprKind::Bool(_) => "a Boolean",
             ast::ExprKind::Object(_) => "an Object",
+            // Not an ECMA-262 language type name -- a function is an Object in
+            // the specification -- but it is what `typeof` answers and what a
+            // reader of the diagnostic wrote.
+            ast::ExprKind::Function(_) => "a function",
             ast::ExprKind::Null => "Null",
             ast::ExprKind::Undefined => "Undefined",
             // 13.5.4 and 13.5.5: both are ToNumber of the operand.

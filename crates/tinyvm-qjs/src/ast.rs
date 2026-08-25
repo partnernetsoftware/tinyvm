@@ -182,9 +182,10 @@ pub(crate) mod m1 {
     }
 
     /// How a name was declared. The distinction outlives scoping: `Const` says
-    /// the binding can never be written, and `Function` says its value is a
-    /// known function, which is what makes a direct call possible in a
-    /// milestone with no function values.
+    /// the binding can never be written, and `Function` says its value is one
+    /// statically known function -- which is what lets a call to it be a
+    /// direct `call` rather than a `call_indirect` through the table, and what
+    /// lets a *read* of it be a constant rather than storage.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(crate) enum BindingKind {
         Param,
@@ -193,7 +194,9 @@ pub(crate) mod m1 {
         Const,
         /// A `function f(){}` declaration, or a `const f = function(){}`. Both
         /// are a name that holds one known function and can never be
-        /// reassigned; nothing else in this milestone is callable.
+        /// reassigned. Everything else is callable too, now that a function is
+        /// a value -- this kind is what makes the *direct* call possible, and
+        /// what makes the binding cost no storage.
         Function(FuncId),
     }
 
@@ -209,10 +212,11 @@ pub(crate) mod m1 {
         /// has to outlive a frame; which module-level storage that is, is the
         /// lowering's choice.
         Global(BindingId),
-        /// The callee of a call, bound to a known function. It names a
-        /// function index rather than storage, which is why it resolves from
-        /// any depth: a direct call captures nothing. Always a binding whose
-        /// kind is [`BindingKind::Function`].
+        /// A name bound to a known function, whether it is being called or
+        /// read. It names the function rather than storage, which is why it
+        /// resolves from any depth and captures nothing either way: a call to
+        /// it is direct, and a read of it is the constant function value.
+        /// Always a binding whose kind is [`BindingKind::Function`].
         Callee(BindingId),
         /// A free name, resolved against the host import table. Only produced
         /// under [`crate::Names::HostImport`].
@@ -341,7 +345,9 @@ pub(crate) mod m1 {
         /// which is why it may not appear inside a nested function.
         Arg(u32),
         Name(Name),
-        /// A function expression.
+        /// A function expression. In a call's callee position it is an
+        /// immediately-invoked direct call; anywhere else it is a function
+        /// *value*, which is a table element index in a V1 pair.
         Function(FuncId),
         /// An ObjectLiteral, ECMA-262 13.2.5. The properties are in source
         /// order, duplicates included: 13.2.5.5 evaluates each in turn and
