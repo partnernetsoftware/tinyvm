@@ -189,6 +189,18 @@ pub enum GuestFault {
     /// memory than this embedding allows, which is a budget fact and not a
     /// defect. Raising the ceiling may let the same script through.
     HeapExhausted,
+    /// The script threw a value and nothing caught it. ECMA-262 says the
+    /// program terminates with that exception, so the script ran exactly as
+    /// written: this is neither a budget to raise nor a defect to report to
+    /// the author. It is the third thing the fault word exists to keep apart
+    /// from the other two.
+    ///
+    /// The thrown *value* does not come with it. A compiled module exports no
+    /// global, so the pair holding it is not readable from outside; handing it
+    /// out would mean exporting an engine-internal value or widening the entry
+    /// point's results, and both are decisions about the host boundary rather
+    /// than about throwing.
+    UncaughtThrow,
 }
 
 /// Read the guest's own account of why it trapped, out of its linear memory.
@@ -206,6 +218,7 @@ pub enum GuestFault {
 ///     let memory = instance.memory().expect("memory zero");
 ///     match tinyvm_qjs::guest_fault(&memory) {
 ///         Some(GuestFault::HeapExhausted) => { /* raise the budget */ }
+///         Some(GuestFault::UncaughtThrow) => { /* the script threw; report it */ }
 ///         _ => { /* the script itself is at fault: report `fault` */ }
 ///     }
 /// }
@@ -215,7 +228,8 @@ pub enum GuestFault {
 /// three different situations and the host should treat them alike: the trap
 /// was an ordinary guest fault, or the module is too small to have a fault word
 /// (an M0 module from [`compile_qjs`] has no linear memory at all), or the call
-/// never started. In none of them did the heap run out.
+/// never started. In none of them did the heap run out and in none of them did
+/// the script throw.
 ///
 /// The entry point clears the word on the way in, so the answer is about the
 /// most recent call and not an older one.
@@ -225,6 +239,7 @@ pub fn guest_fault(memory: &[u8]) -> Option<GuestFault> {
     let code = i32::from_le_bytes([word[0], word[1], word[2], word[3]]);
     match code {
         runtime::FAULT_HEAP_EXHAUSTED => Some(GuestFault::HeapExhausted),
+        runtime::FAULT_UNCAUGHT_THROW => Some(GuestFault::UncaughtThrow),
         _ => None,
     }
 }

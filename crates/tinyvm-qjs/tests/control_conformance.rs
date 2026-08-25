@@ -468,26 +468,39 @@ fn a_finalizer_runs_on_the_normal_the_caught_the_throwing_and_the_returning_path
 /// So a finalizer that finishes normally contributes nothing at all, not even
 /// its value.
 ///
-/// DIVERGENCE: this engine lets the finalizer's value out. JavaScript
-/// discards it. Confirmed against `node`, whose answers are the third column.
-/// The reach is exactly the script's ECMA-262 completion value -- the value
-/// `main` answers with when the script has no `return` -- because a `return`
-/// is an abrupt completion and takes the other path, which is right (see the
-/// next test). `fleet.js` is untouched by it: every one of its functions
-/// returns explicitly.
+/// This was a DIVERGENCE when the corpus was written -- the engine let the
+/// finalizer's value out, where JavaScript discards it -- and the integration
+/// closed it: `Lower::try_finally` holds the pending completion across the
+/// finalizer and puts it back. The third column, which was `node`'s answer
+/// and the engine's refusal, is now both. The reach is exactly the script's
+/// ECMA-262 completion value -- the value `main` answers with when the script
+/// has no `return` -- because a `return` is an abrupt completion and takes the
+/// other path, which was always right (see the next test).
 #[test]
 fn a_normally_completing_finalizer_should_not_replace_the_pending_value() {
-    // (source, what this engine answers, what ECMA-262 14.15.3 requires)
+    // (source, what ECMA-262 14.15.3 requires, what the finalizer's own last
+    //  value would have been -- the answer before the fix)
     let rows: [(&str, f64, f64); 4] = [
-        ("try { 1; } finally { 2; }", 2.0, 1.0),
-        ("let n = 0; try { 9; } finally { n = 1; }", 1.0, 9.0),
-        ("try { throw 1; } catch (e) { 5; } finally { 6; }", 6.0, 5.0),
-        ("try { 4; } catch (e) { } finally { 8; }", 8.0, 4.0),
+        ("try { 1; } finally { 2; }", 1.0, 2.0),
+        ("let n = 0; try { 9; } finally { n = 1; }", 9.0, 1.0),
+        ("try { throw 1; } catch (e) { 5; } finally { 6; }", 5.0, 6.0),
+        ("try { 4; } catch (e) { } finally { 8; }", 4.0, 8.0),
     ];
-    for (source, engine, ecma262) in rows {
-        assert_ne!(engine, ecma262, "a row that does not diverge is miswritten");
-        assert_eq!(num(source), engine, "DIVERGENCE row moved: {source:?}");
+    for (source, ecma262, finalizers_own) in rows {
+        assert_ne!(
+            ecma262, finalizers_own,
+            "a row where the two agree proves nothing"
+        );
+        assert_eq!(num(source), ecma262, "14.15.3 step 3: {source:?}");
     }
+    // The finalizer still runs, which is what says the value was discarded
+    // rather than the block skipped.
+    assert_eq!(
+        num("let n = 0; try { 9; } finally { n = 1; } return n;"),
+        1.0
+    );
+    // And it is the *pending* value that survives, however deep the nesting.
+    assert_eq!(num("try { try { 1; } finally { 2; } } finally { 3; }"), 1.0);
     // A finalizer with no value of its own is already right, which is what
     // says the defect is the *value* and not the finalizer.
     assert_eq!(num("try { 1; } finally { }"), 1.0);

@@ -413,32 +413,6 @@ pub(crate) mod m1 {
     const HEAP_GLOBAL: u32 = 0;
     const BINDING_GLOBALS: u32 = HEAP_GLOBAL + 1;
 
-    /// The code an uncaught `throw` writes into [`runtime::FAULT_WORD`].
-    ///
-    /// **This constant belongs in `runtime.rs`, beside `FAULT_NONE` and
-    /// `FAULT_HEAP_EXHAUSTED`, and `crate::GuestFault` needs the arm that
-    /// names it.** It is here only because those two files are another lane's;
-    /// moving it is one cut and paste plus one variant, and
-    /// `tests/conditional_and_try.rs` restates the number from outside so the
-    /// move cannot change it silently.
-    ///
-    /// A new code, and the reason it is warranted rather than convenient: the
-    /// fault word exists so a host can tell a *budget* failure from a *broken
-    /// script*, and an uncaught `throw` is neither. The script ran exactly as
-    /// written, ECMA-262 says the program terminates with that exception, and
-    /// the host's right answer is to report it -- not to raise a memory
-    /// ceiling and not to tell the author their script is wrong. Without a
-    /// code of its own it would arrive as the same bare `unreachable` a
-    /// missing conversion executes, which is precisely the misclassification
-    /// `FAULT_WORD` was added to prevent.
-    ///
-    /// What it does **not** carry is the thrown value. The three globals below
-    /// still hold it, and a module exports no global, so a host cannot read
-    /// it. Handing it out would mean exporting an engine-internal pair, or
-    /// widening the entry point's result -- both of them a decision about the
-    /// host boundary, and neither of them this milestone's.
-    pub(crate) const FAULT_UNCAUGHT_THROW: i32 = 2;
-
     /// Where a throw in flight lives: a flag, and the thrown value beside it.
     ///
     /// Module globals rather than a return channel, because the value has to
@@ -1632,6 +1606,20 @@ pub(crate) mod m1 {
                 // sitting there when a later call trapped for its own,
                 // entirely different reason.
                 runtime::clear_fault(&mut self.f.body);
+                // And the same argument, one word over. The in-flight flag is
+                // a module **global**, so it is instance state, and an
+                // uncaught throw traps with it still raised -- a tinyvm
+                // instance is persistent and a top-level call is the unit of
+                // budget, so the next `invoke_by_name` on that instance would
+                // begin with a throw already in flight. It read as a `catch`
+                // firing in a call whose every path contains no `throw`, bound
+                // to the previous call's value -- a pointer into the previous
+                // call's heap, where the value was an Object. Two instructions,
+                // paid only by a module that already carries the channel.
+                if let Some(unwind) = self.unwind {
+                    self.push(Ins::I32Const(0));
+                    self.push(Ins::GlobalSet(unwind.flag));
+                }
             }
             // A throw that reaches the entry point has nowhere to be handed
             // to: every other function answers an uncaught throw by returning
@@ -1660,13 +1648,11 @@ pub(crate) mod m1 {
                 self.push(Ins::Return);
                 self.push(Ins::End);
                 self.handlers.pop();
-                // `runtime::store_fault` is private and `runtime.rs` is
-                // another lane's file, so this is its three instructions
-                // written out. `FAULT_UNCAUGHT_THROW` says why the code is
-                // its own.
-                self.push(Ins::I32Const(runtime::FAULT_WORD));
-                self.push(Ins::I32Const(FAULT_UNCAUGHT_THROW));
-                self.push(Ins::I32Store(ALIGN_WORD, 0));
+                // Which of the three things this is, before the trap that
+                // leaves no instruction to say it -- see
+                // [`runtime::FAULT_UNCAUGHT_THROW`], which `crate::guest_fault`
+                // now reads back as [`crate::GuestFault::UncaughtThrow`].
+                runtime::record_uncaught_throw(&mut self.f.body);
                 self.push(Ins::Unreachable);
             }
             Ok(self.f)
@@ -2118,7 +2104,29 @@ pub(crate) mod m1 {
             self.finalizers.pop();
             self.push(Ins::End);
 
+            // 14.15.3 step 3: *if F is a normal completion, set F to B.* A
+            // finalizer that finishes normally contributes nothing at all to
+            // the value -- not even its own -- so `try { 1; } finally { 2; }`
+            // is `1`. C is an ordinary statement list here and an expression
+            // statement in it writes the completion slot, so B is held across
+            // C and put back. Only the normal path reads the slot again: the
+            // two abrupt ones carry their value in [`Finalizer::slot`], which
+            // is why the restore needs no guard.
+            //
+            // The save is a second scratch pair and not [`Finalizer::slot`],
+            // which is already spoken for by the pending return or throw.
+            let held = self.completion.map(|base| {
+                let held = self.take();
+                load_local(base, &mut self.f.body);
+                store_local(held, &mut self.f.body);
+                held
+            });
             self.stmts(finalizer)?;
+            if let (Some(base), Some(held)) = (self.completion, held) {
+                load_local(held, &mut self.f.body);
+                store_local(base, &mut self.f.body);
+                self.give(held);
+            }
             self.resume_pending(after, slot, pending);
             self.push(Ins::End);
 

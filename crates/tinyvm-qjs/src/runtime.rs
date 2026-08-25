@@ -120,10 +120,9 @@ pub(crate) const FAULT_HEAP_EXHAUSTED: i32 = 1;
 ///
 /// Two producers, and they must stay one number: `super::convert`'s `__throw`
 /// when the module has no unwind channel, and `super::emit`'s entry-point
-/// epilogue when a throw reaches the top of the script. `crate::guest_fault`
-/// does not name it yet -- `lib.rs` is another lane's file -- so a host
-/// reading the word today gets `None`, the same answer an ordinary fault
-/// gives. Adding the arm is one line.
+/// epilogue when a throw reaches the top of the script. [`crate::guest_fault`]
+/// names it, as [`crate::GuestFault::UncaughtThrow`], so a host can tell the
+/// three apart at the door and not only in the emitted bytes.
 pub(crate) const FAULT_UNCAUGHT_THROW: i32 = 2;
 
 /// `mem[FAULT_WORD] = code`.

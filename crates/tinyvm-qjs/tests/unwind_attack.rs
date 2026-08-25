@@ -764,11 +764,11 @@ fn uleb(bytes: &[u8], mut at: usize) -> (usize, usize) {
 // DEFECT 1 -- the in-flight flag outlives the call that raised it
 // =========================================================================
 
-/// A module global is instance state, and an uncaught `throw` leaves the
-/// in-flight flag **set** when it traps. `emit.rs`'s entry-point prologue
-/// clears the fault word (`runtime::clear_fault`) precisely so that the word
-/// describes *this* call; the flag beside it is not cleared, so it describes
-/// the *previous* one.
+/// A module global is instance state, and an uncaught `throw` used to leave
+/// the in-flight flag **set** when it trapped. `emit.rs`'s entry-point
+/// prologue clears the fault word (`runtime::clear_fault`) precisely so that
+/// the word describes *this* call; the flag beside it was not cleared, so it
+/// described the *previous* one.
 ///
 /// tinyvm instances are persistent by design and a top-level call is the unit
 /// of budget -- `crates/tinyvm/src/wasm.rs:1418`: "Maximum instructions
@@ -776,16 +776,16 @@ fn uleb(bytes: &[u8], mut at: usize) -> (usize, usize) {
 /// fresh budget" -- so a second `invoke_by_name` on the same instance is the
 /// supported shape, not an exotic one.
 ///
-/// The failure is **silent**: the second call contains no `throw` on any path
-/// it takes, and its `catch` runs anyway, bound to the value the first call
+/// The failure was **silent**: the second call contains no `throw` on any path
+/// it takes, and its `catch` ran anyway, bound to the value the first call
 /// threw.
 ///
-/// DEFECT (open): the fix is two instructions in the entry-point prologue
-/// beside `runtime::clear_fault` -- `i32.const 0; global.set <flag>` -- and
-/// it costs only the modules that already carry the channel. When it lands,
-/// every assertion in this test inverts.
+/// FIXED: two instructions in the entry-point prologue beside
+/// `runtime::clear_fault` -- `i32.const 0; global.set <flag>` -- paid only by
+/// the modules that already carry the channel. A poisoned instance now answers
+/// exactly what a fresh one does, which is the assertion below.
 #[test]
-fn defect_a_handled_throw_can_be_a_throw_the_previous_call_raised() {
+fn a_handled_throw_is_never_a_throw_the_previous_call_raised() {
     // $0 chooses whether call 1 throws. Call 2 passes 0, so no `throw`
     // statement is on its path at all.
     let source = "function f() { return 42; } \
@@ -802,32 +802,41 @@ fn defect_a_handled_throw_can_be_a_throw_the_previous_call_raised() {
         .expect("call 2 returns");
     assert_eq!(
         decode(&instance, &second, source),
-        Out::Str("caught boom".into()),
-        "DEFECT: call 2 threw nothing and caught the string call 1 threw"
+        Out::Number(42.0),
+        "call 2 has no reachable `throw`, so its `catch` must not run"
     );
 
-    // The right answer, from an instance that has not been poisoned.
+    // The same answer from an instance that was never poisoned, which is what
+    // makes the row above a comparison and not a guess.
     let mut clean = instantiate(source);
     let only = clean
         .invoke_by_name("main", &Value::args(&[Value::Number(0.0)]))
         .expect("no trap");
     assert_eq!(decode(&clean, &only, source), Out::Number(42.0));
+
+    // And the channel still works *after* the poisoning window: a call that
+    // does throw is still caught by its own handler.
+    let mut both = instantiate(source);
+    let _ = both.invoke_by_name("main", &Value::args(&[Value::Number(1.0)]));
+    let third = both
+        .invoke_by_name("main", &Value::args(&[Value::Number(1.0)]))
+        .err();
+    assert!(third.is_some(), "an uncaught throw is still uncaught");
 }
 
-/// The same defect where nothing catches: the second call *traps*, and the
-/// fault word tells the host an uncaught throw happened in a call that has
-/// no reachable `throw`.
+/// The same defect where nothing catches: the second call used to *trap*, and
+/// the fault word told the host an uncaught throw happened in a call that has
+/// no reachable `throw`. It returns now, and the fault word is clear.
 #[test]
-fn defect_a_poisoned_instance_reports_an_uncaught_throw_that_never_happened() {
+fn a_call_after_an_uncaught_throw_starts_from_a_clear_channel() {
     let source = "function f() { return 42; } if ($0 === 1) { throw 1; } return f();";
     let mut instance = instantiate(source);
     let _ = instance.invoke_by_name("main", &Value::args(&[Value::Number(1.0)]));
-    let second = instance.invoke_by_name("main", &Value::args(&[Value::Number(0.0)]));
-    assert!(
-        second.is_err(),
-        "DEFECT: the second call traps on a stale flag"
-    );
-    assert_eq!(script_fault(&instance), runtime::FAULT_UNCAUGHT_THROW);
+    let second = instance
+        .invoke_by_name("main", &Value::args(&[Value::Number(0.0)]))
+        .expect("the second call has no reachable `throw`");
+    assert_eq!(decode(&instance, &second, source), Out::Number(42.0));
+    assert_eq!(script_fault(&instance), runtime::FAULT_NONE);
 
     let mut clean = instantiate(source);
     assert!(
@@ -837,10 +846,11 @@ fn defect_a_poisoned_instance_reports_an_uncaught_throw_that_never_happened() {
     );
 }
 
-/// And the leak carries a *reference*: the caught value is a pointer into the
-/// heap the previous call allocated in.
+/// The worst shape the leak had: the stale value was a *reference*, so the
+/// second call's `catch` received a pointer into the heap the first call
+/// allocated in. Now the second call never enters its handler at all.
 #[test]
-fn defect_the_stale_channel_hands_over_the_previous_calls_object() {
+fn the_previous_calls_object_is_never_handed_to_this_calls_catch() {
     let source = "const f = function () { return 42; }; \
                   if ($0 === 1) { throw { secret: 9 }; } \
                   try { return f(); } catch (e) { return e.secret; }";
@@ -849,15 +859,11 @@ fn defect_the_stale_channel_hands_over_the_previous_calls_object() {
     let second = instance
         .invoke_by_name("main", &Value::args(&[Value::Number(0.0)]))
         .expect("returns");
-    assert_eq!(
-        decode(&instance, &second, source),
-        Out::Number(9.0),
-        "DEFECT: an Object from the first call was handed to the second call's catch"
-    );
+    assert_eq!(decode(&instance, &second, source), Out::Number(42.0));
 }
 
 // =========================================================================
-// DEFECT 2 -- a `finally` block's completion value escapes
+// A `finally` block's completion value, which used to escape
 // =========================================================================
 
 /// ECMA-262 14.15.3, `try Block Finally`:
@@ -869,82 +875,78 @@ fn defect_the_stale_channel_hands_over_the_previous_calls_object() {
 /// 4. Return ? UpdateEmpty(F, undefined).
 /// ```
 ///
-/// Step 3 is the one that is missing: a finalizer that completes **normally**
-/// contributes nothing to the value, so `try { 1; } finally { 2; }` is `1`.
-/// This engine lowers the finalizer as an ordinary statement list, so the
-/// last expression statement in it overwrites the completion slot.
+/// Step 3 was the one that was missing: a finalizer that completes
+/// **normally** contributes nothing to the value, so `try { 1; } finally { 2; }`
+/// is `1`. The engine lowered the finalizer as an ordinary statement list and
+/// the last expression statement in it overwrote the completion slot.
 ///
 /// It is not an exotic shape: `finally { cleanup = true; }` is an assignment,
 /// and an assignment is an expression statement with a value. Every row below
 /// was run against node 24 to get the second column.
 ///
-/// DEFECT (open): `Lower::try_finally` has to save and restore the completion
-/// slot across the finalizer, the way `Lower::reset_completion` already
-/// exists for the statement's own entry.
+/// FIXED: `Lower::try_finally` holds the pending completion in a scratch pair
+/// across the finalizer and puts it back. Only the normal path reads it -- the
+/// two abrupt paths carry their value in `Finalizer::slot` -- so the restore
+/// needs no guard.
 #[test]
-fn defect_a_normally_completing_finally_overwrites_the_completion_value() {
-    // (source, what this engine answers, what ECMA-262 and node answer)
-    let rows: &[(&str, Out, f64)] = &[
-        ("try { 1; } finally { 2; }", Out::Number(2.0), 1.0),
-        (
-            "let s = 0; try { 1; } finally { s = 2; }",
-            Out::Number(2.0),
-            1.0,
-        ),
-        (
-            "try { throw 1; } catch (e) { 5; } finally { 9; }",
-            Out::Number(9.0),
-            5.0,
-        ),
-        (
-            "try { 1; } finally { if (true) { 7; } }",
-            Out::Number(7.0),
-            1.0,
-        ),
+fn a_normally_completing_finally_keeps_the_pending_completion_value() {
+    // (source, ECMA-262 and node, what the finalizer's own value would be)
+    let rows: &[(&str, f64, f64)] = &[
+        ("try { 1; } finally { 2; }", 1.0, 2.0),
+        ("let s = 0; try { 1; } finally { s = 2; }", 1.0, 2.0),
+        ("try { throw 1; } catch (e) { 5; } finally { 9; }", 5.0, 9.0),
+        ("try { 1; } finally { if (true) { 7; } }", 1.0, 7.0),
         (
             "let i = 0; try { 1; } finally { while (i < 2) { i = i + 1; } }",
-            Out::Number(2.0),
             1.0,
+            2.0,
         ),
     ];
-    for (source, engine, spec) in rows {
-        assert_eq!(
-            run(source),
-            *engine,
-            "DEFECT: {source} -- ECMA-262 says {spec}"
-        );
-        assert_ne!(
-            *engine,
-            Out::Number(*spec),
-            "row {source} is not a divergence"
-        );
+    for (source, spec, finalizers_own) in rows {
+        assert_ne!(spec, finalizers_own, "a row that proves nothing");
+        assert_eq!(run(source), Out::Number(*spec), "14.15.3 step 3: {source}");
     }
 
-    // The two shapes that are already right, so the defect is located rather
-    // than described: an *empty* finalizer leaves the value alone, and so
-    // does a `catch` -- 14.15.3's `try Block Catch` has no step 3 to miss.
+    // The two shapes that were already right, kept so the fix is located
+    // rather than described: an *empty* finalizer leaves the value alone, and
+    // so does a `catch` -- 14.15.3's `try Block Catch` has no step 3 to miss.
     assert_eq!(run("try { 1; } finally { }"), Out::Number(1.0));
     assert_eq!(run("try { 1; } catch (e) { }"), Out::Number(1.0));
+
+    // And the three things step 3 must NOT do. The finalizer still runs; an
+    // abrupt finalizer still replaces what was pending (14.15.3's last step);
+    // and a pending `return` still carries its own value past it.
+    assert_eq!(
+        run("let n = 0; try { 1; } finally { n = 5; } return n;"),
+        Out::Number(5.0)
+    );
+    assert_eq!(
+        run("function f() { try { return 1; } finally { return 2; } } return f();"),
+        Out::Number(2.0)
+    );
+    assert_eq!(
+        run("function f() { try { return 1; } finally { 9; } } return f();"),
+        Out::Number(1.0)
+    );
 }
 
 // =========================================================================
-// DEFECT 3 -- the fault code the host cannot read
+// The fault code, at the door a host actually reads
 // =========================================================================
 
 /// `runtime::FAULT_UNCAUGHT_THROW` exists so a host can tell "your script
-/// threw" from "your script is broken" -- that argument is written twice, at
-/// `src/runtime.rs`'s constant and at `src/emit.rs`'s copy of it. The public
-/// door is `tinyvm_qjs::guest_fault`, and `src/lib.rs:227` still matches only
-/// `FAULT_HEAP_EXHAUSTED`, so the new code falls into `_ => None` -- the same
-/// answer an ordinary guest fault gives.
+/// threw" from "your script is broken" -- that argument is written at
+/// `src/runtime.rs`'s constant. The public door is `tinyvm_qjs::guest_fault`,
+/// and it used to match only `FAULT_HEAP_EXHAUSTED`, so the new code fell into
+/// `_ => None` -- the same answer an ordinary guest fault gives. The
+/// capability was emitted and not delivered, and the suite missed it because
+/// `conditional_and_try.rs` reads the raw word out of linear memory rather
+/// than through the function a host would call.
 ///
-/// So the capability is emitted and not delivered. The suite does not catch
-/// it because `conditional_and_try.rs` reads the raw word out of linear
-/// memory rather than through the function a host would call.
-///
-/// DEFECT (open): one arm in `guest_fault` and one variant in `GuestFault`.
+/// FIXED: one variant, `GuestFault::UncaughtThrow`, and one arm. This test is
+/// deliberately written through the public door and not through the word.
 #[test]
-fn defect_an_uncaught_throw_is_invisible_through_the_public_guest_fault_door() {
+fn an_uncaught_throw_is_visible_through_the_public_guest_fault_door() {
     let mut throwing = instantiate("throw 1;");
     let error = throwing
         .invoke_by_name("main", &Value::args(&[]))
@@ -953,20 +955,28 @@ fn defect_an_uncaught_throw_is_invisible_through_the_public_guest_fault_door() {
     let memory = throwing.memory().expect("guest memory");
     // The word is written...
     assert_eq!(script_fault(&throwing), runtime::FAULT_UNCAUGHT_THROW);
-    // ...and the reader cannot see it.
+    // ...and the reader sees it.
     assert_eq!(
         tinyvm_qjs::guest_fault(&memory),
-        None,
-        "DEFECT: a host cannot tell an uncaught throw from a broken script"
+        Some(tinyvm_qjs::GuestFault::UncaughtThrow),
     );
 
-    // A genuinely broken script, for the comparison the host has to make.
+    // A genuinely broken script, for the comparison the host has to make. It
+    // is a different answer now, which is the whole point of the code.
     let mut broken = instantiate("const u = undefined; return u.a;");
     let _ = broken.invoke_by_name("main", &Value::args(&[]));
     assert_eq!(
         tinyvm_qjs::guest_fault(&broken.memory().expect("guest memory")),
         None,
-        "the two are one answer at the door"
+        "a broken script is not a throw"
+    );
+
+    // And a throw that is caught leaves nothing at the door at all.
+    let mut caught = instantiate("try { throw 1; } catch (e) { return e; }");
+    assert!(caught.invoke_by_name("main", &Value::args(&[])).is_ok());
+    assert_eq!(
+        tinyvm_qjs::guest_fault(&caught.memory().expect("guest memory")),
+        None
     );
 }
 
