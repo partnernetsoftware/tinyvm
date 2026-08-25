@@ -55,9 +55,9 @@
 
 use super::repr::{
     self, BlockType, Ins, ValType, WIDTH, box_bool, box_number, box_string, const_bool,
-    const_string, const_undefined, is_bool, is_function, is_null, is_nullish, is_number, is_object,
-    is_string, is_undefined, load_local, same_type, store_local, unbox_bool, unbox_number,
-    unbox_object, unbox_string,
+    const_string, const_undefined, is_array, is_bool, is_function, is_null, is_nullish, is_number,
+    is_object, is_string, is_undefined, load_local, same_type, store_local, unbox_bool,
+    unbox_number, unbox_object, unbox_string,
 };
 
 /// Byte 0..8 is left out of the data segment so a null pointer is never a
@@ -377,6 +377,16 @@ pub(crate) struct Ctx {
     pub(crate) prim_names: PrimNames,
     /// Where the three conversions live. See [`Conversions`].
     pub(crate) conversions: Conversions,
+    /// Whether this program can hold an Array -- the same gate
+    /// [`super::array`]'s set is emitted under.
+    ///
+    /// This set is *unconditional*, so the two arms it controls -- `__typeof`'s
+    /// and `__truthy`'s -- are in every module whether or not the flag exists.
+    /// Measured: appending them cost **11 bytes to every program**, including
+    /// `return 1;`, which is not the "nothing at all" the array gate promises
+    /// and the JSON gate delivers. Eleven bytes is small and the promise is
+    /// not: a gate that leaks is a gate nobody can quote.
+    pub(crate) arrays: bool,
 }
 
 impl Ctx {
@@ -668,6 +678,24 @@ fn type_of(ctx: &Ctx) -> FnBuild {
         test(0, &mut f.body);
         f.body.push(Ins::If(BlockType::Empty));
         const_string(at, &mut f.body);
+        f.body.push(Ins::Return);
+        f.body.push(Ins::End);
+    }
+    // 13.5.3 step 8 again: an Array is an ordinary Object as far as `typeof`
+    // is concerned, so this is a third arm answering the same string.
+    // `Array.isArray` is what distinguishes them in ECMA-262 and this engine
+    // does not have it -- worth knowing before reading `typeof a === "object"`
+    // as "not an array".
+    //
+    // Appended last, under the dispatch-order rule, *and* emitted only for a
+    // program that can hold one. It is outside the loop for that second
+    // reason: this set is unconditional, so an arm added here is an arm in
+    // every module, and the eleven bytes it costs `return 1;` are eleven more
+    // than the array gate promises.
+    if ctx.arrays {
+        is_array(0, &mut f.body);
+        f.body.push(Ins::If(BlockType::Empty));
+        const_string(names.object, &mut f.body);
         f.body.push(Ins::Return);
         f.body.push(Ins::End);
     }
@@ -970,7 +998,7 @@ fn to_number(ctx: &Ctx) -> FnBuild {
 ///
 /// `+0`, `-0` and `NaN` are the falsy Numbers, which is why the Number arm
 /// needs the value three times and therefore a scratch `f64` local.
-fn truthy(_ctx: &Ctx) -> FnBuild {
+fn truthy(ctx: &Ctx) -> FnBuild {
     let mut f = FnBuild::new(WIDTH);
     let scratch = f.local(ValType::F64);
 
@@ -1023,6 +1051,18 @@ fn truthy(_ctx: &Ctx) -> FnBuild {
     f.body.push(Ins::I32Const(1));
     f.body.push(Ins::Return);
     f.body.push(Ins::End);
+
+    // Step 8 a third time, and the one that surprises people: `[]` is truthy.
+    // An empty array is an Object, and 7.1.2 never looks inside one. Appended
+    // last, and emitted only under the array gate, for the reason
+    // [`type_of`]'s arm gives.
+    if ctx.arrays {
+        is_array(0, &mut f.body);
+        f.body.push(Ins::If(BlockType::Empty));
+        f.body.push(Ins::I32Const(1));
+        f.body.push(Ins::Return);
+        f.body.push(Ins::End);
+    }
 
     f.body.push(Ins::Unreachable);
     f

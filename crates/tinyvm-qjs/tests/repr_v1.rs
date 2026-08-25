@@ -99,6 +99,7 @@ impl Prog {
                 type_names,
                 prim_names,
                 conversions: conversions_at(CONVERT_BASE),
+                arrays: false,
             },
             cv: convert::Ctx {
                 func_base: CONVERT_BASE,
@@ -486,6 +487,9 @@ fn add_tests_number_before_string() {
         type_names: None,
         prim_names: PrimNames::intern(&mut StringPool::default()),
         conversions: conversions_at(CONVERT_BASE),
+        // These build the runtime directly, so they choose the gate the
+        // lowering would have chosen from the program: no array here.
+        arrays: false,
     };
     let funcs = runtime::build(&ctx);
     let add = funcs
@@ -531,6 +535,9 @@ fn a_new_type_costs_nothing_at_a_site_that_never_sees_it() {
         type_names: None,
         prim_names: PrimNames::intern(&mut StringPool::default()),
         conversions: conversions_at(CONVERT_BASE),
+        // These build the runtime directly, so they choose the gate the
+        // lowering would have chosen from the program: no array here.
+        arrays: false,
     };
     let arms: Vec<&'static str> = runtime::build(&ctx)
         .iter()
@@ -739,6 +746,9 @@ fn typeof_costs_nothing_in_a_program_that_never_asks() {
         type_names: None,
         prim_names: PrimNames::intern(&mut StringPool::default()),
         conversions: conversions_at(CONVERT_BASE),
+        // These build the runtime directly, so they choose the gate the
+        // lowering would have chosen from the program: no array here.
+        arrays: false,
     };
     let built = runtime::build(&ctx);
     let quiet_typeof = built

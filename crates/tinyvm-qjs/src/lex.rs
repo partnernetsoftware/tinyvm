@@ -238,8 +238,19 @@ impl TokenKind {
                 (Boundary::Subset, "the increment and decrement operators")
             }
             Self::AmpAmp | Self::PipePipe => (Boundary::Subset, "logical operators"),
-            // `[` graduated for `o[k]`, so a `[` the parser cannot use is the
-            // other thing it spells, which is still ahead of the engine.
+            // Reached only by the **M0** front end now. `[` has graduated for
+            // both things it spells -- `o[k]` and the ArrayLiteral -- so M1
+            // never asks this table about one: a `[` its parser cannot use is
+            // an ordinary syntax error and gets the parser's own wording
+            // ("needs an operand here" for a stray `]`), and an elision gets
+            // its own `FullJs` refusal. M0 lowers one integer expression and
+            // has neither, so for the front end that still asks, the phrase is
+            // true.
+            //
+            // Deleting the arm was tried and was wrong: it left M0 answering
+            // `[1]` with the generic "outside the expression subset", losing
+            // the name of the thing. `eval_qjs::host_call_with_args_is_third_world`
+            // is what said so.
             Self::LBracket | Self::RBracket => (Boundary::ThirdBinding, "array literals"),
             Self::Dot => (Boundary::ThirdBinding, "property access"),
             // `:` graduated for an ObjectLiteral, and the M1 parser now also

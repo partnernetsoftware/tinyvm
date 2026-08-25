@@ -403,6 +403,14 @@ pub(crate) mod m1 {
         /// each is a CreateDataPropertyOrThrow, so `{ a: 1, a: 2 }` is one
         /// property written twice and not two properties.
         Object(Vec<Property>),
+        /// An ArrayLiteral, ECMA-262 13.2.4. The elements are in source order.
+        ///
+        /// Elisions -- the hole in `[1, , 3]` -- are refused at the parser
+        /// rather than represented, because this engine has no way to tell a
+        /// hole from an `undefined` and would have to pick one silently. There
+        /// is therefore no `Option` here: every element is an expression that
+        /// was written.
+        Array(Vec<Expr>),
         /// A MemberExpression, ECMA-262 13.3.2 and 13.3.3.
         Member {
             object: Box<Expr>,

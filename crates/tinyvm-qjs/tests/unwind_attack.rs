@@ -116,6 +116,9 @@ impl Bases {
                 str_to_num: convert_base + Cv::StrToNum.offset(),
                 str_cmp: convert_base + Cv::StrCmp.offset(),
             },
+            // Built directly rather than through the lowering, so this picks
+            // the gate a program with no array would have picked.
+            arrays: false,
         };
         let cv = convert::Ctx {
             func_base: convert_base,

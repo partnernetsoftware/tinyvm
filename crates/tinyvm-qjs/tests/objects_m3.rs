@@ -728,7 +728,15 @@ fn object_facilities_this_engine_refuses() {
         "the `new` keyword",
         Boundary::FullJs,
     );
-    refuses_capability("return [1, 2];", "array literals", Boundary::ThirdBinding);
+    // Array literals landed; `tests/arrays_m3.rs` is where their behaviour is
+    // asserted now. What is left of them at this boundary is the elision --
+    // `[1, , 2]` -- because a hole is not an `undefined` and this engine has
+    // no way to tell one from the other.
+    refuses_capability(
+        "return [1, , 2];",
+        "elisions in an array literal",
+        Boundary::FullJs,
+    );
     // `Object.keys(o)` now stops one step earlier and says something better:
     // the call itself is a capability the engine has, so what is missing is
     // the *binding*. There is no global scope for `Object` to be in, and the

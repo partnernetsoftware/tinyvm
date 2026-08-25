@@ -98,6 +98,14 @@ fn sexpr(e: &Expr) -> String {
             }
             out + ")"
         }
+        ExprKind::Array(elements) => {
+            let mut out = "(array".to_string();
+            for element in elements {
+                out.push(' ');
+                out.push_str(&sexpr(element));
+            }
+            out + ")"
+        }
         // The two spellings print differently on purpose: they are two
         // ECMA-262 productions (13.3.2 and 13.3.3), and a shape test that
         // could not tell them apart could not state that.
@@ -736,7 +744,9 @@ fn what_the_front_end_cannot_read_yet_names_the_construct() {
         ("({ [k]: 1 });", "computed property keys"),
         ("({ f() { } });", "methods in object literals"),
         ("$0.new;", "a property named with a reserved word"),
-        ("[1];", "array"),
+        // `[1];` left this table when the Array milestone landed it; the one
+        // array form still ahead of the engine took its place.
+        ("[1, , 2];", "elisions in an array literal"),
         ("1, 2;", "comma"),
         // `1 ? 2 : 3` left this table when the conditional landed; a `:` the
         // parser cannot use is a label now, which is what it says.

@@ -29,6 +29,7 @@
 //! | 4   | Null      | always 0                                   |
 //! | 5   | Object    | guest pointer to an object record          |
 //! | 6   | Function  | guest pointer to a function record         |
+//! | 7   | Array     | guest pointer to a dense element vector    |
 //!
 //! `TAG_OBJECT` is 5 because it was the next free number when objects landed,
 //! and appending is the whole point: see *Dispatch order* below. `TAG_FUNCTION`
@@ -243,6 +244,19 @@ pub(crate) const TAG_OBJECT: i32 = 5;
 /// Appended rather than slotted in, for the reason the module header's
 /// *Dispatch order* section gives.
 pub(crate) const TAG_FUNCTION: i32 = 6;
+/// An Array: the payload is a guest pointer to the dense element vector
+/// [`super::array`] lays out at `ARR_HEADER`. Appended rather than slotted in,
+/// for the reason the module header's *Dispatch order* section gives.
+///
+/// It is a tag of its own and not an Object with integer-named properties,
+/// which is what ECMA-262 10.4.2 makes an Array and what the object record
+/// could already have expressed. That record stores `[key][tag][payload]` and
+/// finds a key by walking the entries with `__str_eq`, so `a[i]` under that
+/// spelling would allocate a key string per access -- through Dragon4, since
+/// the index is a Number -- and then scan. A dense vector reads element `i`
+/// with one bounds test and one multiply-add. An array's whole reason to
+/// exist is that the index *is* the address.
+pub(crate) const TAG_ARRAY: i32 = 7;
 
 /// The wasm value types one JS value occupies, in stack order.
 pub(crate) const SLOTS: [ValType; 2] = [ValType::I32, ValType::I64];
@@ -325,6 +339,18 @@ pub(crate) fn box_object(inner: &[Ins], out: &mut Vec<Ins>) {
 #[allow(dead_code)]
 pub(crate) fn box_function(inner: &[Ins], out: &mut Vec<Ins>) {
     out.push(Ins::I32Const(TAG_FUNCTION));
+    out.extend_from_slice(inner);
+    out.push(Ins::I64ExtendI32U);
+}
+
+/// `inner` leaves exactly one `i32` guest pointer to an array record.
+/// Result: one JS Array.
+///
+/// Unused when this module is compiled without `emit`, for the reason
+/// [`box_object`] gives.
+#[allow(dead_code)]
+pub(crate) fn box_array(inner: &[Ins], out: &mut Vec<Ins>) {
+    out.push(Ins::I32Const(TAG_ARRAY));
     out.extend_from_slice(inner);
     out.push(Ins::I64ExtendI32U);
 }
@@ -458,6 +484,10 @@ pub(crate) fn is_object(base: u32, out: &mut Vec<Ins>) {
 
 pub(crate) fn is_function(base: u32, out: &mut Vec<Ins>) {
     tag_is(base, TAG_FUNCTION, out);
+}
+
+pub(crate) fn is_array(base: u32, out: &mut Vec<Ins>) {
+    tag_is(base, TAG_ARRAY, out);
 }
 
 /// `null` or `undefined` -- the one pair ECMA-262 7.2.14 lets `==` bridge.

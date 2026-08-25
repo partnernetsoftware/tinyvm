@@ -1,0 +1,589 @@
+//! Array literals, indexing, `length`, and the property dispatch that reaches
+//! them.
+//!
+//! Same discipline as `objects_m3.rs`, which this file is the sibling of:
+//! every expectation is derived from ECMA-262 rather than from what the
+//! implementation happens to do, and every one of them **runs** -- compile ->
+//! tinyvm's load gate -> instantiate -> `invoke_by_name("main")`. "It
+//! compiled" is not evidence except in the refusal corpus, where not
+//! compiling is the claim.
+//!
+//! # What this milestone deliberately does not have
+//!
+//! No methods (`push`, `map`, `join`), no `Array.isArray`, no `Array`
+//! constructor, no `for…of`, no destructuring, and no array crossing the host
+//! boundary. Each is refused or absent for a reason recorded in
+//! `plan/design-array-milestone.md` §4, and the tests at the bottom pin the
+//! ones that produce a diagnostic so the refusal cannot quietly become a
+//! wrong answer.
+
+use tinyvm::{Limits, Val, WasmInstance, WasmModule};
+use tinyvm_qjs::{Boundary, Names, Options, Value, compile_qjs_m1, compile_qjs_m1_with};
+
+// =========================================================================
+// Harness
+// =========================================================================
+
+#[derive(Debug, Clone, PartialEq)]
+enum Out {
+    Undefined,
+    Null,
+    Number(f64),
+    Bool(bool),
+    Str(String),
+}
+
+/// The array tag, as `repr.rs` numbers it, and the record `array.rs` lays
+/// out. Written out rather than imported because both are crate-private: this
+/// is the contract restated from the outside, which is the only place it can
+/// be checked from -- and the only place a silent renumbering would be caught.
+const TAG_ARRAY: i32 = 7;
+const ARR_LEN: usize = 0;
+const ARR_CAP: usize = 4;
+const ARR_ELEMS: usize = 8;
+const ELEM_BYTES: usize = 12;
+
+fn attempt(source: &str) -> Result<(WasmInstance, Vec<Val>), String> {
+    let wasm = compile_qjs_m1(source).map_err(|e| format!("compiling {source:?}: {e}"))?;
+    let module = WasmModule::from_bytes_with(&wasm, Limits::default())
+        .map_err(|e| format!("load gate rejected {source:?}: {}", e.message()))?;
+    let mut instance = module
+        .instantiate()
+        .map_err(|e| format!("instantiating {source:?}: {}", e.message()))?;
+    let vals = instance
+        .invoke_by_name("main", &Value::args(&[]))
+        .map_err(|e| format!("trap in {source:?}: {}", e.message()))?;
+    Ok((instance, vals))
+}
+
+#[track_caller]
+fn run(source: &str) -> Out {
+    let (instance, vals) = attempt(source).unwrap_or_else(|e| panic!("{e}"));
+    let value = Value::returned(&vals)
+        .unwrap_or_else(|e| panic!("{source:?}: cannot read the result back: {e}"));
+    match value {
+        Value::Undefined => Out::Undefined,
+        Value::Null => Out::Null,
+        Value::Number(x) => Out::Number(x),
+        Value::Bool(b) => Out::Bool(b),
+        Value::String(ptr) => Out::Str(read_string(&instance, ptr).expect("a string record")),
+    }
+}
+
+fn read_string(instance: &WasmInstance, ptr: i32) -> Result<String, String> {
+    let view = instance
+        .memory()
+        .map_err(|e| format!("no guest memory: {}", e.message()))?;
+    let bytes: &[u8] = &view;
+    let at = ptr as usize;
+    let header = bytes
+        .get(at..at + 4)
+        .ok_or_else(|| format!("string header at {ptr} is out of bounds"))?;
+    let len = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+    let body = bytes
+        .get(at + 4..at + 4 + len)
+        .ok_or_else(|| format!("string body at {ptr} (len {len}) is out of bounds"))?;
+    String::from_utf8(body.to_vec()).map_err(|_| "string is not valid UTF-8".to_string())
+}
+
+fn word(bytes: &[u8], at: usize) -> i32 {
+    i32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+}
+
+#[track_caller]
+fn number(source: &str, want: f64) {
+    assert_eq!(run(source), Out::Number(want), "{source:?}");
+}
+
+#[track_caller]
+fn string(source: &str, want: &str) {
+    assert_eq!(run(source), Out::Str(want.to_string()), "{source:?}");
+}
+
+#[track_caller]
+fn boolean(source: &str, want: bool) {
+    assert_eq!(run(source), Out::Bool(want), "{source:?}");
+}
+
+#[track_caller]
+fn undefined(source: &str) {
+    assert_eq!(run(source), Out::Undefined, "{source:?}");
+}
+
+#[track_caller]
+fn traps(source: &str) {
+    match attempt(source) {
+        Err(message) => assert!(
+            message.contains("trap in"),
+            "{source:?} failed for the wrong reason: {message}"
+        ),
+        Ok((_, vals)) => panic!("{source:?} produced {vals:?} instead of trapping"),
+    }
+}
+
+#[track_caller]
+fn refuses_capability(source: &str, needle: &str, boundary: Boundary) {
+    match compile_qjs_m1(source) {
+        Ok(bytes) => panic!(
+            "{source:?} compiled to {} bytes; expected a capability diagnostic",
+            bytes.len()
+        ),
+        Err(e) => {
+            assert!(
+                e.message.contains(needle),
+                "{source:?}: want a message naming {needle:?}, got {}",
+                e.message
+            );
+            assert_eq!(e.boundary, boundary, "{source:?}: wrong boundary");
+        }
+    }
+}
+
+// =========================================================================
+// The literal
+// =========================================================================
+
+#[test]
+fn an_array_literal_holds_its_elements_in_source_order() {
+    number("return [10, 20, 30][0];", 10.0);
+    number("return [10, 20, 30][1];", 20.0);
+    number("return [10, 20, 30][2];", 30.0);
+}
+
+#[test]
+fn an_array_holds_every_kind_of_value() {
+    number("return [1][0];", 1.0);
+    string("return [\"a\"][0];", "a");
+    boolean("return [true][0];", true);
+    undefined("return [undefined][0];");
+    assert_eq!(run("return [null][0];"), Out::Null);
+    // An element is a whole V1 pair, so a nested array is a pointer like any
+    // other and nothing is flattened.
+    number("return [[1, 2], [3, 4]][1][0];", 3.0);
+    number("return [{ a: 7 }][0].a;", 7.0);
+}
+
+#[test]
+fn elements_are_expressions_and_are_evaluated_in_order() {
+    number("let n = 1; return [n, n + 1, n + 2][2];", 3.0);
+    // 13.2.4.1 evaluates each ElementList entry in turn, so a side effect in
+    // an earlier element is visible to a later one.
+    number(
+        "let n = 0; let a = [n = n + 1, n = n + 1]; return a[0] + a[1];",
+        3.0,
+    );
+}
+
+#[test]
+fn an_empty_array_is_a_real_array() {
+    number("return [].length;", 0.0);
+    // 7.1.2 step 8: an Object is always true, and it never looks inside.
+    // `[]` being truthy is the case people expect to be false.
+    boolean("if ([]) { return true; } return false;", true);
+    string("return typeof [];", "object");
+}
+
+#[test]
+fn a_trailing_comma_is_not_an_element() {
+    // 12.9.6: the trailing comma is grammar, not an elision.
+    number("return [1, 2, 3, ].length;", 3.0);
+    number("return [1, ].length;", 1.0);
+}
+
+// =========================================================================
+// Indexing
+// =========================================================================
+
+#[test]
+fn an_index_past_the_end_is_undefined_and_not_a_fault() {
+    // 10.1.8.1 with no prototype: an absent property reads `undefined`. A trap
+    // would make `if (a[i])` unusable, which is the shape scripts actually
+    // write.
+    undefined("return [1, 2][5];");
+    undefined("return [][0];");
+    // The bounds test is unsigned, so a negative index is the same comparison
+    // and not a second one.
+    undefined("return [1, 2][0 - 1];");
+}
+
+#[test]
+fn an_index_that_is_not_an_integer_is_not_an_index() {
+    // 10.4.2.1 makes an array index a canonical numeric string, which `1.5`
+    // and `NaN` are not. Neither is a property this array has, so both read
+    // `undefined` rather than truncating to 1 -- truncation would be a
+    // fabricated answer, which is the failure this engine refuses everywhere.
+    undefined("return [10, 20][3 / 2];");
+    undefined("return [10, 20][0 / 0];");
+}
+
+#[test]
+fn a_string_key_on_an_array_is_not_an_index_here() {
+    // **A recorded divergence.** ECMA-262 10.4.2.1 works on the String form,
+    // so `a["0"]` is element 0 in a conforming engine. It is `undefined` here:
+    // closing the gap means running 7.1.21 CanonicalNumericIndexString on
+    // every string key of every array access, and the population this
+    // milestone exists for -- `JSON.parse` of a broker answer, then `a[i]` in
+    // a loop -- never writes one.
+    //
+    // Pinned rather than left unsaid: a divergence nobody wrote down is a
+    // divergence somebody rediscovers as a bug.
+    undefined("return [10, 20][\"0\"];");
+}
+
+#[test]
+fn assignment_writes_the_element() {
+    number("let a = [1, 2]; a[0] = 9; return a[0];", 9.0);
+    number("let a = [1, 2]; a[1] = 9; return a[0] + a[1];", 10.0);
+    number("let a = []; a[0] = 7; return a[0];", 7.0);
+}
+
+#[test]
+fn a_write_past_the_end_extends_the_array_with_undefined() {
+    // ECMA-262 makes the gap *holes*, which differ from `undefined` only
+    // through `in`, `hasOwnProperty`, `Object.keys` and the iteration methods
+    // that skip them -- none of which this engine has, so the two are
+    // indistinguishable from every script it can run. `array.rs`'s `arr_set`
+    // records this in full, including what stops being true when one of those
+    // arrives.
+    number("let a = [1]; a[3] = 9; return a.length;", 4.0);
+    undefined("let a = [1]; a[3] = 9; return a[2];");
+    number("let a = [1]; a[3] = 9; return a[3];", 9.0);
+    // Appending exactly at the end is the ordinary growth path.
+    number(
+        "let a = []; a[0] = 1; a[1] = 2; a[2] = 3; return a.length;",
+        3.0,
+    );
+}
+
+#[test]
+fn a_compound_assignment_reads_and_writes_the_same_element_once() {
+    number("let a = [1, 2]; a[0] += 10; return a[0];", 11.0);
+    number("let a = [5]; a[0] -= 2; return a[0];", 3.0);
+    // The receiver and the key are evaluated once and held, which is what
+    // makes a side-effecting index safe.
+    number(
+        "let n = 0; let a = [1, 1]; a[n = n + 1] += 10; return a[1] + n;",
+        12.0,
+    );
+}
+
+#[test]
+fn an_update_operator_works_through_an_index() {
+    number("let a = [1]; a[0]++; return a[0];", 2.0);
+    number("let a = [1]; return a[0]++;", 1.0);
+    number("let a = [1]; return ++a[0];", 2.0);
+}
+
+// =========================================================================
+// `length`
+// =========================================================================
+
+#[test]
+fn length_is_the_element_count() {
+    number("return [].length;", 0.0);
+    number("return [1].length;", 1.0);
+    number("return [1, 2, 3].length;", 3.0);
+    number("let a = [1]; a[0] = 2; return a.length;", 1.0);
+}
+
+#[test]
+fn length_is_reachable_under_both_spellings() {
+    // `.length` is a *Static* key on an array, which is the case that broke
+    // the first design of this milestone: the rule was "a Static key never
+    // needs the array path, because an IdentifierName is never an index", and
+    // it is true and does not follow. See `emit::m1::Lower::accessor`.
+    number("return [1, 2, 3].length;", 3.0);
+    number("return [1, 2, 3][\"length\"];", 3.0);
+    number("let k = \"length\"; return [1, 2, 3][k];", 3.0);
+}
+
+#[test]
+fn a_loop_over_length_reads_every_element() {
+    number(
+        "let a = [1, 2, 3, 4]; let s = 0; \
+         for (let i = 0; i < a.length; i = i + 1) { s = s + a[i]; } return s;",
+        10.0,
+    );
+}
+
+#[test]
+fn any_other_property_of_an_array_is_absent_and_not_a_fault() {
+    undefined("return [1].foo;");
+    undefined("return [1][\"foo\"];");
+}
+
+// =========================================================================
+// Identity and the type
+// =========================================================================
+
+#[test]
+fn two_arrays_are_equal_only_when_they_are_the_same_array() {
+    // 7.2.15 step 4, SameValueNonNumber: reference identity. The allocator
+    // hands out one address per array, so the existing payload comparison
+    // already is one -- no arm was added for this, the same way none was
+    // added for Object.
+    boolean("let a = [1]; return a === a;", true);
+    boolean("let a = [1]; let b = [1]; return a === b;", false);
+    boolean("let a = [1]; let b = a; return a === b;", true);
+    boolean("let a = []; return a !== [];", true);
+}
+
+#[test]
+fn typeof_an_array_is_object() {
+    // 13.5.3 step 8. There is no `Array.isArray` here, so `typeof` cannot be
+    // read as "not an array" -- worth stating, because that is exactly how a
+    // script ported from a real engine will read it.
+    string("return typeof [];", "object");
+    string("return typeof [1, 2];", "object");
+}
+
+#[test]
+fn an_array_has_no_primitive_form() {
+    // 7.1.1 ToPrimitive needs the `valueOf`/`toString` a prototype would
+    // carry, and this engine has no prototypes -- the same reason `"" + {}`
+    // traps. It is a trap and not a fabricated `"1,2"`.
+    traps("return [1] + 1;");
+    traps("return \"\" + [1];");
+    traps("return [1] * 2;");
+}
+
+#[test]
+fn an_array_is_not_callable() {
+    traps("let a = [1]; return a();");
+}
+
+// =========================================================================
+// Objects are untouched
+// =========================================================================
+
+#[test]
+fn object_access_still_works_in_a_program_that_has_arrays() {
+    // The dispatcher tests Object first and returns, so an object access in an
+    // array-using program takes the same path it always did. This is the test
+    // that says the two types did not get entangled.
+    number("let a = [1]; let o = { x: 2 }; return o.x + a[0];", 3.0);
+    number("let a = [1]; let o = { x: 2 }; return o[\"x\"];", 2.0);
+    number("let a = [1]; let o = {}; o.y = 5; return o.y;", 5.0);
+    number(
+        "let a = [1]; let o = {}; o[\"y\"] = 5; return o[\"y\"];",
+        5.0,
+    );
+    // A Number key on an *object* is still ToPropertyKey'd to its digits,
+    // which is 7.1.19 and unchanged by arrays existing.
+    number("let a = [1]; let o = {}; o[1] = 5; return o[\"1\"];", 5.0);
+}
+
+#[test]
+fn a_property_of_a_non_object_still_traps() {
+    traps("return undefined[0];");
+    traps("return null[0];");
+    traps("let x = 1; return x[0];");
+}
+
+// =========================================================================
+// Refusals
+// =========================================================================
+
+#[test]
+fn an_elision_is_refused_by_name() {
+    // A hole is not an `undefined`, and this engine has nothing that could
+    // tell them apart -- so reading one as the other would be unobservably
+    // wrong today and silently wrong the day `in` or `forEach` arrives.
+    // Refusing costs a script nothing: nobody writes an elision on purpose.
+    for source in ["[1, , 3];", "[, 1];", "let a = [1, , ]; return 0;"] {
+        refuses_capability(source, "elisions in an array literal", Boundary::FullJs);
+    }
+}
+
+#[test]
+fn the_array_facilities_this_engine_does_not_have_are_refused_by_name() {
+    // Each of these is refused by something that existed before arrays did,
+    // and the point of asserting it here is that landing the type did not
+    // quietly turn any of them into a wrong answer.
+    refuses_capability(
+        "return new Array(3);",
+        "the `new` keyword",
+        Boundary::FullJs,
+    );
+    refuses_capability(
+        "return [...[1]];",
+        "the spread and rest syntax",
+        Boundary::ThirdBinding,
+    );
+    refuses_capability(
+        "let a = [1]; return [...a];",
+        "the spread and rest syntax",
+        Boundary::ThirdBinding,
+    );
+}
+
+#[test]
+fn two_neighbours_answer_with_a_syntax_error_rather_than_a_capability() {
+    // Neither is a regression from this milestone and neither is ideal, so
+    // both are pinned as they are rather than as they should be -- a
+    // diagnostic nobody asserted is a diagnostic that drifts.
+    //
+    // **Array destructuring** is read as a `const` with no name, which is the
+    // same answer object destructuring has always given: the declarator parser
+    // wants an identifier and reports the token it found. Consistent, and it
+    // does not say the word "destructuring".
+    for source in ["const [a] = [1]; return a;", "const {a} = {a:1}; return a;"] {
+        let e = compile_qjs_m1(source).expect_err("refused");
+        assert!(
+            e.message.contains("needs a name after the `const` keyword"),
+            "{source:?}: got {}",
+            e.message
+        );
+    }
+
+    // **`for (const x of a)`** reports the `const` binding rather than the
+    // `of`, which is a known defect: written as `let` or `var` the same loop
+    // correctly names `of`. Recorded downstream in `agenterm-qjswasm`'s README
+    // as the one diagnostic still pointing at the wrong token; this is the
+    // upstream test that will notice when it is fixed.
+    let e = compile_qjs_m1("for (const x of [1]) { } return 0;").expect_err("refused");
+    assert!(
+        e.message.contains("needs a value for the `const` binding"),
+        "the `for…of` diagnostic changed -- if it now names `of`, the defect is          fixed and this assertion should say so: {}",
+        e.message
+    );
+}
+
+#[test]
+fn an_array_method_is_absent_at_run_time_rather_than_refused_at_compile_time() {
+    // `[1, 2].map` is not a diagnostic, and that is correct rather than a gap:
+    // the receiver of a property access is a run-time fact, so an absent
+    // property is `undefined` (10.1.8.1 with no prototype) and calling it is
+    // the trap. The same shape `objects_m3::a_property_of_a_non_object_traps`
+    // records for `"ab".length`.
+    //
+    // Worth a test of its own because the diagnostic a reader *expects* here
+    // is "arrays have no methods yet", and they will not get one -- so the
+    // trap has to be the documented answer rather than a surprise.
+    undefined("return [1, 2].map;");
+    undefined("return [1, 2].push;");
+    traps("let f = function (x) { return x; }; return [1, 2].map(f);");
+}
+
+#[test]
+fn a_non_index_property_write_on_an_array_traps() {
+    // There is nowhere in a dense vector to put it. A trap and not a dropped
+    // write: a dropped write is a value the script believes it stored and
+    // reads back as `undefined` later, somewhere else, with nothing pointing
+    // at the assignment that lost it.
+    //
+    // `plan/design-array-milestone.md` names giving the record a second,
+    // general property store as the disease this milestone must detect rather
+    // than satisfy. This test is the detector.
+    traps("let a = [1]; a.foo = 2; return 0;");
+    traps("let a = [1]; a[\"foo\"] = 2; return 0;");
+    traps("let a = [1]; a.length = 0; return 0;");
+    traps("let a = [1]; a[3 / 2] = 2; return 0;");
+}
+
+// =========================================================================
+// The gate
+// =========================================================================
+
+#[test]
+fn a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was() {
+    // The promise `plan/design-array-milestone.md` §1.1 makes, as a test
+    // rather than as a sentence. These are the exact byte counts from before
+    // the milestone landed; the first measurement of it broke all three by 11
+    // bytes, because `__typeof` and `__truthy` are in the *unconditional*
+    // runtime and their Array arms had been appended there unguarded.
+    for (source, want) in [
+        ("return 1;", 9_784),
+        ("let o = {a:1}; o.b = 2; return o.a;", 9_905),
+        ("let o = {a:1}; let k = \"a\"; return o[k];", 9_865),
+    ] {
+        let n = compile_qjs_m1(source).expect("compiles").len();
+        assert_eq!(
+            n, want,
+            "{source:?} is {n} bytes; an array-free program must pay nothing for arrays"
+        );
+    }
+}
+
+#[test]
+fn naming_json_brings_the_array_set_because_parse_can_return_one() {
+    // The other half of the gate's predicate, and the reason it is exact: no
+    // `[` appears in this source and an array can still come out of it, so
+    // gating on the literal alone would be a gate with a hole in it.
+    let n = compile_qjs_m1("return JSON.stringify({a:1});")
+        .expect("compiles")
+        .len();
+    assert_eq!(
+        n, 15_037,
+        "the array set costs 753 bytes on top of the JSON set's 14 284; if this moved, \
+         say so in `function_values::the_whole_fleet_library_compiles_and_its_methods_are_reachable`, \
+         which quotes the same arithmetic"
+    );
+}
+
+#[test]
+fn the_record_is_the_dense_vector_the_design_says_it_is() {
+    // The layout has no observable surface in this subset -- there is no
+    // `Object.keys`, no `for…in`, and `JSON.stringify` of an array is a later
+    // milestone -- and a guarantee with no test is a guarantee that quietly
+    // stops holding. So this walks the record itself, the way
+    // `objects_m3.rs` walks the object record, and it is the layout's
+    // specification as much as `array.rs` is.
+    let (instance, vals) = attempt("return [10, 20, 30];").expect("runs");
+    let [Val::I32(tag), Val::I64(payload)] = vals.as_slice() else {
+        panic!("want one V1 pair back, got {vals:?}");
+    };
+    assert_eq!(*tag, TAG_ARRAY, "the array tag is 7");
+
+    let view = instance.memory().expect("guest memory");
+    let bytes: &[u8] = &view;
+    let a = *payload as u32 as usize;
+    assert_eq!(word(bytes, a + ARR_LEN), 3, "three elements");
+    assert_eq!(
+        word(bytes, a + ARR_CAP),
+        3,
+        "a literal allocates at its exact length and never reallocates"
+    );
+
+    let elems = word(bytes, a + ARR_ELEMS) as usize;
+    for (i, want) in [10.0f64, 20.0, 30.0].into_iter().enumerate() {
+        let at = elems + i * ELEM_BYTES;
+        assert_eq!(word(bytes, at), 1, "element {i} is tagged Number");
+        let payload = u64::from_le_bytes(bytes[at + 4..at + 12].try_into().expect("8 bytes"));
+        assert_eq!(f64::from_bits(payload), want, "element {i}");
+    }
+}
+
+#[test]
+fn an_array_cannot_leave_through_the_host_face() {
+    // Deliberate, and the same answer an Object gets: the payload is a guest
+    // heap reference the host has no layout for and no way to keep alive.
+    // `Value` gains no Array variant here. A script that wants the host to see
+    // an array's contents returns a property of it.
+    let vals = attempt("return [1];").expect("runs").1;
+    let err = Value::returned(&vals).expect_err("an Array has no host-side variant");
+    assert!(
+        err.contains("Array") || err.contains("unknown tag"),
+        "the refusal should name what it cannot carry, got {err:?}"
+    );
+}
+
+#[test]
+fn the_declared_names_mode_reaches_arrays_too() {
+    // The gate is a property of the program, not of the naming mode, and the
+    // product uses `Names::Declared`. A milestone that only worked under the
+    // default would not be reachable from `agenterm-qjswasm` at all.
+    let wasm = compile_qjs_m1_with(
+        "return [1, 2].length;",
+        Options {
+            names: Names::Declared(Vec::new()),
+        },
+    )
+    .expect("compiles under Declared");
+    let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
+    let mut instance = module.instantiate().expect("instantiates");
+    let vals = instance
+        .invoke_by_name("main", &Value::args(&[]))
+        .expect("runs");
+    assert_eq!(Value::returned(&vals), Ok(Value::Number(2.0)));
+}

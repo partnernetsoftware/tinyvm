@@ -1652,10 +1652,57 @@ pub(crate) mod m1 {
                 // which is why `{}` alone is an empty block and `({})` is the
                 // object). Here it can only be an ObjectLiteral.
                 TokenKind::LBrace => self.object_literal()?,
+                // 13.2.4. In expression position a `[` can only open an
+                // ArrayLiteral: the other thing a `[` spells is a computed
+                // member access, and that one is read by the postfix loop
+                // after an operand, never here.
+                TokenKind::LBracket => self.array_literal()?,
                 _ => return Err(self.cannot_use("needs an operand here")),
             };
             self.shallower(1);
             Ok(Expr { kind, span })
+        }
+
+        // -- array literals --------------------------------------------------
+
+        /// An ArrayLiteral, ECMA-262 13.2.4. The `[` is under the cursor.
+        ///
+        /// **Elisions are refused, not represented.** `[1, , 3]` is a
+        /// three-element array whose middle element is a *hole*, and a hole is
+        /// distinguishable from `undefined` only through `in`,
+        /// `hasOwnProperty`, `Object.keys` and the iteration methods that skip
+        /// it -- none of which this engine has. Reading it as `undefined`
+        /// would therefore be unobservably wrong today and silently wrong the
+        /// day one of those arrives, which is the worse of the two failures.
+        /// Refusing by name costs a script nothing: nobody writes an elision
+        /// on purpose.
+        ///
+        /// A trailing comma is not an elision (12.9.6) and is accepted, the
+        /// same way [`Parser::object_literal`] accepts one.
+        fn array_literal(&mut self) -> Result<ExprKind, CompileError> {
+            self.deeper(2)?;
+            let open = self.peek().offset;
+            self.advance();
+            let mut elements = Vec::new();
+            while !self.eat(&TokenKind::RBracket) {
+                if self.peek().kind == TokenKind::Comma {
+                    return Err(unsupported(
+                        Boundary::FullJs,
+                        "elisions in an array literal",
+                        self.peek().offset,
+                    ));
+                }
+                elements.push(self.expression(BP_ASSIGN)?);
+                if !self.eat(&TokenKind::Comma) {
+                    self.expect(
+                        &TokenKind::RBracket,
+                        &format!("needs a `,` or a `]` in the array literal opened at byte {open}"),
+                    )?;
+                    break;
+                }
+            }
+            self.shallower(2);
+            Ok(ExprKind::Array(elements))
         }
 
         // -- object literals -------------------------------------------------
@@ -1964,12 +2011,9 @@ pub(crate) mod m1 {
     fn unlowered_by_m1(kind: &TokenKind) -> bool {
         matches!(
             kind,
-            // Array literals, and `o[k]` is the only other thing a `[` spells.
-            TokenKind::LBracket
-                | TokenKind::RBracket
-                // A `:` that neither an object literal nor a `?:` consumed is
-                // a label.
-                | TokenKind::Colon
+            // A `:` that neither an object literal nor a `?:` consumed is
+            // a label.
+            TokenKind::Colon
                 // The comma operator. A `,` in an argument list, a parameter
                 // list, a declarator list or an object literal is consumed
                 // where it belongs and never reaches here.
@@ -2176,6 +2220,11 @@ pub(crate) mod m1 {
             ExprKind::Object(properties) => {
                 for property in properties {
                     fill_expr(&mut property.value, res);
+                }
+            }
+            ExprKind::Array(elements) => {
+                for element in elements {
+                    fill_expr(element, res);
                 }
             }
             ExprKind::Member { object, key } => {

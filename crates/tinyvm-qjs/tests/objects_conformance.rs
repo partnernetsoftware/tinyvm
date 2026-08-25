@@ -1431,11 +1431,15 @@ fn the_neighbouring_syntax_is_refused_by_name() {
         "template literals",
         Boundary::Subset,
     );
-    refuses_capability("return [1, 2];", "array literals", Boundary::ThirdBinding);
+    // Array literals used to be two entries here. They landed, so what is
+    // left of them at this boundary is the one shape that did *not*: an
+    // elision, which is a hole and not an `undefined`, and which this engine
+    // has no way to tell apart from one. `tests/arrays_m3.rs` holds what
+    // `[1, 2]` and `{ k: [o.a] }` do now.
     refuses_capability(
-        "const o = { a: 1 }; return { k: [o.a] };",
-        "array literals",
-        Boundary::ThirdBinding,
+        "return [1, , 2];",
+        "elisions in an array literal",
+        Boundary::FullJs,
     );
     refuses_capability(
         "const k = \"a\"; const o = { [k]: 1 }; return 0;",
@@ -1474,7 +1478,7 @@ fn every_refusal_names_a_boundary_and_a_place() {
         "const o = {}; return o?.a;",
         "const o = {}; const { a } = o; return 0;",
         "const o = {}; for (const k in o) { } return 0;",
-        "return [1, 2];",
+        "return [1, , 2];",
         "const o = {}; return o.;",
         "const o = {}; return o[;",
         "const o = { a: };",

@@ -1462,7 +1462,12 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     // receiver of a property access is a run-time fact, so a String receiver
     // is refused where its type is known, which is at run time. That trap is
     // `objects_m3::a_property_of_a_non_object_traps`.
-    ("let a = [1]; return 0;", "array literals"),
+    //
+    // Array literals left it too, the same way and for the same reason:
+    // `tests/arrays_m3.rs` asserts their behaviour now. What did *not* leave
+    // with them is the elision -- `[1, , 3]` is still refused, because a hole
+    // is not an `undefined` and this engine has no way to tell them apart.
+    ("[1, , 3];", "elisions in an array literal"),
     ("let x = 1; x?.y;", "optional chaining"),
     (
         "function f(a) { return a; } return f(...1);",
@@ -1564,8 +1569,12 @@ fn a_diagnostic_points_at_the_construct_it_names() {
 #[test]
 fn the_boundary_is_classified_not_just_worded() {
     assert_eq!(refuse("2 ** 3").boundary, Boundary::Subset);
+    // `ThirdBinding` needs a host table to be reachable at all, now that
+    // array literals and property access have both graduated out of it: what
+    // is left in that class is about the *door*, not about the language. The
+    // case this used to use was `let a = [1];`.
     assert_eq!(
-        refuse("let a = [1]; return 0;").boundary,
+        refuse_in("print = 1;", Names::HostImport).boundary,
         Boundary::ThirdBinding
     );
     assert_eq!(refuse("this;").boundary, Boundary::FullJs);

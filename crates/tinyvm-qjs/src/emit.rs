@@ -317,15 +317,17 @@ fn emit(expr: &Expr, hosts: &[String], out: &mut Vec<Ins>) {
 pub(crate) mod m1 {
     use std::collections::{BTreeMap, BTreeSet};
 
+    use crate::array::{self, Ar};
     use crate::ast::m1 as ast;
     use crate::convert;
     use crate::diag::{Boundary, CompileError, host_table, unsupported};
     use crate::ir::m1 as ir;
     use crate::opts::{HostFn, HostParam, HostResult, Names, Options};
     use crate::repr::{
-        self, BlockType, Ins, ValType, WIDTH, box_bool, box_function, box_number, box_object,
-        box_string, const_bool, const_null, const_number, const_string, const_undefined,
-        drop_value, load_local, store_local, unbox_function, unbox_number, unbox_string,
+        self, BlockType, Ins, ValType, WIDTH, box_array, box_bool, box_function, box_number,
+        box_object, box_string, const_bool, const_null, const_number, const_string,
+        const_undefined, drop_value, load_local, store_local, unbox_function, unbox_number,
+        unbox_string,
     };
     use crate::runtime::{
         self, ALIGN_WORD, Conversions, Ctx, FN_ELEMENT, FnBuild, Rt, STRING_HEADER, StringPool,
@@ -598,7 +600,16 @@ pub(crate) mod m1 {
         } else {
             0
         };
-        let user_base = json_base + json_len;
+        // The array set follows the JSON set, so a program with neither has
+        // exactly the indices it always had, and a program with only `JSON`
+        // keeps its own -- the two gates are independent and both append.
+        let arr_base = json_base + json_len;
+        let arr_len = if scan.arrays {
+            array::SET.len() as u32
+        } else {
+            0
+        };
+        let user_base = arr_base + arr_len;
         let ctx = Ctx {
             func_base: runtime_base,
             heap_global: HEAP_GLOBAL,
@@ -609,6 +620,7 @@ pub(crate) mod m1 {
                 str_to_num: convert_base + convert::Cv::StrToNum.offset(),
                 str_cmp: convert_base + convert::Cv::StrCmp.offset(),
             },
+            arrays: scan.arrays,
         };
         let cv = convert::Ctx {
             func_base: convert_base,
@@ -657,11 +669,22 @@ pub(crate) mod m1 {
             Vec::new()
         };
 
+        let array_set: Vec<runtime::RtFunc> = if scan.arrays {
+            array::build(&array::Ctx {
+                func_base: arr_base,
+                runtime_base,
+                names: array::Names::intern(&mut pool),
+            })
+        } else {
+            Vec::new()
+        };
+
         let mut funcs: Vec<ir::Func> = Vec::new();
         for built in runtime::build(&ctx)
             .into_iter()
             .chain(convert::build(&cv))
             .chain(json_set)
+            .chain(array_set)
         {
             let type_index = intern(&mut types, built.params.clone(), built.results.clone());
             funcs.push(func(
@@ -710,6 +733,7 @@ pub(crate) mod m1 {
                 &table,
                 &mut fns,
                 uniform,
+                scan.arrays.then_some(arr_base),
                 unwind,
                 json,
                 user_base,
@@ -1230,6 +1254,17 @@ pub(crate) mod m1 {
         indirect: bool,
         /// The widest argument list at an indirect call site.
         call_arity: u32,
+        /// Whether the program can produce an Array, which is exactly: it
+        /// writes an ArrayLiteral, or it names `JSON`.
+        ///
+        /// `JSON` is in the predicate because `JSON.parse` builds an array out
+        /// of text the compiler never sees. Nothing else can bring one into
+        /// existence -- a computed access in a program with neither can never
+        /// find an array to index -- so the predicate is *exact*, which is the
+        /// property `json`'s own gate is chosen for and the property a gate
+        /// has to have to be worth having. Set in one place,
+        /// [`Scan::finish_arrays`], so the two halves cannot drift.
+        arrays: bool,
         /// Whether the program names this engine's `JSON` -- see
         /// [`ast::Res::Json`].
         ///
@@ -1333,6 +1368,11 @@ pub(crate) mod m1 {
         // where the script had written a `catch` for it -- which is `fleet.js`
         // lines 15 to 19, the reason the feature exists.
         out.throws |= out.json;
+        // The other half of the array gate. `JSON.parse` can return an array
+        // from text no ArrayLiteral appears in, so a program that names `JSON`
+        // needs the set whether or not it writes `[`. Both halves are set
+        // here so neither can be forgotten at the other's site.
+        out.arrays |= out.json;
         Ok(out)
     }
 
@@ -1505,6 +1545,10 @@ pub(crate) mod m1 {
             ast::ExprKind::Object(properties) => properties
                 .iter()
                 .try_for_each(|property| host_expr(&property.value, scan)),
+            ast::ExprKind::Array(elements) => {
+                scan.arrays = true;
+                elements.iter().try_for_each(|el| host_expr(el, scan))
+            }
             ast::ExprKind::Member { object, key } => {
                 host_expr(object, scan)?;
                 match key {
@@ -1547,6 +1591,19 @@ pub(crate) mod m1 {
         Global(u32),
     }
 
+    /// Which pair of accessors a member expression reaches. See
+    /// [`Lower::accessor`].
+    #[derive(Debug, Clone, Copy)]
+    enum Accessor {
+        /// `__obj_get` / `__obj_set`, taking the key as an interned string
+        /// record. Every Static key, and every key at all in a program with no
+        /// arrays.
+        Obj,
+        /// `__prop_get` / `__prop_set`, taking the key as a whole V1 pair so
+        /// an index never becomes digits. Carries the index of `__arr_new`.
+        Prop(u32),
+    }
+
     /// What an assignment or an update writes to: ECMA-262's ~simple~
     /// AssignmentTargetType, in the two forms 13.15.1 gives it here.
     ///
@@ -1562,9 +1619,24 @@ pub(crate) mod m1 {
         Member {
             /// Base of the value local holding the receiver.
             object: u32,
-            /// The raw `i32` local holding the key's string record.
-            key: u32,
+            /// Where the key is held between evaluating it and writing.
+            key: TargetKey,
         },
+    }
+
+    /// How a held key is stored, which is [`Accessor`]'s distinction seen from
+    /// the assignment side: the accessor a target will reach decides the shape
+    /// its key has to be kept in, and holding the wrong one would mean
+    /// converting it back at the write.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TargetKey {
+        /// One raw `i32`: the interned string record, already ToPropertyKey'd.
+        /// What `__obj_get`/`__obj_set` take.
+        Raw(u32),
+        /// One value local: the whole V1 pair, so `__prop_set` can still see a
+        /// Number where the source wrote one. Carries the index of
+        /// `__arr_new` beside it, because the write needs both.
+        Pair { slot: u32, base: u32 },
     }
 
     struct Lower<'a> {
@@ -1580,6 +1652,10 @@ pub(crate) mod m1 {
         /// The signature every call through a value speaks, or `None` for a
         /// program the scan said has no such call and no such value.
         uniform: Option<Uniform>,
+        /// Index of `__arr_new`, or `None` for a program the array gate
+        /// refused -- which emits none of that set and keeps the pre-array
+        /// lowering of a computed access, exactly as it was.
+        arrays: Option<u32>,
         /// Where a throw in flight lives, or `None` for a program with no
         /// `throw` in it -- which emits no check and no global.
         unwind: Option<Unwind>,
@@ -1630,6 +1706,7 @@ pub(crate) mod m1 {
             table: &'a Table,
             fns: &'a mut FnTable,
             uniform: Option<Uniform>,
+            arrays: Option<u32>,
             unwind: Option<Unwind>,
             json: Option<Json>,
             user_base: u32,
@@ -1676,6 +1753,7 @@ pub(crate) mod m1 {
                 table,
                 fns,
                 uniform,
+                arrays,
                 unwind,
                 json,
                 user_base,
@@ -2507,15 +2585,24 @@ pub(crate) mod m1 {
                 }
                 ast::ExprKind::Name(name) => self.name(name),
                 ast::ExprKind::Object(properties) => self.object_literal(properties),
+                ast::ExprKind::Array(elements) => self.array_literal(elements),
                 // 13.3.2.1 and 13.3.3.1 both evaluate the object first and the
-                // key second, which is exactly the order the two words and the
-                // one word have to reach `__obj_get` in -- so a member read
-                // needs no scratch local at all.
+                // key second, which is exactly the order the operands have to
+                // reach the accessor in -- so a member read needs no scratch
+                // local at all, under either spelling.
                 ast::ExprKind::Member { object, key } => {
                     self.expr(object)?;
-                    self.key(key)?;
-                    let call = self.ctx.call(Rt::ObjGet);
-                    self.push(call);
+                    match self.accessor(key) {
+                        Accessor::Obj => {
+                            self.key(key)?;
+                            let call = self.ctx.call(Rt::ObjGet);
+                            self.push(call);
+                        }
+                        Accessor::Prop(base) => {
+                            self.key_pair(key)?;
+                            self.push(Ins::Call(base + Ar::PropGet.offset()));
+                        }
+                    }
                     Ok(())
                 }
                 // A function expression reached here rather than as a
@@ -2575,6 +2662,92 @@ pub(crate) mod m1 {
             Ok(())
         }
 
+        /// Build one ArrayLiteral, ECMA-262 13.2.4.
+        ///
+        /// The vector is allocated at the literal's exact length, so a literal
+        /// never reallocates -- the same reason `__obj_new` takes a count.
+        ///
+        /// The pointer lives in a *raw* local rather than a value local while
+        /// the elements are evaluated, because `__arr_push` takes the pointer
+        /// and not the pair: keeping the boxed form would mean unboxing it
+        /// once per element to hand back the same `i32` the allocator just
+        /// returned.
+        fn array_literal(&mut self, elements: &[ast::Expr]) -> Result<(), CompileError> {
+            let base = self
+                .arrays
+                .expect("the scan sets `arrays` for any program with an array literal");
+            let raw = self.take_raw();
+            self.push(Ins::I32Const(elements.len() as i32));
+            self.push(Ins::Call(base + Ar::New.offset()));
+            self.push(Ins::LocalSet(raw));
+            for element in elements {
+                self.push(Ins::LocalGet(raw));
+                self.expr(element)?;
+                self.push(Ins::Call(base + Ar::Push.offset()));
+            }
+            box_array(&[Ins::LocalGet(raw)], &mut self.f.body);
+            self.give_raw(raw);
+            Ok(())
+        }
+
+        /// Which accessor a member expression reaches: the dispatcher when
+        /// this program can hold an array, and the object accessors when it
+        /// cannot.
+        ///
+        /// # This split used to be Static-vs-Computed, and that was wrong
+        ///
+        /// `plan/design-array-milestone.md` §2.2 argued that a Static key
+        /// could keep the pre-array path unconditionally, "because an
+        /// IdentifierName is never a canonical numeric string, so `o.a` can
+        /// never be an index". Both halves are true and the conclusion does
+        /// not follow: **`a.length` is a Static key on an array**, and it does
+        /// not want to be an index -- it wants the header word. Under the
+        /// narrower rule it reached `__obj_get`, whose receiver test is
+        /// `unbox_object`, and `[1,2,3].length` trapped. Measured, not
+        /// reasoned: it is what the first end-to-end probe of this milestone
+        /// printed.
+        ///
+        /// So the gate is the program, not the node. What the design note
+        /// promised is still kept, because what it promised was that *a
+        /// program with no array pays nothing* -- and one still pays nothing:
+        /// no set, no dispatcher, byte-identical output. What it also implied,
+        /// that an array-using program's dotted object accesses stay free,
+        /// was never load-bearing and is now false by two tag tests: one for
+        /// the Object arm that returns immediately, and one inside
+        /// `__to_string`, which answers a String with itself.
+        ///
+        /// Still not a per-call-site exemption, which is the rule
+        /// [`Lower::key`] states: this asks a property of the whole program,
+        /// never a guess about one receiver's type.
+        fn accessor(&self, _key: &ast::MemberKey) -> Accessor {
+            match self.arrays {
+                Some(base) => Accessor::Prop(base),
+                None => Accessor::Obj,
+            }
+        }
+
+        /// Leave one JS *value* on the stack: the key, unconverted.
+        ///
+        /// The pair-shaped counterpart of [`Lower::key`], for the dispatcher.
+        /// The two arms are still ECMA-262's two and in the same relation --
+        /// 13.3.2.1's key is the String value of the IdentifierName, so the
+        /// Static arm is a String constant and has run ToPropertyKey by
+        /// construction; 13.3.3.1's is an expression whose ToPropertyKey has
+        /// not run yet, and `__prop_get` is what decides whether it needs to.
+        /// Deferring that decision is the whole point: an index reaching
+        /// `__to_string` first would be decimal digits before anything could
+        /// notice it was a Number.
+        fn key_pair(&mut self, key: &ast::MemberKey) -> Result<(), CompileError> {
+            match key {
+                ast::MemberKey::Static(name) => {
+                    let pointer = self.pool.intern(name);
+                    const_string(pointer, &mut self.f.body);
+                }
+                ast::MemberKey::Computed(expr) => self.expr(expr)?,
+            }
+            Ok(())
+        }
+
         /// Leave one `i32` on the stack: the string record naming the property.
         ///
         /// The two arms are ECMA-262's two, not a fast path and a slow one. A
@@ -2612,9 +2785,17 @@ pub(crate) mod m1 {
                 Target::Binding(place) => self.load(place),
                 Target::Member { object, key } => {
                     load_local(object, &mut self.f.body);
-                    self.push(Ins::LocalGet(key));
-                    let call = self.ctx.call(Rt::ObjGet);
-                    self.push(call);
+                    match key {
+                        TargetKey::Raw(raw) => {
+                            self.push(Ins::LocalGet(raw));
+                            let call = self.ctx.call(Rt::ObjGet);
+                            self.push(call);
+                        }
+                        TargetKey::Pair { slot, base } => {
+                            load_local(slot, &mut self.f.body);
+                            self.push(Ins::Call(base + Ar::PropGet.offset()));
+                        }
+                    }
                 }
             }
         }
@@ -2633,10 +2814,22 @@ pub(crate) mod m1 {
                 }
                 Target::Member { object, key } => {
                     load_local(object, &mut self.f.body);
-                    self.push(Ins::LocalGet(key));
-                    load_local(slot, &mut self.f.body);
-                    let call = self.ctx.call(Rt::ObjSet);
-                    self.push(call);
+                    match key {
+                        TargetKey::Raw(raw) => {
+                            self.push(Ins::LocalGet(raw));
+                            load_local(slot, &mut self.f.body);
+                            let call = self.ctx.call(Rt::ObjSet);
+                            self.push(call);
+                        }
+                        TargetKey::Pair {
+                            slot: key_slot,
+                            base,
+                        } => {
+                            load_local(key_slot, &mut self.f.body);
+                            load_local(slot, &mut self.f.body);
+                            self.push(Ins::Call(base + Ar::PropSet.offset()));
+                        }
+                    }
                 }
             }
         }
@@ -2644,7 +2837,10 @@ pub(crate) mod m1 {
         /// Give back the scratch a member target held, innermost first.
         fn release(&mut self, target: Target) {
             if let Target::Member { object, key } = target {
-                self.give_raw(key);
+                match key {
+                    TargetKey::Raw(raw) => self.give_raw(raw),
+                    TargetKey::Pair { slot, .. } => self.give(slot),
+                }
                 self.give(object);
             }
         }
@@ -3218,12 +3414,26 @@ pub(crate) mod m1 {
                     let slot = self.take();
                     self.expr(object)?;
                     store_local(slot, &mut self.f.body);
-                    let raw = self.take_raw();
-                    self.key(key)?;
-                    self.push(Ins::LocalSet(raw));
+                    let held = match self.accessor(key) {
+                        Accessor::Obj => {
+                            let raw = self.take_raw();
+                            self.key(key)?;
+                            self.push(Ins::LocalSet(raw));
+                            TargetKey::Raw(raw)
+                        }
+                        Accessor::Prop(base) => {
+                            let key_slot = self.take();
+                            self.key_pair(key)?;
+                            store_local(key_slot, &mut self.f.body);
+                            TargetKey::Pair {
+                                slot: key_slot,
+                                base,
+                            }
+                        }
+                    };
                     Ok(Target::Member {
                         object: slot,
-                        key: raw,
+                        key: held,
                     })
                 }
                 _ => unreachable!("the parser refuses every other assignment target"),

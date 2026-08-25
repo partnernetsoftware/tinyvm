@@ -3,11 +3,16 @@
 Owner: [tinyvm PRD](../prd/PRD.md) · Downstream consumer:
 `agenterm/crates/agenterm-qjswasm`
 
-Status: **designed, not implemented.** Written after reading the whole Object
-path end to end, because four decisions a straightforward implementation gets
-wrong were only visible from there. Nothing in this file is measured; every
-number in it is a byte count of existing code, and the two places where a
-measurement is owed say so.
+Status: **stage 1 landed** — the type, the literal, indexing, `length`, and the
+property dispatch. Stage 2 is `JSON.parse`/`JSON.stringify` of an array, which
+is what the acceptance target in *Why now* actually needs; until it lands,
+`fleet.tabs.list()` still comes back as text.
+
+Implementing it corrected this file twice, and both corrections are recorded in
+place rather than rewritten away. §2.2's admission rule was **wrong** and is
+struck through below. §1.1's promise was **broken by the first implementation**,
+measured, and then made true. The two measurements §6 said were owed: one is
+now taken and is in §5, the other is still owed and still says so.
 
 ## Why now
 
@@ -105,16 +110,31 @@ which §1.1 forbids.
 **Rejected — recognise an array receiver at the emit site.** The compiler
 usually cannot know, and where it can, §1.2 forbids acting on it.
 
-**Chosen — a second entry point reached only from the Computed arm.**
-`__prop_get(receiver_pair, key_pair)` and `__prop_set(receiver_pair,
-key_pair, value_pair)`. A Static key is never an array index — an
-IdentifierName is not a canonical numeric string — so the Static arm keeps
-today's exact path and pays *nothing*. The Computed arm pays one dispatch,
-which it needs regardless.
+**Chosen — a second entry point, `__prop_get(receiver_pair, key_pair)` and
+`__prop_set(receiver_pair, key_pair, value_pair)`.**
 
-This is legal under §1.2 for the reason `emit.rs::key()` already writes down
-about itself: the distinction is Static-vs-Computed, a property of the node,
-which no later change can quietly widen.
+~~Reached only from the Computed arm. A Static key is never an array index — an
+IdentifierName is not a canonical numeric string — so the Static arm keeps
+today's exact path and pays *nothing*.~~
+
+**That admission rule was wrong, and the first end-to-end run of the milestone
+is what said so: `[1,2,3].length` trapped.** Both halves of the sentence are
+true and the conclusion does not follow — `a.length` is a **Static key on an
+array**, and it does not want to be an index, it wants the header word. Under
+the narrower rule it reached `__obj_get`, whose receiver test is
+`unbox_object`.
+
+So the gate is the **program**, not the node: when the array set exists, every
+member access goes through the dispatcher, and a Static key reaches it as a
+boxed String pair. What §1.1 promises is still kept — a program with no array
+still pays nothing, byte for byte. What this section additionally *implied*,
+that an array-using program's dotted object accesses stay free, was never
+load-bearing and is now false by two tag tests and about three bytes per
+access (§5).
+
+Still not a per-call-site exemption, which is what §1.2 forbids: the question
+asked is a property of the whole program, never a guess about one receiver's
+type. The live version of this argument is at `emit::m1::Lower::accessor`.
 
 `__prop_get`, in order:
 
@@ -202,7 +222,44 @@ the acceptance target in *Why now*.
   a budget refusal and the honest outcome — but it is a denial-of-service
   shape worth an adversarial test in `heap_attack.rs` rather than a note.
 
-## §5 Acceptance
+## §5 What it measured
+
+Taken with `compile_qjs_m1`, byte counts of the emitted module, each source
+compiled before and after the milestone. The commands are one `cargo run` over
+the five sources; the assertions live in
+`tests/arrays_m3.rs::a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was`
+and `::naming_json_brings_the_array_set_because_parse_can_return_one`, so the
+numbers are locked rather than quoted.
+
+| source | before | after | Δ |
+|--------|-------:|------:|--:|
+| `return 1;` | 9 784 | 9 784 | **0** |
+| `let o = {a:1}; o.b = 2; return o.a;` | 9 905 | 9 905 | **0** |
+| `let o = {a:1}; let k = "a"; return o[k];` | 9 865 | 9 865 | **0** |
+| `return JSON.stringify({a:1});` | 14 284 | 15 037 | **+753** |
+| `scripts/qjs/lib/fleet.js` | 20 935 | 22 076 | **+1 141** |
+
+**§1.1 held only after being broken.** The first implementation cost every
+program **11 bytes**, including `return 1;`. The leak was `__typeof`'s and
+`__truthy`'s Array arms: `runtime::SET` is unconditional, so an arm appended
+there is in every module. Both are now emitted under `runtime::Ctx::arrays`,
+the same gate the set uses, and the three array-free rows above are identical
+to the byte. Eleven bytes is small and the promise is not — a gate that leaks
+is a gate nobody can quote.
+
+**The array set costs 753 bytes**, measured on one source before and after, and
+against the JSON set's 4 421 as the comparable.
+
+**`fleet.js`'s +1 141 is 753 + 388.** The remaining 388 is spread across its
+~130 member accesses, about three bytes each: the price of the §2.2 correction.
+
+**Still owed, and still not estimated:** the *steps* an indexed loop costs
+against the same loop over an object with string keys — the number that either
+justifies §2.1's eighth tag or refutes it. §2.1 stands as **reasoned**, not
+measured. It is not blocking: nothing in stage 1 depends on the answer, and a
+wrong answer would change the representation rather than the surface.
+
+## §6 Acceptance
 
 Not "arrays exist". Three things, in order, each falsifiable:
 
@@ -218,9 +275,5 @@ Item 3 is the one that matters: it is the only case in that file written to
 fail on success, and it is what turns "arrays landed" from a claim into a
 measurement someone else can rerun.
 
-**Two measurements are owed and are not in this file**: the bytes the gated
-array set adds to a module that uses one (against the `JSON` set's 4 421 as
-the comparable), and the steps a `for` loop over `a[i]` costs against the same
-loop over an object with the same number of properties — the number that
-either justifies §2.1 or refutes it. Neither may be estimated; §2.1 stands as
-*reasoned* until they exist.
+Both measurements this file asked for are accounted for in §5: the byte one is taken,
+the step one is still owed and says so.
