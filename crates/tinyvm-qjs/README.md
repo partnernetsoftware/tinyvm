@@ -58,14 +58,26 @@ instance's linear memory, not text, and resolving it needs the instance.
   the text can settle, blocks, `if`/`else`, `while`, three-part `for`, `return`,
   and the script's ECMA-262 completion value.
 - **Functions**: declarations and expressions, named or not, with parameters,
-  recursion and mutual recursion. Calls are direct: a callee has to be a name
-  bound to a known function.
+  recursion and mutual recursion -- and a function is a **value**. It can be
+  stored in a binding or a property, passed, returned, and called from
+  wherever it ended up: `o.m()`, `o.a.b()`, `f()()`. `typeof` answers
+  `"function"`, every one of them is truthy, and `===` on two of them is
+  identity — where *identity* means ECMA-262 15.2.5's: each **evaluation** of
+  a function expression is a new object, so `mk() === mk()` is `false` and
+  reading one binding twice is `true`. A call with too few arguments passes `undefined` and one with too
+  many evaluates and discards the surplus. Calling something that is *not* a
+  function **traps** -- ECMA-262 makes it a TypeError and there is no `throw`
+  here -- and it traps at the tag test, before any table is reached. Two
+  things a function value still is not: it has no `this` (so `o.m()` calls the
+  function `o.m` holds and the function cannot see `o`), and it has no
+  prototype (so `f.call`, `f.bind` and `f.length` are a trap and not a
+  method).
 - **Operators**: every rung the ladder has — assignment and its compound forms,
   `||`, `&&`, `==`/`!=`/`===`/`!==`, `<` `<=` `>` `>=`, `+` `-`, `*` `/` `%`,
   prefix and postfix `++`/`--`, unary `+ - !`, and grouping. `&&` and `||`
-  short-circuit; `+` concatenates when **both** sides are strings — see
-  "String conversion is the missing algorithm" below, because that is narrower
-  than JavaScript's `+` and narrower than this sentence used to claim. `%` is
+  short-circuit; `+` concatenates when **either** side is a String, running
+  ToString on both — ECMA-262 13.15.3 step 1.d, and see "The three
+  conversions" below. `%` is
   ECMA-262's remainder, with the sign of the dividend and exact for operands a
   rounded quotient would get wrong — `-6 % 3` is `-0` and
   `2147483647 * 2147483647 % 1000` is `608`. `typeof` answers with the
@@ -76,7 +88,8 @@ instance's linear memory, not text, and resolving it needs the instance.
 - **Objects**: literals (`{}`, `{ a: 1 }`, shorthand `{ a }`, a trailing comma,
   and string- or number-literal keys), property reads by dot and by computed
   key, and property assignment including the compound and update forms —
-  `o.a += 2`, `o.a++`. Keys are Strings, so `o[1]` and `o["1"]` are one slot;
+  `o.a += 2`, `o.a++`. Keys are Strings, so `o[1]` and `o["1"]` are one slot
+  and `o[0.5]` is the property `"0.5"`;
   a property that is not there reads `undefined` rather than trapping;
   property order is insertion order; and `===` on two Objects is reference
   identity. Reading a property *of* a primitive (`"abc".length`, `(1).a`)
@@ -114,42 +127,144 @@ Number-first say so where they depart: `__obj_get`/`__obj_set` test Object first
 first. `===` on two Objects needed no new arm at all: the payload comparison
 already is reference identity, which is ECMA-262 7.2.15 step 4.
 
-## String conversion is the missing algorithm
+Functions are `TAG_FUNCTION`, a seventh tag, and they paid the law's price
+exactly: one arm appended last in each of those same three functions, and
+nothing anywhere else. `===` again needed no arm, and *why* it needed none is
+worth reading, because the first answer was wrong. It said "one function gets
+one element index however many times it is read", which is true and is not a
+proof: the case it does not cover is one function expression **evaluated**
+twice, which ECMA-262 15.2.5 makes two objects and an element index made one.
+So a function value's payload is the address of a per-evaluation record, and
+the arm is right for exactly the reason the Object arm is: a bump allocator
+hands out one address per object. The site a function value runs hot, the
+call, is not a ladder at all but a single tag test, which is one test whatever
+the tag domain grows to.
 
-`+` between two Strings concatenates. Every other combination **traps**, and so
-does every operator that would need a String converted the other way:
+## The three conversions, and the fourth that is still missing
+
+`+` concatenates whenever **either** side is a String, `-`/`*`/`/`/`%` and the
+unary operators convert a numeric String, `<` and its three siblings compare
+two Strings by code unit, and `==` bridges a Number and a String:
 
 ```js
-"a" + 1     // traps; JavaScript says "a1"
-1 + "a"     // traps
-"a" + true  // traps, and so do null, undefined and an object
-"1" - 1     // traps; JavaScript says 0
--"1"        // traps
-"a" < "b"   // traps; JavaScript says true
-1 == "1"    // traps; JavaScript says true (`===` answers `false`, correctly)
+"a" + 1     // "a1"
+1 + "a"     // "1a"
+"a" + true  // "atrue", and so do null and undefined
+"1" - 1     // 0
+-"  42  "   // -42, and +"0x1f" is 31, and +"" is 0, and +"nope" is NaN
+"a" < "b"   // true
+1 == "1"    // true   (`===` answers false, correctly)
 ```
 
-Three ECMA-262 algorithms are missing and these are all of their sites:
-Number::toString (6.1.6.1.20), StringToNumber (7.1.4.1) and String relational
-comparison (7.2.13). The objects milestone brought `__num_to_str` in for the
-*integer* case of the first, which is why `o[1234]` works — but `+` was not
-rewired to it. That is the single largest thing between this compiler and
-`JSON.stringify`, and it is why the acceptance test for the `fleet.js` parameter
-path has to pass its tab id as the String `"7"`.
+Three ECMA-262 algorithms sit behind that, in `convert.rs`, and each is the
+whole algorithm rather than the easy part of it:
 
-Coercing an Object to a primitive traps for a different reason: ToPrimitive
-(7.1.1) needs the `valueOf`/`toString` that a prototype would carry, and there
-is no prototype. ToBoolean needs none, so the truthiness ladder answers, and
-every Object is truthy including `{}`.
+- **Number::toString (6.1.6.1.20)** is Steele & White's free-format Dragon4 in
+  Burger & Dybvig's formulation: the value is held as an exact rational with
+  the half-gaps to its two neighbours, and digits come out until one
+  distinguishes it from both. Step 5's three conditions all bite — *shortest*
+  is why `0.1` prints `0.1`, *closest* is why `0.1 + 0.2` prints
+  `0.30000000000000004`, and *even* is why `785068460487425.25` prints
+  `…5.2` where Rust's own shortest-round-trip formatter prints `…5.3`. Steps 6
+  to 9 place the point, and they are the spec's thresholds and not a
+  formatter's: exponential above `n > 21` and below `n <= -6`.
+- **StringToNumber (7.1.4.1)** is the whole `StrNumericLiteral` grammar —
+  whitespace, sign, `Infinity`, hex/octal/binary, and the empty string being
+  `+0`. Its core is exact: the decimal becomes a ratio of big integers and is
+  divided **once**, so the answer is correctly rounded and not an accumulation
+  of roundings. The one fast path is Clinger 1990's theorem and not a guess.
+- **String relational comparison (7.2.13)** decodes to UTF-16 code units. A
+  byte compare would be wrong: UTF-8 byte order is *code point* order, so it
+  answers `"\u{10000}" > "\u{E000}"` and the spec answers the other way.
+
+There is a bignum behind the first two, in 16-bit limbs, and the limb size is
+chosen by the instruction set rather than by preference: `repr.rs`'s `Ins` has
+no `i32.shr_u` and no 64-bit arithmetic, so carry extraction is `i32.div_s`,
+which is unsigned only below `2^31`.
+
+**They cost 6 625 bytes in every emitted module**, measured through this
+crate's own encoder by stubbing the 23 conversion bodies: an empty script went
+2 620 to 9 771. That is unconditional, like the rest of the runtime prelude,
+and it is the largest single thing a compiled module carries. The lever, if
+the number ever matters, is per-algorithm gating —
+`the_emitted_size_of_each_conversion_is_written_down` in `tests/conversions.rs`
+prints what each one weighs — and the reason it is not pulled now is that the
+predicate is "does this program contain an addition or a comparison", whose
+false negative is a trap where an answer was due.
+
+The conversion that is **still** missing is a fourth one, ToPrimitive (7.1.1).
+It needs the `valueOf`/`toString` a prototype would carry, and there is no
+prototype, so an Object or a function operand traps:
+
+```js
+"" + {}     // traps; JavaScript says "[object Object]"
+{} + ""     // traps
+const o = {}, k = {}; o[k]   // traps; a key runs ToString too
+```
+
+ToBoolean needs no prototype, so the truthiness ladder answers, and every
+Object and every function is truthy.
+
+## The function value, and why there is a table
+
+wasm MVP has no first-class function reference, so a call through a value is
+`call_indirect` on the module's own funcref table. That instruction matches the
+callee's signature *exactly* (spec 4.4.8), and JavaScript's calls match
+nothing, so the table does not hold the user's functions: it holds one
+**adapter** per function that became a value, all of one uniform signature,
+each forwarding as many arguments as its target declares and letting the rest
+fall away. The uniform arity is a bound — the widest parameter list in the
+program, or the widest indirect call site, whichever is more.
+
+The alternative designs and why they lost are written at `emit::m1`'s header.
+The short form: adapting *at the call site* would put one `call_indirect` per
+arity at every site, and adapting *in the callee*, by giving every function one
+wide signature, would make a single eight-parameter function anywhere charge
+every zero-argument direct call eight `undefined` pairs. The adapter keeps the
+cost on the functions that became values.
+
+`TAG_FUNCTION`'s payload is **a guest pointer to a one-word record holding the
+element index**, and not the index itself. The index was the first answer and
+it was wrong: one function expression has one index however many times it is
+*evaluated*, and ECMA-262 15.2.5 makes each evaluation a new object, so
+`function mk() { return function () {}; } mk() === mk()` answered `true`. One
+address per evaluation is what makes them two, and the address is what the
+allocator already hands out — so `===` stayed a payload comparison with no arm
+added, for exactly the reason it works for Object. A function value is
+therefore something a *scope* holds: a declaration is instantiated when the
+statement list holding it is entered, `const f = function () {}` at its
+declarator, and a binding whose name is never read as a value costs nothing at
+all.
+
+Three guards stand between a payload and a jump, and they are in this order:
+the tag test, which is what makes `undefined()` a clean fault; a range check
+that the payload *fits* the pointer it is about to become, because narrowing
+an `i64` with a bare `i32.wrap_i64` let `(TAG_FUNCTION, 2^32 + 1)` reach
+element 1 silently; and element 0 being left null, so a zeroed word is never a
+callable element. `tests/indirect_attack.rs` is where all three are attacked.
+
+A script that makes no function a value emits **no table, no element segment
+and no adapter**. What every script pays is the growth law's price of a seventh
+type — one arm appended last in each of `__typeof`, `__truthy` and
+`__to_number` — plus 29 bytes for `__fn_new`. Measured on this crate's own
+encoder: a function-valued property costs about **128 bytes** (the function,
+its adapter, its element and the assignment), a call through a value costs
+about **70 bytes** where the direct call it replaces costs about 28, and
+`fleet.js` in whole comes to 16 381.
 
 ## What it does not compile, and how it says so
 
-Arrays, closures that capture, **function values** (a function may be called by
-name but not stored, passed or returned), **calling anything that is not a
-statically known name** — which includes every method call, `o.f()` and
-`JSON.parse(s)` alike — `class`, `throw`/`try`, `for…of`, `break`/`continue`,
-`switch`, template literals, the bitwise and shift levels, `?:`, the comma
-operator, `**`, `??`, BigInt, `JSON`, and the numeric literal forms above.
+Arrays, closures that capture, `this`, arrow functions, `class`,
+`throw`/`try`, `for…of`, `break`/`continue`, `switch`, template literals, the
+bitwise and shift levels, `?:`, the comma operator, `**`, `??`, BigInt,
+`JSON`, and the numeric literal forms above.
+
+Calling a value is no longer on that list, and one consequence is worth
+stating because it changes what a diagnostic says: `Object.keys(o)` and
+`JSON.stringify(o)` used to stop at the *call* and now stop at the *name*. The
+engine can make the call; it has no binding named `Object` or `JSON` to make it
+on, and there is no global scope for one to be in. `o.toString()` compiles and
+traps instead, because the property is simply absent.
 
 Two object-shaped refusals are their own sentences: a property named with a
 reserved word the lexer spells as a keyword (`o.new`, `o.class`, `o.default` —
@@ -166,6 +281,18 @@ That wording is a product requirement, not a style preference. A subset this
 small rejects mostly perfectly good scripts, so a sentence blaming the author
 would be a lie, and a sentence that names no boundary leaves the reader guessing
 where the engine stops.
+
+Which is why the *other* direction is a lie too, and it took a conformance
+corpus to notice. `o.m = function (x) { return x; } function rec() {}` — two
+statements, one line, no `;` — used to be refused with "this engine does not
+support the `function` keyword yet", a keyword the engine has had since M1.
+That sends the reader hunting for a workaround instead of at the missing
+semicolon. The end of a statement now says what it was looking for and names
+ECMA-262 12.10, and only two kinds of token keep a capability phrase there,
+because for them it is true: a `,` or a `:` would have *continued* the
+expression, and the lexer's `Unsupported` bucket is beyond the engine whatever
+the lexeme is. The same debt at operand and header positions is still open and
+is recorded in `conformance_m2.rs`.
 
 Two bounds are the engine's rather than the language's, and say so the same way:
 syntax nested past the compiler's frame budget (a stack overflow is a process
@@ -313,9 +440,20 @@ cargo run -p tinyvm-qjs --example commissar
 
 `agenterm/scripts/qjs/lib/fleet.js` is the acceptance target: 231 lines that
 wrap one host call in a tree of namespace tables. Compiling it whole stops at
-line 14, and the reduced fragments say exactly where the remaining walls are.
+**line 14, byte 727**:
 
-Compiles today:
+```js
+const resultJson = __host.fleet_call(opId, params === undefined ? "{}" : params);
+//                                                              ^ byte 727
+```
+
+> this engine does not support conditional expressions yet
+
+A byte offset is where the parser stops first, not how far it got: the parser
+stops at the *first* refusal, so 727 of 6 280 is not 12% done. Which is why
+what follows is measured by compiling fragments.
+
+Compiles and runs today:
 
 | fragment | |
 | --- | --- |
@@ -324,22 +462,29 @@ Compiles today:
 | `function params(tab, note) { return { tab: tab, note: note }; }` | all 7 of its distinct parameter-object shapes |
 | `if (params === undefined) { return "{}"; }` | the default-argument test, as a statement |
 | `call("tabs.list", "{}")` | a call to a statically known name, including a declared host door |
+| `fleet.tabs.list = function () { … };` | all **29** of its function-valued properties |
+| `fleet.tabs.list()`, `__host.fleet_call(op, p)`, `JSON.parse(s)` | all **10** of its calls through a value |
 
-Still refused, most-blocking first — each row is the diagnostic the compiler
-actually prints:
+With its two remaining walls written the way this engine spells them — the
+conditional as an `if`, the `try` gone — the whole library compiles to
+**16 381 bytes** and clears the load gate: 110 defined functions, a 30-element
+table (29 adapters and the null element 0), and exactly the two imports
+`js.JSON` and `js.__host`. That is
+`the_whole_fleet_library_compiles_and_its_methods_are_reachable` in
+`tests/function_values.rs`. It was 9 007 bytes before the conversions landed,
+and 6 625 of the 7 374 it grew by is the conversion prelude every module now
+carries.
+
+Still refused — each row is the diagnostic the compiler actually prints:
 
 | fragment | diagnostic |
 | --- | --- |
-| `fleet.tabs.list = function () { … };` | this engine does not support using a function as a value yet |
-| `__host.fleet_call(op, params)` | this engine does not support calling a value that is not a known function yet |
 | `params === undefined ? "{}" : params` | this engine does not support conditional expressions yet |
 | `try { … } catch (_err) { … }` | this engine does not support the `try` keyword yet |
-| `JSON.parse(s)` / `JSON.stringify(o)` | this engine does not support calling a value that is not a known function yet |
 
-Two of those are one wall: `fleet.js` is 29 function-valued properties and
-10 method calls, and both need a function to be a value that a property can hold
-and a call can find. `JSON.stringify` needs that *and* the String conversions
-above.
+Those are the only two left. `JSON.parse`/`JSON.stringify` compile, and what
+they need in order to **run** is a host: `JSON` resolves to an import under
+`Names::HostImport`. The String conversions they used to also need are in.
 
 ## Who consumes it
 

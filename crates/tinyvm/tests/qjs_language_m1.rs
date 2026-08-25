@@ -427,6 +427,130 @@ fn qjs_m1_builds_objects_and_reads_their_properties() {
     assert_eq!(value("return {} === {};"), Value::Bool(false));
 }
 
+/// Functions are values: stored in a binding and a property, passed, returned,
+/// and called from wherever they ended up — through the shipped face, so the
+/// call goes through the module's own funcref table and its adapters.
+///
+/// The shape is `fleet.js`'s again: a namespace table whose entries are
+/// functions, reached by `o.a.b()`.
+#[test]
+fn qjs_m1_stores_passes_and_calls_a_function_value() {
+    // A namespace table of methods, called through the property that holds
+    // each one.
+    number(
+        "const fleet = {};
+         fleet.tabs = {};
+         fleet.tabs.list = function () { return 1; };
+         fleet.tabs.count = function (n) { return n * 10; };
+         return fleet.tabs.list() + fleet.tabs.count(4);",
+        41.0,
+    );
+    // Passed as an argument and returned as a result.
+    number(
+        "function apply(f, x) { return f(x); }
+         function twice(x) { return x + x; }
+         return apply(twice, 21);",
+        42.0,
+    );
+    number(
+        "function pick() { return function () { return 7; }; }
+         return pick()();",
+        7.0,
+    );
+    // ECMA-262 8.6.1 and 13.3.8.1: too few arguments are `undefined`, too many
+    // are evaluated and dropped.
+    assert_eq!(
+        value("const o = {}; o.m = function (a) { return a; }; return o.m();"),
+        Value::Undefined
+    );
+    number(
+        "const o = {}; o.m = function (a) { return a; }; return o.m(1, 2, 3);",
+        1.0,
+    );
+    // 13.5.3 step 6 and 7.1.2: a function is `"function"` and is truthy.
+    assert_eq!(
+        text_of("const f = function () {}; return typeof f;"),
+        "function"
+    );
+    number(
+        "const f = function () {}; if (f) { return 1; } return 0;",
+        1.0,
+    );
+    // 7.2.15 step 4, and 15.2.5: reading one function twice is one object,
+    // and *evaluating* one function expression twice is two.
+    assert_eq!(
+        value("const f = function () {}; const g = f; return f === g;"),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        value(
+            "function mk() { return function () { return 1; }; }
+             return mk() === mk();"
+        ),
+        Value::Bool(false)
+    );
+    // Calling something that is not a function is a TypeError in ECMA-262 and
+    // there is no `throw` here, so it traps — at the tag test, before any
+    // table is reached.
+    assert!(run("const o = {}; return o.absent();", &[]).is_err());
+    assert!(run("return (1)();", &[]).is_err());
+}
+
+/// The three ECMA-262 conversions between Numbers and Strings, through the
+/// shipped face: Number::toString (6.1.6.1.20), StringToNumber (7.1.4.1) and
+/// String relational comparison by code unit (7.2.13).
+#[test]
+fn qjs_m1_converts_between_numbers_and_strings() {
+    // 13.15.3: either operand a String makes `+` concatenation, and both sides
+    // run ToString.
+    assert_eq!(text_of("return \"a\" + 1;"), "a1");
+    assert_eq!(text_of("return 1 + \"a\";"), "1a");
+    assert_eq!(
+        text_of("return \"\" + true + null + undefined;"),
+        "truenullundefined"
+    );
+    // 6.1.6.1.20 step 5: the *shortest* decimal that reads back as the same
+    // binary64, which is the whole reason this is Dragon4 and not a printf.
+    assert_eq!(
+        text_of("return \"\" + (1 / 10 + 2 / 10);"),
+        "0.30000000000000004"
+    );
+    assert_eq!(text_of("return \"\" + (1 / 3);"), "0.3333333333333333");
+    // Steps 1 to 4, before step 5 is reached.
+    assert_eq!(text_of("return \"\" + (0 / 0);"), "NaN");
+    assert_eq!(text_of("return \"\" + (1 / 0);"), "Infinity");
+    assert_eq!(text_of("return \"\" + (0 - 1 / 0);"), "-Infinity");
+    // 7.1.4.1, the whole `StringNumericLiteral` grammar: whitespace, a sign, a
+    // hex literal, the empty string, and a string the grammar does not accept.
+    number("return \"1\" - 1;", 0.0);
+    number("return \"3\" * \"4\";", 12.0);
+    number("return -\"  42  \";", -42.0);
+    number("return +\"0x1f\";", 31.0);
+    number("return +\"\";", 0.0);
+    // No NaN equals itself, so this is asserted with `is_nan` and not `==`.
+    let Value::Number(x) = value("return +\"nope\";") else {
+        panic!("a Number back");
+    };
+    assert!(x.is_nan(), "a string the grammar does not accept is NaN");
+    // 7.2.14 steps 4 and 5: `==` between a Number and a String converts.
+    assert_eq!(value("return 1 == \"1\";"), Value::Bool(true));
+    assert_eq!(value("return 1 === \"1\";"), Value::Bool(false));
+    // 7.2.13 step 3: both operands Strings is the code-unit comparison, and a
+    // mixed pair is not — so `"10" < "9"` and `"10" < 9` disagree.
+    assert_eq!(value("return \"a\" < \"b\";"), Value::Bool(true));
+    assert_eq!(value("return \"10\" < \"9\";"), Value::Bool(true));
+    assert_eq!(value("return \"10\" < 9;"), Value::Bool(false));
+    // 7.1.19 over 7.1.17: every Number names a property, not just the
+    // integers.
+    number(
+        "const o = {}; const k = 1 / 2; o[k] = 7; return o[\"0.5\"];",
+        7.0,
+    );
+    // The one conversion still missing: 7.1.1 ToPrimitive needs the
+    // `valueOf`/`toString` a prototype would carry, and there is no prototype.
+    assert!(run("const o = {}; return \"x\" + o;", &[]).is_err());
+}
+
 /// A `Bytes` host result whose announced length is not a length is refused.
 ///
 /// The two-pass read asks the host how many bytes it has, allocates that much

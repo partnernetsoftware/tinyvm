@@ -61,6 +61,8 @@ tinyvm (35)                                      [~]
 │   │   ├── V1 values across the call boundary            [x]
 │   │   ├── declarations, functions, control flow         [x]
 │   │   ├── object literals, property access, assignment [x]
+│   │   ├── functions as values, stored/passed/called     [x]
+│   │   ├── Number<->String conversion, per ECMA-262      [x]
 │   │   ├── host calls with declared raw signatures       [x]
 │   │   │   └── a host length answer must be a length    [x]
 │   │   ├── nesting bounded by a diagnostic, not an abort [x]
@@ -344,13 +346,36 @@ as “almost approved” or “safe to ship externally.”
   property reads `undefined` rather than trapping, property order is insertion
   order, and `===` on two Objects is reference identity — which needed no new
   type test, because the V1 pair's payload comparison already *is* one.
+- Functions are a seventh tag on the same pair, and calling one is
+  `call_indirect` through the module's own funcref table. That instruction
+  matches the callee's signature exactly and JavaScript's calls match nothing,
+  so the table holds one **adapter** per function that became a value, all of
+  one uniform signature, rather than the user's functions. The payload is a
+  guest pointer to a one-word record holding the element index — *not* the
+  index itself, which is what the first attempt was and what made two
+  evaluations of one function expression one function (ECMA-262 15.2.5 makes
+  them two). Identity then comes out of the allocator, so `===` needed no new
+  type test for the same reason Object needed none.
+- The three ECMA-262 conversions between Numbers and Strings are in:
+  Number::toString (6.1.6.1.20, shortest round-tripping, Dragon4 in Burger &
+  Dybvig's formulation), StringToNumber (7.1.4.1, the whole grammar, correctly
+  rounded) and String relational comparison (7.2.13, by UTF-16 code unit rather
+  than by byte or code point). So `"a" + 1` is `"a1"`, `"1" - 1` is `0`,
+  `"a" < "b"` is `true`, and every Number names a property key and not only the
+  integers. The conversion still missing is 7.1.1 ToPrimitive, which needs the
+  `valueOf`/`toString` a prototype would carry, so `"" + {}` traps. They cost
+  6 625 bytes of emitted wasm in **every** module — an empty script went 2 620
+  to 9 771 — carried unconditionally like the rest of the runtime prelude, and
+  the lever if that ever matters is per-algorithm gating.
 - The growth law the value-representation experiment measured — each additional
   type costs one type test per dispatch site — is now being paid, so dispatch
   order is a decision and not an accident. Every Object arm is appended last in
   `__typeof`, `__truthy` and `__to_number`, so no type that existed before
-  objects pays for them; the two sites that depart from Number-first
-  (`__obj_get`/`__obj_set` test Object first, `__to_key` tests String first) say
-  so where they depart.
+  objects pays for them; Function cost exactly the same, one arm appended last
+  in each of those three and nothing anywhere else. The two sites that depart
+  from Number-first (`__obj_get`/`__obj_set` test Object first, `__to_string`
+  tests String first) say so where they depart, and the site a function value
+  runs hot — the call — is not a ladder at all but a single tag test.
 - A compiled `.qjs` reaches a host capability *with arguments* through
   `Names::Declared`: the embedder declares raw wasm functions — module, field,
   signature — and how each JavaScript argument maps onto their parameters, and

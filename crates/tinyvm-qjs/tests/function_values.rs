@@ -862,6 +862,20 @@ fn fleet_js_now_stops_at_the_conditional_and_not_at_the_function_value() {
         error.message, "this engine does not support conditional expressions yet",
         "the remaining wall moved to the wrong construct"
     );
+    // The offset, pinned, because the README quotes it. `FLEET_JS` is a raw
+    // string that opens with a newline, so it is one byte ahead of the same
+    // offset in the file itself -- which is 727, on line 14.
+    assert_eq!(error.offset, 728);
+    assert_eq!(
+        FLEET_JS.len(),
+        6281,
+        "the snapshot is the 6 280-byte file plus that newline"
+    );
+    assert_eq!(FLEET_JS[..error.offset].matches('\n').count(), 14);
+    assert!(
+        FLEET_JS[error.offset..].starts_with("? \"{}\" : params"),
+        "the offset must point at the `?` and not near it"
+    );
 }
 
 /// The same library with its two remaining walls written the way this engine
@@ -880,6 +894,10 @@ fn the_whole_fleet_library_compiles_and_its_methods_are_reachable() {
         .map(|i| format!("{}.{}", i.module, i.field))
         .collect();
     assert_eq!(imports, ["js.JSON", "js.__host"], "got {imports:?}");
+    // A record, not a budget -- so a change in it is visible in a diff. The
+    // README quotes this number; 6 625 of it is the conversion prelude every
+    // module carries, whatever the script.
+    assert_eq!(wasm.len(), 16_381, "the whole library's emitted size moved");
 }
 
 /// The same shape, reduced to what can run with no host at all: a namespace

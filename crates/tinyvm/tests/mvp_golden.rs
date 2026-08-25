@@ -638,7 +638,7 @@ fn parse_prd_x_leaves(prd: &str) -> Vec<String> {
 /// test must exist in this package's integration tests and assert something
 /// concrete — the point of naming it here is that a leaf can no longer be
 /// satisfied by a text row.
-const LEAF_TESTS: [(&str, &str); 178] = [
+const LEAF_TESTS: [(&str, &str); 180] = [
     ("eval(bytes)", "eval_bytes"),
     (
         "in-guest throughput gate",
@@ -691,6 +691,14 @@ const LEAF_TESTS: [(&str, &str); 178] = [
     (
         "object literals, property access, assignment",
         "qjs_m1_builds_objects_and_reads_their_properties",
+    ),
+    (
+        "functions as values, stored/passed/called",
+        "qjs_m1_stores_passes_and_calls_a_function_value",
+    ),
+    (
+        "Number<->String conversion, per ECMA-262",
+        "qjs_m1_converts_between_numbers_and_strings",
     ),
     (
         "a host length answer must be a length",
