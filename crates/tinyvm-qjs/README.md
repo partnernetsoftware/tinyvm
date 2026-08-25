@@ -56,9 +56,14 @@ instance's linear memory, not text, and resolving it needs the instance.
   included), `true`/`false`, `null`, `undefined`.
 - **Statements**: `let`/`const`/`var` with real scoping and a temporal dead zone
   the text can settle, blocks, `if`/`else`, `while`, three-part `for`, `return`,
-  and the script's ECMA-262 completion value.
+  `throw` and `try`/`catch`/`finally`, and the script's ECMA-262 completion
+  value. A finalizer runs on all three of its paths — fall-through, `return`
+  and a throw — an abrupt one replaces what was pending (`try { return 1; }
+  finally { return 2; }` is `2`), and a normal one contributes **no value at
+  all**, which is 14.15.3 step 3 and is why `try { 1; } finally { 2; }` is `1`.
+  See "A throw, where the machine has no exceptions" below.
 - **Functions**: declarations and expressions, named or not, with parameters,
-  recursion and mutual recursion -- and a function is a **value**. It can be
+  recursion and mutual recursion — and a function is a **value**. It can be
   stored in a binding or a property, passed, returned, and called from
   wherever it ended up: `o.m()`, `o.a.b()`, `f()()`. `typeof` answers
   `"function"`, every one of them is truthy, and `===` on two of them is
@@ -66,15 +71,18 @@ instance's linear memory, not text, and resolving it needs the instance.
   a function expression is a new object, so `mk() === mk()` is `false` and
   reading one binding twice is `true`. A call with too few arguments passes `undefined` and one with too
   many evaluates and discards the surplus. Calling something that is *not* a
-  function **traps** -- ECMA-262 makes it a TypeError and there is no `throw`
-  here -- and it traps at the tag test, before any table is reached. Two
+  function **traps** — ECMA-262 makes it a TypeError and there is no `throw`
+  here — and it traps at the tag test, before any table is reached. Two
   things a function value still is not: it has no `this` (so `o.m()` calls the
   function `o.m` holds and the function cannot see `o`), and it has no
   prototype (so `f.call`, `f.bind` and `f.length` are a trap and not a
   method).
 - **Operators**: every rung the ladder has — assignment and its compound forms,
-  `||`, `&&`, `==`/`!=`/`===`/`!==`, `<` `<=` `>` `>=`, `+` `-`, `*` `/` `%`,
-  prefix and postfix `++`/`--`, unary `+ - !`, and grouping. `&&` and `||`
+  the conditional `? :`, `||`, `&&`, `==`/`!=`/`===`/`!==`, `<` `<=` `>` `>=`,
+  `+` `-`, `*` `/` `%`, prefix and postfix `++`/`--`, unary `+ - !`, and
+  grouping. `?:` is right-associative and only the taken branch evaluates
+  (13.14), which is checked by an observable side effect rather than by reading
+  the emitted code. `&&` and `||`
   short-circuit; `+` concatenates when **either** side is a String, running
   ToString on both — ECMA-262 13.15.3 step 1.d, and see "The three
   conversions" below. `%` is
@@ -82,9 +90,9 @@ instance's linear memory, not text, and resolving it needs the instance.
   rounded quotient would get wrong — `-6 % 3` is `-0` and
   `2147483647 * 2147483647 % 1000` is `608`. `typeof` answers with the
   ECMA-262 13.5.3 name of each of the five types this engine has, `typeof null
-  === "object"` included; a name the source never declares is still refused
-  before `typeof` sees it, because there is no global scope for it to be
-  absent from.
+  === "object"` included; a name the source never declares — anything but
+  `JSON`, the one name this engine binds — is still refused before `typeof`
+  sees it, because there is no global scope for it to be absent from.
 - **Objects**: literals (`{}`, `{ a: 1 }`, shorthand `{ a }`, a trailing comma,
   and string- or number-literal keys), property reads by dot and by computed
   key, and property assignment including the compound and update forms —
@@ -95,6 +103,10 @@ instance's linear memory, not text, and resolving it needs the instance.
   identity. Reading a property *of* a primitive (`"abc".length`, `(1).a`)
   traps: there is no prototype here, and answering `undefined` would be a right
   answer by a wrong route for exactly the members a script reaches for.
+- **`JSON`**: `JSON.parse` and `JSON.stringify`, ECMA-262 25.5, whole
+  algorithms rather than the easy part of them — see "`JSON` is an object, not
+  an intrinsic" below. It is the **one** name this engine binds itself, and a
+  script that declares its own `JSON` shadows it outright.
 
 - **ASI**: ECMA-262 12.10, split where the spec splits it. Rule 3 is a fact about
   the token stream and lives in the lexer; rules 1 and 2 need a parser and live
@@ -139,6 +151,141 @@ the arm is right for exactly the reason the Object arm is: a bump allocator
 hands out one address per object. The site a function value runs hot, the
 call, is not a ladder at all but a single tag test, which is one test whatever
 the tag domain grows to.
+
+## A throw, where the machine has no exceptions
+
+tinyvm has no wasm exception handling: `crates/tinyvm/src/wasm.rs` has no arm
+for `try` (0x06), `catch` (0x07), `throw` (0x08), `rethrow` (0x09) or
+`try_table` (0x1F), and its section ranking covers ids 1..=12, so the tag
+section is refused at the gate. The PRD's capability tree says
+`exception handling [ ]` and this did not change that.
+
+So a `throw` is **a flag, and a check after every call that could raise one**.
+Three module globals hold a throw in flight — the flag, and the thrown value's
+`(tag, payload)` pair, because ECMA-262 lets any value be thrown and this
+engine keeps that. Three and not one: the flag cannot fold into the tag,
+because `TAG_UNDEFINED` is `0` and `throw undefined` is a real program.
+
+The two designs that lost are written at `emit::m1`'s `Unwind`. A **sentinel
+value the caller tests** would be an eighth tag, which the value-representation
+experiment's measured growth law prices at one more type test at every dispatch
+site, paid by every program whether or not it throws — and a completion record
+is not a language value. A **table of handler continuations** needs a computed
+jump, so every function body becomes `loop` + `br_table`: it rewrites the
+non-throwing path to buy the throwing one.
+
+What the chosen one costs, on the path where nothing throws:
+
+| | |
+| --- | --- |
+| a program with no `throw` and no `JSON` | **nothing** — not one instruction, not one global |
+| per direct call site | 2 instructions / **4 bytes** |
+| per `call_indirect` site | 2 instructions / **4 bytes** |
+
+The per-call-site number is a *second difference* over two programs identical
+but for whether one function throws, so nothing else in the module has to hold
+still (`a_throwing_program_pays_four_bytes_per_call_site` in
+`tests/conditional_and_try.rs`); the zero is checked structurally, by counting
+the emitted global section
+(`a_program_that_cannot_throw_declares_no_unwinding_global`). The `br_if`'s
+target is the nearest enclosing handler, or — where there is none — the
+function's own label, which *is* a return, and the pair already on the stack is
+the callee's, so nothing has to be built to satisfy the return arity. That is
+what keeps it at two instructions.
+
+Three things this shape is not, and each is a real divergence rather than an
+oversight:
+
+- **A trap is not a throw.** ECMA-262 makes `undefined.a` a TypeError and a
+  `catch` takes it; here it is an `unreachable` and the clause never runs.
+  There are no `Error` objects and no prototype to hang one on, so a `catch`
+  that swallowed a fault would have no value to describe it.
+- **The channel belongs to one call.** The globals are instance state, and an
+  uncaught throw traps with the flag raised, so the entry prologue clears it
+  the same way it clears the fault word. Without that, one uncaught throw
+  poisoned a persistent instance for its lifetime: the next call's `catch`
+  fired with no `throw` on any path it took, bound to the previous call's
+  value — a pointer into the previous call's heap where that value was an
+  Object. `tests/unwind_attack.rs` is where it was found and where it is held.
+- **The thrown value does not reach the host.** An uncaught throw reports
+  itself as `GuestFault::UncaughtThrow` (below) and nothing more. Handing the
+  value out would mean exporting an engine-internal pair or widening the entry
+  point's results, and both are decisions about the host boundary rather than
+  about throwing.
+
+## `JSON` is an object, not an intrinsic
+
+`JSON.parse` and `JSON.stringify`, ECMA-262 25.5. Twenty-two emitted functions
+in a **gated** set: `convert::SET` is unconditional because "does this program
+contain an addition" is an over-approximation, and "does this program name
+`JSON`" is exact, so a program that never writes the name is byte-identical to
+what it was.
+
+`__json_ns` calls `__obj_new`, `__fn_new` twice and `__obj_set` twice — the
+same three runtime functions a script writing
+`const JSON = { stringify: function () {}, parse: function () {} }` reaches.
+Reading `JSON.parse` is `__obj_get`; calling it is `call_indirect` through an
+adapter in the module's own funcref table, on the one uniform signature every
+call through a value speaks. `typeof JSON` is `"object"`,
+`typeof JSON.parse` is `"function"`, and `JSON === JSON` is `true` because the
+object is built once per instance and read out of a global pair.
+
+The name is bound by `ast::Res::Json`, and it is **one name and not a global
+scope**. Resolution walks the scopes first, so a script's own
+`const JSON = {…}` shadows it outright and there is nothing privileged to lose
+to; an embedder that *declares* a host function called `JSON` wins too, because
+a declaration table is an explicit act where `Names::HostImport`'s "any free
+name is an import" is a default. Nothing enumerates it, and there is no
+environment record. A second intrinsic would make this a table, and that is the
+point at which "no global scope" would stop being true.
+
+Three places the specification beat the obvious, each with a test:
+
+- **U+2028 and U+2029 are not escaped.** 25.5.2.2 QuoteJSONString escapes its
+  seven table characters, everything below U+0020, and lone surrogates — and
+  nothing else. Escaping the line separators is a habit from embedding JSON in
+  JavaScript *source*, which is a different problem.
+- **`JSON.stringify(-0)` is `"0"`** (6.1.6.1.20 step 2), so a round trip loses
+  the sign at the printer, exactly where the spec loses it. The *parsed* value
+  is still negative zero.
+- **`1e400` is `Infinity`, and then `null`.** `serde_json` rejects the text;
+  the spec rounds.
+
+A growable buffer rather than `__str_concat`, because quoting appends one to
+six bytes per source byte and a concatenation per byte would be quadratic in
+allocation on a heap that never frees. Cycles are checked against a chain of
+*ancestors* and not a seen-set, so a DAG still serializes twice, as 25.5.2.2
+requires.
+
+Two boundaries are the engine's and say so:
+
+```js
+JSON.parse("[1]")                 // throws: this engine does not support JSON arrays yet
+JSON.stringify(o, null, 2)        // throws: no replacer and no space argument yet
+```
+
+The Array one has a downstream consequence worth stating: `fleet.js` wraps
+every broker answer in `try { JSON.parse(t) } catch { return t }`, so an answer
+that is or contains a JSON array — `tabs.list` is the obvious one — comes back
+as the raw text and a caller expecting a value gets a String.
+
+Naming `JSON` also turns the unwind channel on, whether or not the script
+writes `throw`, because `JSON.parse` raises one. That is the condition
+`convert::JsonCtx::unwind` states and `emit::m1::scan` satisfies, and without
+it `fleet.js` lines 15-19 would trap where the library wrote a `catch`.
+
+**What it costs**: 4 421 bytes for the set and the channel together, measured
+as one mention of the name added to `return 1;` (9 784 to 14 205). Nothing at
+all for a program that does not name it: no function, no adapter, no element,
+no global, no byte.
+
+Nothing here forced an intrinsic, and the urge was real: `JSON.stringify(o)` is
+a statically known callee at all nine sites in `fleet.js`, so a direct call
+would save a property read, a tag test and a `call_indirect` each time. It was
+refused on `repr.rs`'s own grounds — an exemption written into one call site is
+one the compiler has no pass to check, and `const f = JSON.stringify` would
+have to agree with it. The cure, when measured and wanted, is a general
+devirtualisation pass over a property read of a known-constant object.
 
 ## The three conversions, and the fourth that is still missing
 
@@ -243,28 +390,29 @@ an `i64` with a bare `i32.wrap_i64` let `(TAG_FUNCTION, 2^32 + 1)` reach
 element 1 silently; and element 0 being left null, so a zeroed word is never a
 callable element. `tests/indirect_attack.rs` is where all three are attacked.
 
-A script that makes no function a value emits **no table, no element segment
-and no adapter**. What every script pays is the growth law's price of a seventh
+A script that makes no function a value and never names `JSON` emits **no
+table, no element segment and no adapter**; naming `JSON` puts two adapters of
+its own in that table, before the script's, because their element indices are
+needed by the entry prologue and the count of the script's is not known until
+lowering has finished. What every script pays is the growth law's price of a seventh
 type — one arm appended last in each of `__typeof`, `__truthy` and
 `__to_number` — plus 29 bytes for `__fn_new`. Measured on this crate's own
 encoder: a function-valued property costs about **128 bytes** (the function,
 its adapter, its element and the assignment), a call through a value costs
 about **70 bytes** where the direct call it replaces costs about 28, and
-`fleet.js` in whole comes to 16 381.
+`fleet.js` in whole comes to 20 935.
 
 ## What it does not compile, and how it says so
 
-Arrays, closures that capture, `this`, arrow functions, `class`,
-`throw`/`try`, `for…of`, `break`/`continue`, `switch`, template literals, the
-bitwise and shift levels, `?:`, the comma operator, `**`, `??`, BigInt,
-`JSON`, and the numeric literal forms above.
+Arrays, closures that capture, `this`, arrow functions, `class`, `for…of`,
+`break`/`continue`, `switch`, template literals, the bitwise and shift levels,
+the comma operator, `**`, `??`, BigInt, and the numeric literal forms above.
 
-Calling a value is no longer on that list, and one consequence is worth
-stating because it changes what a diagnostic says: `Object.keys(o)` and
-`JSON.stringify(o)` used to stop at the *call* and now stop at the *name*. The
-engine can make the call; it has no binding named `Object` or `JSON` to make it
-on, and there is no global scope for one to be in. `o.toString()` compiles and
-traps instead, because the property is simply absent.
+`?:`, `throw`/`try` and `JSON` came off that list, and one consequence is
+worth stating because it changes what a diagnostic says: `Object.keys(o)` stops
+at the *name*. The engine can make the call; it has no binding named `Object`
+to make it on, and `JSON` is the only name it binds itself. `o.toString()`
+compiles and traps instead, because the property is simply absent.
 
 Two object-shaped refusals are their own sentences: a property named with a
 reserved word the lexer spells as a keyword (`o.new`, `o.class`, `o.default` —
@@ -287,12 +435,23 @@ corpus to notice. `o.m = function (x) { return x; } function rec() {}` — two
 statements, one line, no `;` — used to be refused with "this engine does not
 support the `function` keyword yet", a keyword the engine has had since M1.
 That sends the reader hunting for a workaround instead of at the missing
-semicolon. The end of a statement now says what it was looking for and names
-ECMA-262 12.10, and only two kinds of token keep a capability phrase there,
-because for them it is true: a `,` or a `:` would have *continued* the
-expression, and the lexer's `Unsupported` bucket is beyond the engine whatever
-the lexeme is. The same debt at operand and header positions is still open and
-is recorded in `conformance_m2.rs`.
+semicolon. `else { }` said the same about `else`, next to a suite full of
+working `else` arms, and the milestone that landed `?:` and `throw` added two
+more of exactly that shape — turning a feature on does not turn its
+"unsupported" sentence off.
+
+The rule is now one rule, at `Parser::cannot_use`. The lexer's capability table
+is shared with M0's expression compiler, which really does lack every phrase in
+it, so the table stayed and the caller changed: a phrase is trusted only for
+the tokens M1 lowers **nowhere** — `[`, `]`, `:`, `,`, and the lexer's own
+`Unsupported` bucket — and every other position says what it wanted and what it
+found. `else { }` now reads *"this engine needs an operand here, and found the
+`else` keyword instead"*.
+
+What is left is narrower and stays recorded in `control_conformance.rs`: a
+phrase that is **true** can still be the wrong answer for the position.
+`catch (e, f)` says "does not support the comma operator", which is true of the
+engine and is not the reason a CatchParameter may not be two bindings.
 
 Two bounds are the engine's rather than the language's, and say so the same way:
 syntax nested past the compiler's frame budget (a stack overflow is a process
@@ -365,20 +524,24 @@ representation into a boundary meant to serve any guest. So this crate owns the
   order**, so an embedder can predict its import table without reading the
   script.
 
-## When the heap runs out, the guest says so
+## Three reasons a guest stops, and how a host tells them apart
 
 The bump heap grows linear memory; the host's `Limits` is what bounds it. When
 that bound is reached, `memory.grow` returns `-1` — standard wasm, not a trap
 (`crates/tinyvm/src/wasm.rs`, `Op::MemoryGrow`) — so the refusal carries no
 reason and the allocator has nowhere to put one. It falls into `unreachable`,
-which is the same instruction a conversion this milestone lacks executes, so
-the host receives the same `WasmError`, the same `"unreachable executed"` and
-the same `FaultClass::Guest` for a script that ran out of budget and a script
-that is simply broken.
+which is the same instruction a conversion this milestone lacks executes, and
+the same one an uncaught `throw` ends at. So the host would receive the same
+`WasmError`, the same `"unreachable executed"` and the same
+`FaultClass::Guest` for three entirely different situations: a script that ran
+out of budget, a script that is simply broken, and a script that threw and
+terminated exactly as ECMA-262 says it should.
 
-Guessing between them is exactly the misclassification worth avoiding, so the
-guest writes the reason down first, in the first word of its own linear memory
-— an address the bump pointer never hands out. Read it after a trap:
+Each wants a different answer from the host — raise the ceiling, report the
+defect, report the exception — so guessing between them is exactly the
+misclassification worth avoiding. The guest writes the reason down first, in
+the first word of its own linear memory, an address the bump pointer never
+hands out. Read it after a trap:
 
 ```rust
 use tinyvm_qjs::{GuestFault, guest_fault};
@@ -386,6 +549,7 @@ use tinyvm_qjs::{GuestFault, guest_fault};
 if let Err(fault) = instance.invoke_by_name("main", &tinyvm_qjs::Value::args(&[])) {
     match guest_fault(&instance.memory().expect("memory zero")) {
         Some(GuestFault::HeapExhausted) => { /* budget: raise max_memory_pages */ }
+        Some(GuestFault::UncaughtThrow) => { /* the script threw; report it */ }
         _ => { /* the script itself: report `fault` */ }
     }
 }
@@ -393,7 +557,9 @@ if let Err(fault) = instance.invoke_by_name("main", &tinyvm_qjs::Value::args(&[]
 
 `None` means the guest recorded nothing — an ordinary guest fault, or a module
 with no linear memory at all. The entry point clears the word on the way in, so
-the answer is about the call that just failed rather than an older one.
+the answer is about the call that just failed rather than an older one; it
+clears the unwind channel's flag beside it, for the same reason and after the
+same defect.
 
 The word is only trustworthy if the bump pointer can never reach it, so that
 is a check in `__alloc` and not a comment: an allocation that did not move the
@@ -436,55 +602,71 @@ Commissar demo (from repository root):
 cargo run -p tinyvm-qjs --example commissar
 ```
 
-## How far the downstream binding library gets
+## The downstream binding library: it compiles, and it runs
 
-`agenterm/scripts/qjs/lib/fleet.js` is the acceptance target: 231 lines that
-wrap one host call in a tree of namespace tables. Compiling it whole stops at
-**line 14, byte 727**:
+`agenterm/scripts/qjs/lib/fleet.js` is the acceptance target: 231 lines,
+6 280 bytes, that wrap one host call in a tree of namespace tables. It used to
+stop at **line 14, byte 727**, on the conditional in `call()`. It does not stop
+anywhere.
+
+**Verbatim, whole**: 6 280 source bytes → **20 935 bytes** of wasm, clearing
+tinyvm's load gate, instantiating, with 29 function-valued properties reachable
+and exactly **one** import, `js.__host`. It was 16 400 with `JSON` resolving to
+an opaque `js.JSON` import that no host could answer; the 4 535 it grew by is
+the JSON set and the unwind channel `JSON.parse` raises through, which arrive
+together because a program that names `JSON` needs both.
+`the_whole_fleet_library_compiles_and_its_methods_are_reachable` and
+`fleet_js_compiles_verbatim` in `tests/function_values.rs` are the evidence,
+and the second one asserts the two constructs are still spelled in the snapshot
+the way the library spells them — so the test says the engine reads them rather
+than that somebody rewrote the file.
+
+Compiling is one claim. `tests/fleet_acceptance.rs` holds the other, which is
+the one an embedder needs: seven tests that drive `fleet.js`'s own `call()`
+through a real raw host door to a broker answering JSON, and read a property
+off the parsed answer.
 
 ```js
-const resultJson = __host.fleet_call(opId, params === undefined ? "{}" : params);
-//                                                              ^ byte 727
+fleet.tabs.set_note = function (tabId, note) {
+  return call("tabs.set-note", JSON.stringify({ tab: tabId, note: note }));
+};
+return fleet.tabs.set_note("t3", "ship it").ok;   // -> true
 ```
 
-> this engine does not support conditional expressions yet
+The host saw `("tabs.set-note", {"tab":"t3","note":"ship it"})` — the params
+JSON written by this engine — and answered `{"ok":true,"tab":"t3"}`, which this
+engine parsed. Six capabilities have to hold at once for that line: the object
+literal, the function value in a property, the call through it, the conditional
+that supplies the default argument, `JSON.stringify` out and `JSON.parse` back.
 
-A byte offset is where the parser stops first, not how far it got: the parser
-stops at the *first* refusal, so 727 of 6 280 is not 12% done. Which is why
-what follows is measured by compiling fragments.
+**One reduction, and it is named rather than glossed.** `fleet.js` reaches its
+door as `__host.fleet_call(op, params)` — a property call on a **free** name.
+Under `Names::HostImport` a free name is a zero-argument `js.*` import
+answering one V1 pair, and no host can answer that pair with an Object:
+`Value` has no Object variant, and building an object record in guest memory by
+hand would mean the host knowing this engine's record layout, which is the leak
+the raw door exists to prevent. So the embedder supplies `__host` itself, in a
+short prelude:
 
-Compiles and runs today:
+```js
+const __host = { fleet_call: function (op, p) { return door(op, p); } };
+function door(op, p) { fleet_call(op, p); return fleet_result(); }
+```
 
-| fragment | |
+— where `fleet_call` and `fleet_result` are two `Names::Declared` raw doors,
+the second a `Bytes` result so the answer comes back as a String. Two and not
+one because the raw contract is a status code plus a two-pass read, which is
+the shape a variable-length host answer has and not something this wrapper
+invented. Closing that gap properly means a way to declare an *object-shaped*
+host namespace, and that is a decision about the host boundary rather than
+about this library.
+
+Two behaviours a caller will meet, neither of them a defect in the parser:
+
+| | |
 | --- | --- |
-| `const fleet = {}; fleet.ui = {}; fleet.ui.tabs = {};` | all 15 of its namespace tables, in one module |
-| `fleet.ui.tabs.width = 40; return fleet.ui.tabs.width;` | nested member read and write |
-| `function params(tab, note) { return { tab: tab, note: note }; }` | all 7 of its distinct parameter-object shapes |
-| `if (params === undefined) { return "{}"; }` | the default-argument test, as a statement |
-| `call("tabs.list", "{}")` | a call to a statically known name, including a declared host door |
-| `fleet.tabs.list = function () { … };` | all **29** of its function-valued properties |
-| `fleet.tabs.list()`, `__host.fleet_call(op, p)`, `JSON.parse(s)` | all **10** of its calls through a value |
-
-With its two remaining walls written the way this engine spells them — the
-conditional as an `if`, the `try` gone — the whole library compiles to
-**16 381 bytes** and clears the load gate: 110 defined functions, a 30-element
-table (29 adapters and the null element 0), and exactly the two imports
-`js.JSON` and `js.__host`. That is
-`the_whole_fleet_library_compiles_and_its_methods_are_reachable` in
-`tests/function_values.rs`. It was 9 007 bytes before the conversions landed,
-and 6 625 of the 7 374 it grew by is the conversion prelude every module now
-carries.
-
-Still refused — each row is the diagnostic the compiler actually prints:
-
-| fragment | diagnostic |
-| --- | --- |
-| `params === undefined ? "{}" : params` | this engine does not support conditional expressions yet |
-| `try { … } catch (_err) { … }` | this engine does not support the `try` keyword yet |
-
-Those are the only two left. `JSON.parse`/`JSON.stringify` compile, and what
-they need in order to **run** is a host: `JSON` resolves to an import under
-`Names::HostImport`. The String conversions they used to also need are in.
+| a broker answer that is or contains a JSON **array** (`tabs.list`) | takes the `catch` and comes back as the raw text — this engine has no Array type, and `JSON.parse` refuses one by name rather than approximating it |
+| `o.m()` inside a wrapper | the function `o.m` holds is called and it cannot see `o`; there is no `this` yet. Inert for every method in this library, and what the `this` milestone has to fix |
 
 ## Who consumes it
 

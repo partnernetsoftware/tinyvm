@@ -1871,9 +1871,13 @@ pub(crate) mod m1 {
                     "assigning to a host name",
                     p.offset,
                 )),
+                // "no global bindings" was true until `JSON` arrived, and
+                // saying it now would be the engine disclaiming something it
+                // has -- the same lie [`Parser::cannot_use`] was fixed for.
+                // One name is not a scope, and the sentence says which.
                 Names::Unbound => Err(malformed(
                     &format!(
-                        "finds no declaration of `{}`; this engine has no global bindings yet, so a name has to be declared in the source",
+                        "finds no declaration of `{}`; `{JSON}` is the only name this engine binds, so any other has to be declared in the source",
                         p.name
                     ),
                     p.offset,

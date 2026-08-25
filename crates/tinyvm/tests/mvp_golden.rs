@@ -638,7 +638,7 @@ fn parse_prd_x_leaves(prd: &str) -> Vec<String> {
 /// test must exist in this package's integration tests and assert something
 /// concrete — the point of naming it here is that a leaf can no longer be
 /// satisfied by a text row.
-const LEAF_TESTS: [(&str, &str); 180] = [
+const LEAF_TESTS: [(&str, &str); 184] = [
     ("eval(bytes)", "eval_bytes"),
     (
         "in-guest throughput gate",
@@ -699,6 +699,22 @@ const LEAF_TESTS: [(&str, &str); 180] = [
     (
         "Number<->String conversion, per ECMA-262",
         "qjs_m1_converts_between_numbers_and_strings",
+    ),
+    (
+        "conditional expressions, try/catch/finally",
+        "qjs_m1_lowers_a_conditional_and_a_try",
+    ),
+    (
+        "JSON.parse / JSON.stringify, per ECMA-262 25.5",
+        "qjs_m1_parses_and_prints_json",
+    ),
+    (
+        "an uncaught throw is legible, not a bare trap",
+        "qjs_m1_tells_an_uncaught_throw_from_a_broken_script",
+    ),
+    (
+        "the acceptance library runs through a host door",
+        "qjs_m1_runs_a_fleet_wrapper_through_a_declared_host_door",
     ),
     (
         "a host length answer must be a length",

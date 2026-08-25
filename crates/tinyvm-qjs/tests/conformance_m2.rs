@@ -1579,17 +1579,27 @@ fn the_boundary_is_classified_not_just_worded() {
 
 /// Under `Names::Unbound` a free name has nothing to resolve against, and the
 /// engine says that rather than inventing a global.
+///
+/// The sentence used to end "this engine has no global bindings yet", and
+/// `JSON` made that false -- the engine binds exactly one name now. Saying it
+/// anyway would be the engine disclaiming something it has, which is the
+/// defect `a_misplaced_token_says_what_was_wanted_and_never_disclaims_what_the
+/// _engine_has` above is about, in a second place. One name is not a scope,
+/// and the sentence now says which name it is.
 #[test]
 fn a_free_name_is_refused_when_there_is_nothing_to_bind_it_to() {
     for source in ["return x;", "x = 1;", "return f();", "console;"] {
         let e = refuse_in(source, Names::Unbound);
         assert!(
             e.message.contains("finds no declaration of ")
-                && e.message.contains("this engine has no global bindings yet"),
+                && e.message
+                    .contains("`JSON` is the only name this engine binds"),
             "{source:?} gave {:?}",
             e.message
         );
     }
+    // And the name it says is the one it means: `JSON` resolves.
+    assert!(compile_qjs_m1("return typeof JSON;").is_ok());
 }
 
 /// Under `Names::HostImport` a free name *is* a binding -- an import -- and

@@ -63,11 +63,15 @@ tinyvm (35)                                      [~]
 │   │   ├── object literals, property access, assignment [x]
 │   │   ├── functions as values, stored/passed/called     [x]
 │   │   ├── Number<->String conversion, per ECMA-262      [x]
+│   │   ├── conditional expressions, try/catch/finally    [x]
+│   │   ├── JSON.parse / JSON.stringify, per ECMA-262 25.5 [x]
 │   │   ├── host calls with declared raw signatures       [x]
 │   │   │   └── a host length answer must be a length    [x]
 │   │   ├── nesting bounded by a diagnostic, not an abort [x]
 │   │   ├── every rejection names the engine boundary     [x]
 │   │   ├── an exhausted heap is legible, not a bare trap [x]
+│   │   ├── an uncaught throw is legible, not a bare trap [x]
+│   │   ├── the acceptance library runs through a host door [x]
 │   │   └── full JS engine / AOT                          [–]
 │   ├── host                                              [x]
 │   ├── <100KiB>                                          [x]
@@ -367,6 +371,44 @@ as “almost approved” or “safe to ship externally.”
   6 625 bytes of emitted wasm in **every** module — an empty script went 2 620
   to 9 771 — carried unconditionally like the rest of the runtime prelude, and
   the lever if that ever matters is per-algorithm gating.
+- `throw` and `try`/`catch`/`finally` are in, and **not** as wasm exception
+  handling: `crates/tinyvm/src/wasm.rs` has no arm for `try`, `catch`, `throw`,
+  `rethrow` or `try_table`, and refuses the tag section, so the capability tree
+  still reads `exception handling [ ]`. A throw is a flag plus three module
+  globals holding the thrown value as an ordinary V1 pair, and a two-instruction
+  check after every call that could raise one. The two designs that lost are at
+  `emit::m1`'s `Unwind`: a sentinel value would be an eighth *type*, priced by
+  the measured growth law at one more test at every dispatch site and paid by
+  every program whether or not it throws — and a completion record is not a
+  language value; a table of handler continuations needs a computed jump, which
+  rewrites the non-throwing path to buy the throwing one. A program with no
+  `throw` and no `JSON` pays nothing at all; one that has them pays four bytes
+  per call site. The channel belongs to **one call**: the globals are instance
+  state, so the entry prologue clears the flag beside the fault word, without
+  which one uncaught throw poisoned a persistent instance for its lifetime.
+  An uncaught throw is a third thing at the fault word — neither a budget to
+  raise nor a defect to report — and `GuestFault::UncaughtThrow` is how a host
+  reads it.
+- `JSON` (ECMA-262 25.5) is **an object holding two function values**, not a
+  compiler intrinsic: `__json_ns` calls the same `__obj_new` / `__fn_new` /
+  `__obj_set` a script writing the object literal would reach, and
+  `JSON.parse(t)` is a property read and a call through the value it finds. It
+  is the one name this engine binds itself, and one name is not a global scope
+  — resolution walks the source's own scopes first, so a script's `const JSON`
+  shadows it and an embedder's declaration of the name wins. The set is gated
+  on the name appearing, because that predicate is exact where "contains an
+  addition" is not, so a program that never writes `JSON` is byte-identical to
+  what it was. Naming it also turns the unwind channel on, because
+  `JSON.parse` raises one; that is why the two arrived together.
+- 下游验收目标 `agenterm/scripts/qjs/lib/fleet.js` **原样整篇编译并运行**：6 280
+  源字节 → 20 935 wasm 字节，过装载门，实例化，29 个函数值属性全部可达，只剩一个
+  import `js.__host`。以前停在第 14 行第 727 字节。跑通的证据不是"编译过了"，而是
+  `crates/tinyvm-qjs/tests/fleet_acceptance.rs`：一个 wrapper 经声明的原始宿主门出去，
+  broker 用 JSON 文本回答，`JSON.parse` 把它变成对象，调用方读出属性。剩下的一处缩减
+  写在那份测试的文件头：`fleet.js` 用 `__host.fleet_call(...)` 触门，那是自由名上的属性
+  调用，而宿主答不出对象（`Value` 没有 Object 变体），所以 embedder 要自带五行
+  `const __host = {...}` 前奏。补齐它需要"可声明对象形状的宿主命名空间"，那是宿主边界的
+  决定，不是这个库的。
 - The growth law the value-representation experiment measured — each additional
   type costs one type test per dispatch site — is now being paid, so dispatch
   order is a decision and not an accident. Every Object arm is appended last in

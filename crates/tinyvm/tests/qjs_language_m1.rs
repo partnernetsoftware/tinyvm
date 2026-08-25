@@ -680,3 +680,265 @@ fn qjs_m1_refuses_a_host_length_that_is_not_a_length() {
     let n = u32::from_le_bytes(bytes[at..at + 4].try_into().expect("length header")) as usize;
     assert_eq!(&bytes[at + 4..at + 4 + n], b"zzz");
 }
+
+/// A conditional expression, and a `throw` that finds the handler ECMA-262
+/// names -- the two constructs `fleet.js` stopped at.
+///
+/// tinyvm has no wasm exception handling, so this is not a `try` instruction:
+/// it is a flag plus a check after every call that could raise one. What the
+/// product sentence promises is the *language* behaviour, and that is what is
+/// executed here.
+#[test]
+fn qjs_m1_lowers_a_conditional_and_a_try() {
+    // 13.14: only the taken branch evaluates, and the value is the branch's.
+    number("return 1 ? 2 : 3;", 2.0);
+    number("return 0 ? 2 : 3;", 3.0);
+    number("let n = 0; const _ = false ? n = 1 : n = 2; return n;", 2.0);
+    // Right-associative, and the test runs exactly once.
+    number("return 0 ? 1 : 1 ? 2 : 3;", 2.0);
+    // The idiom `fleet.js` opens with: a default argument.
+    assert_eq!(
+        text_of("function f(p) { return p === undefined ? \"{}\" : p; } return f();"),
+        "{}"
+    );
+
+    // 14.14/14.15: a throw crosses frames to the nearest handler, the value it
+    // carries is any JavaScript value, and the handler's own completion is the
+    // statement's.
+    number(
+        "function g() { throw 7; } function f() { try { g(); } catch (e) { return e; } return 0; } return f();",
+        7.0,
+    );
+    assert_eq!(
+        text_of("try { throw \"boom\"; } catch (e) { return \"caught \" + e; }"),
+        "caught boom"
+    );
+    // 14.15.3: a finalizer runs on all three paths, an abrupt one replaces
+    // what was pending, and a normal one contributes no value at all.
+    number(
+        "let n = 0; try { throw 1; } catch (e) { n = e; } finally { n = n + 10; } return n;",
+        11.0,
+    );
+    number(
+        "function f() { try { return 1; } finally { return 2; } } return f();",
+        2.0,
+    );
+    number("try { 1; } finally { 2; }", 1.0);
+}
+
+/// `JSON.parse` and `JSON.stringify`, ECMA-262 25.5, reached from source text.
+///
+/// `JSON` is an ordinary object holding two ordinary function values, and the
+/// name is the one binding this engine supplies -- a script that declares its
+/// own shadows it, because the scope walk runs first.
+#[test]
+fn qjs_m1_parses_and_prints_json() {
+    assert_eq!(text_of("return typeof JSON;"), "object");
+    assert_eq!(text_of("return typeof JSON.parse;"), "function");
+    assert_eq!(
+        text_of("return JSON.stringify({ a: 1, b: \"x\" });"),
+        "{\"a\":1,\"b\":\"x\"}"
+    );
+    // 25.5.2.2: `undefined` and a function are not JSON, and neither is a
+    // non-finite Number.
+    assert_eq!(
+        text_of("return JSON.stringify({ a: undefined, b: 1 });"),
+        "{\"b\":1}"
+    );
+    assert_eq!(text_of("return JSON.stringify(1 / 0);"), "null");
+    // 25.5.1, and the round trip.
+    number("return JSON.parse(\"1\");", 1.0);
+    number(
+        "return JSON.parse(JSON.stringify({ a: { b: 2 } })).a.b;",
+        2.0,
+    );
+    // A text that is not JSON raises a catchable throw, which is the shape
+    // `fleet.js` wraps every broker answer in.
+    number("try { JSON.parse(\"nope\"); } catch (e) { return 1; }", 1.0);
+    // A script's own binding of the name wins outright.
+    assert_eq!(
+        text_of(
+            "const JSON = { stringify: function (v) { return \"mine\"; } }; return JSON.stringify(1);"
+        ),
+        "mine"
+    );
+}
+
+/// An uncaught `throw` is a third thing at the fault word, distinct from a
+/// budget failure and from a broken script -- so a host can report it rather
+/// than raise a memory ceiling or blame the author.
+///
+/// The channel is also **per call**: it is a module global, so an uncaught
+/// throw that left it raised would poison every later call on that instance,
+/// and a persistent instance called repeatedly is what the downstream
+/// embedder does.
+#[test]
+fn qjs_m1_tells_an_uncaught_throw_from_a_broken_script() {
+    let wasm = compile_qjs_m1("if ($0 === 1) { throw \"boom\"; } return 42;").expect("compiles");
+    let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("clears the gate");
+    let mut instance = module.instantiate().expect("instantiates");
+
+    let error = instance
+        .invoke_by_name("main", &Value::args(&[Value::Number(1.0)]))
+        .expect_err("an uncaught throw traps");
+    assert_eq!(error.class(), WasmFaultClass::Guest);
+    assert_eq!(
+        guest_fault(&instance.memory().expect("guest memory")),
+        Some(GuestFault::UncaughtThrow),
+        "the host must be able to tell a throw from a broken script"
+    );
+
+    // The very next call on the same instance is unaffected, and the word
+    // describes it and not the call before it.
+    let vals = instance
+        .invoke_by_name("main", &Value::args(&[Value::Number(0.0)]))
+        .expect("the channel is cleared on the way in");
+    assert_eq!(Value::returned(&vals), Ok(Value::Number(42.0)));
+    assert_eq!(guest_fault(&instance.memory().expect("guest memory")), None);
+
+    // A genuinely broken script is a different answer, which is the whole
+    // point of the code.
+    let (_, broken) = (
+        (),
+        WasmModule::from_bytes_with(
+            &compile_qjs_m1("const u = undefined; return u.a;").expect("compiles"),
+            Limits::default(),
+        )
+        .expect("clears the gate"),
+    );
+    let mut broken = broken.instantiate().expect("instantiates");
+    assert!(broken.invoke_by_name("main", &Value::args(&[])).is_err());
+    assert_eq!(guest_fault(&broken.memory().expect("guest memory")), None);
+}
+
+/// The acceptance library, driven end to end: a `fleet.js` wrapper calls out
+/// through a declared raw host door, a broker answers with JSON text,
+/// `JSON.parse` turns it into an Object, and the caller reads a property off
+/// it.
+///
+/// This is the product sentence for the whole series -- every capability it
+/// added has to hold at once for the last line to read `true`: the object
+/// literal, the function value in a property, the call through it, the
+/// conditional that supplies the default argument, `JSON.stringify` on the way
+/// out, the raw two-pass `Bytes` result, and `JSON.parse` on the way back.
+/// `tinyvm-qjs`'s `tests/fleet_acceptance.rs` owns the exhaustive version;
+/// this one is the shipped-face edge.
+///
+/// One reduction, named rather than glossed: `fleet.js` reaches its door as
+/// `__host.fleet_call(...)`, a property call on a **free** name, and no host
+/// can answer a V1 pair with an Object -- `Value` has no Object variant. So
+/// the embedder supplies `__host` in a short prelude of its own, which is what
+/// the first two lines below are.
+#[test]
+fn qjs_m1_runs_a_fleet_wrapper_through_a_declared_host_door() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use tinyvm::{Val, WasmError};
+    use tinyvm_qjs::{HostFn, HostParam, HostResult, Names, Options, compile_qjs_m1_with};
+
+    let table = vec![
+        HostFn {
+            name: "fleet_call".to_string(),
+            module: "fleet".to_string(),
+            field: "call".to_string(),
+            params: vec![HostParam::StrPtrLen, HostParam::StrPtrLen],
+            result: HostResult::I32,
+        },
+        HostFn {
+            name: "fleet_result".to_string(),
+            module: "fleet".to_string(),
+            field: "result".to_string(),
+            params: Vec::new(),
+            result: HostResult::Bytes {
+                length: "result_len".to_string(),
+            },
+        },
+    ];
+    // The prelude, then `fleet.js`'s own `call()`, then one of its
+    // twenty-nine wrappers, spelled exactly as the library spells it.
+    let source = "
+        const __host = { fleet_call: function (op, p) { return door(op, p); } };
+        function door(op, p) { fleet_call(op, p); return fleet_result(); }
+
+        function call(opId, params) {
+          const resultJson = __host.fleet_call(opId, params === undefined ? \"{}\" : params);
+          try {
+            return JSON.parse(resultJson);
+          } catch (_err) {
+            return resultJson;
+          }
+        }
+
+        const fleet = {};
+        fleet.tabs = {};
+        fleet.tabs.set_note = function (tabId, note) {
+          return call(\"tabs.set-note\", JSON.stringify({ tab: tabId, note: note }));
+        };
+        return fleet.tabs.set_note(\"t3\", \"ship it\").ok;";
+    let wasm = compile_qjs_m1_with(
+        source,
+        Options {
+            names: Names::Declared(table),
+        },
+    )
+    .unwrap_or_else(|e| panic!("compiling the wrapper: {e}"));
+    let mut module = WasmModule::from_bytes_with(&wasm, Limits::default())
+        .unwrap_or_else(|e| panic!("load gate: {}", e.message()));
+
+    let asked: Rc<RefCell<Vec<(String, String)>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&asked);
+    module
+        .bind_import_typed("fleet", "call", move |args, memory| {
+            let [Val::I32(op), Val::I32(op_len), Val::I32(p), Val::I32(p_len)] = args else {
+                return Err(WasmError::Trap("fleet.call wants four i32"));
+            };
+            let text = |at: i32, len: i32| {
+                String::from_utf8(memory[at as usize..(at + len) as usize].to_vec())
+                    .expect("the guest hands over utf-8")
+            };
+            sink.borrow_mut()
+                .push((text(*op, *op_len), text(*p, *p_len)));
+            Ok(vec![Val::I32(0)])
+        })
+        .expect("bind fleet.call");
+    let answer: &[u8] = br#"{"ok":true,"tab":"t3"}"#;
+    module
+        .bind_import_typed("fleet", "result_len", move |_args, _memory| {
+            Ok(vec![Val::I32(answer.len() as i32)])
+        })
+        .expect("bind fleet.result_len");
+    module
+        .bind_import_typed("fleet", "result", move |args, memory| {
+            let [Val::I32(dst), Val::I32(cap)] = args else {
+                return Err(WasmError::Trap("fleet.result wants (i32, i32)"));
+            };
+            if (answer.len() as i32) > *cap {
+                return Ok(vec![Val::I32(-1)]);
+            }
+            let at = *dst as usize;
+            memory[at..at + answer.len()].copy_from_slice(answer);
+            Ok(vec![Val::I32(answer.len() as i32)])
+        })
+        .expect("bind fleet.result");
+
+    let mut instance = module.instantiate().expect("instantiate");
+    let vals = instance
+        .invoke_by_name("main", &[])
+        .unwrap_or_else(|e| panic!("trap in the wrapper: {}", e.message()));
+    assert_eq!(
+        Value::returned(&vals),
+        Ok(Value::Bool(true)),
+        "the wrapper must read `ok` off the parsed answer"
+    );
+    // What the broker was actually sent -- the operation id and the params
+    // JSON this engine wrote. The key is `tab`, which is the whole reason the
+    // wrapper exists.
+    assert_eq!(
+        *asked.borrow(),
+        vec![(
+            "tabs.set-note".to_string(),
+            r#"{"tab":"t3","note":"ship it"}"#.to_string()
+        )]
+    );
+}
