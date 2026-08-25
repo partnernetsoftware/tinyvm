@@ -327,6 +327,29 @@ fn every_fault_message_obeys_the_naming_rule_the_classifier_reads() {
         }
     }
 
+    // Rule three: a message is a whole phrase. In a fmt-free core a literal
+    // that stops where an interpolated value was meant to go can never be
+    // completed at run time, so it reaches the reader as a sentence with its
+    // last word missing -- `Trap("memory access [")` and
+    // `Trap("expected i32 on stack, got")` both shipped that way. The
+    // punctuation and the trailing verbs below are what those looked like.
+    for (file, message) in &messages {
+        let file = file.display();
+        for dangling in [",", ":", ";", "[", "(", "`", "-", "="] {
+            assert!(
+                !message.ends_with(dangling),
+                "{file}: {message:?} ends on {dangling:?}, where a value it cannot \
+                 interpolate was meant to go"
+            );
+        }
+        for verb in ["got", "expected", "found", "was", "is", "than"] {
+            assert!(
+                message != verb && !message.ends_with(&format!(" {verb}")),
+                "{file}: {message:?} ends on {verb:?} and never says what"
+            );
+        }
+    }
+
     // The overloaded words that were split are gone for good: nothing may go
     // back to reporting a bare `call stack`, `memory size` or `table size`,
     // each of which used to mean three or four different things.

@@ -3162,7 +3162,7 @@ fn parse_data_section(
                 let (offset, ni) = parse_const_expr(p, i, budget, globals)?;
                 i = ni;
                 if offset.result_type != 0x7F {
-                    return Err(WasmError::Decode("data offset must be i32, got"));
+                    return Err(WasmError::Decode("data offset must be i32"));
                 }
                 DataMode::Active { memory: 0, offset }
             }
@@ -3173,7 +3173,7 @@ fn parse_data_section(
                 let (offset, ni) = parse_const_expr(p, i, budget, globals)?;
                 i = ni;
                 if offset.result_type != 0x7F {
-                    return Err(WasmError::Decode("data offset must be i32, got"));
+                    return Err(WasmError::Decode("data offset must be i32"));
                 }
                 DataMode::Active {
                     memory: memory as usize,
@@ -3235,7 +3235,7 @@ fn parse_elem_section(
                 let (offset, ni) = parse_const_expr(p, i, budget, globals)?;
                 i = ni;
                 if offset.result_type != 0x7F {
-                    return Err(WasmError::Decode("elem offset must be i32, got"));
+                    return Err(WasmError::Decode("elem offset must be i32"));
                 }
                 (
                     ElemMode::Active {
@@ -3259,7 +3259,7 @@ fn parse_elem_section(
                 let (offset, ni) = parse_const_expr(p, i, budget, globals)?;
                 i = ni;
                 if offset.result_type != 0x7F {
-                    return Err(WasmError::Decode("elem offset must be i32, got"));
+                    return Err(WasmError::Decode("elem offset must be i32"));
                 }
                 let mode = ElemMode::Active {
                     table_index: table as usize,
@@ -3284,7 +3284,7 @@ fn parse_elem_section(
                 let (offset, ni) = parse_const_expr(p, i, budget, globals)?;
                 i = ni;
                 if offset.result_type != 0x7F {
-                    return Err(WasmError::Decode("elem offset must be i32, got"));
+                    return Err(WasmError::Decode("elem offset must be i32"));
                 }
                 (
                     ElemMode::Active {
@@ -3310,7 +3310,7 @@ fn parse_elem_section(
                 let (offset, ni) = parse_const_expr(p, i, budget, globals)?;
                 i = ni;
                 if offset.result_type != 0x7F {
-                    return Err(WasmError::Decode("elem offset must be i32, got"));
+                    return Err(WasmError::Decode("elem offset must be i32"));
                 }
                 let mode = ElemMode::Active {
                     table_index: table as usize,
@@ -8460,7 +8460,7 @@ impl Module {
                         #[cfg(not(all(feature = "staticcore", not(feature = "std"))))]
                         Val::StoreFuncRef(_) => false,
                         Val::ExternRef(reference) => reference.is_none(),
-                        _ => return Err(WasmError::Trap("expected reference on stack, got")),
+                        _ => return Err(WasmError::Trap("expected reference on stack")),
                     };
                     stack.push(Val::I32(i32::from(is_null)));
                 }
@@ -9028,7 +9028,7 @@ fn mem_ea(mem_len: usize, addr: i32, offset: u32, width: usize) -> Result<usize,
         .checked_add(width)
         .ok_or(WasmError::Trap("memory access overflow"))?;
     if end > mem_len {
-        return Err(WasmError::Trap("memory access ["));
+        return Err(WasmError::Trap("memory access out of bounds"));
     }
     Ok(ea)
 }
@@ -9390,7 +9390,7 @@ fn top2_i32(stack: &[Val]) -> Result<(i32, i32), WasmError> {
         return Err(WasmError::Trap("operand stack underflow"));
     };
     let (Val::I32(a), Val::I32(b)) = (*first, *second) else {
-        return Err(WasmError::Trap("expected i32 on stack, got"));
+        return Err(WasmError::Trap("expected i32 on stack"));
     };
     Ok((a, b))
 }
@@ -9401,7 +9401,7 @@ fn top2_i64(stack: &[Val]) -> Result<(i64, i64), WasmError> {
         return Err(WasmError::Trap("operand stack underflow"));
     };
     let (Val::I64(a), Val::I64(b)) = (*first, *second) else {
-        return Err(WasmError::Trap("expected i64 on stack, got"));
+        return Err(WasmError::Trap("expected i64 on stack"));
     };
     Ok((a, b))
 }
@@ -9412,7 +9412,7 @@ fn top2_f32(stack: &[Val]) -> Result<(f32, f32), WasmError> {
         return Err(WasmError::Trap("operand stack underflow"));
     };
     let (Val::F32(a), Val::F32(b)) = (*first, *second) else {
-        return Err(WasmError::Trap("expected f32 on stack, got"));
+        return Err(WasmError::Trap("expected f32 on stack"));
     };
     Ok((a, b))
 }
@@ -9435,7 +9435,7 @@ fn top1_i32(stack: &[Val]) -> Result<i32, WasmError> {
         return Err(WasmError::Trap("operand stack underflow"));
     };
     let Val::I32(a) = *top else {
-        return Err(WasmError::Trap("expected i32 on stack, got"));
+        return Err(WasmError::Trap("expected i32 on stack"));
     };
     Ok(a)
 }
@@ -9446,7 +9446,7 @@ fn top1_i64(stack: &[Val]) -> Result<i64, WasmError> {
         return Err(WasmError::Trap("operand stack underflow"));
     };
     let Val::I64(a) = *top else {
-        return Err(WasmError::Trap("expected i64 on stack, got"));
+        return Err(WasmError::Trap("expected i64 on stack"));
     };
     Ok(a)
 }
@@ -9457,7 +9457,7 @@ fn top1_f32(stack: &[Val]) -> Result<f32, WasmError> {
         return Err(WasmError::Trap("operand stack underflow"));
     };
     let Val::F32(a) = *top else {
-        return Err(WasmError::Trap("expected f32 on stack, got"));
+        return Err(WasmError::Trap("expected f32 on stack"));
     };
     Ok(a)
 }
@@ -9482,7 +9482,7 @@ fn pop_val(stack: &mut Vec<Val>) -> Result<Val, WasmError> {
 fn pop(stack: &mut Vec<Val>) -> Result<i32, WasmError> {
     match pop_val(stack)? {
         Val::I32(v) => Ok(v),
-        _other => Err(WasmError::Trap("expected i32 on stack, got")),
+        _other => Err(WasmError::Trap("expected i32 on stack")),
     }
 }
 
@@ -9491,7 +9491,7 @@ fn pop(stack: &mut Vec<Val>) -> Result<i32, WasmError> {
 fn pop_i64(stack: &mut Vec<Val>) -> Result<i64, WasmError> {
     match pop_val(stack)? {
         Val::I64(v) => Ok(v),
-        _other => Err(WasmError::Trap("expected i64 on stack, got")),
+        _other => Err(WasmError::Trap("expected i64 on stack")),
     }
 }
 
@@ -9500,7 +9500,7 @@ fn pop_i64(stack: &mut Vec<Val>) -> Result<i64, WasmError> {
 fn pop_f32(stack: &mut Vec<Val>) -> Result<f32, WasmError> {
     match pop_val(stack)? {
         Val::F32(v) => Ok(v),
-        _other => Err(WasmError::Trap("expected f32 on stack, got")),
+        _other => Err(WasmError::Trap("expected f32 on stack")),
     }
 }
 
@@ -9509,7 +9509,7 @@ fn pop_f32(stack: &mut Vec<Val>) -> Result<f32, WasmError> {
 fn pop_f64(stack: &mut Vec<Val>) -> Result<f64, WasmError> {
     match pop_val(stack)? {
         Val::F64(v) => Ok(v),
-        _other => Err(WasmError::Trap("expected f64 on stack, got")),
+        _other => Err(WasmError::Trap("expected f64 on stack")),
     }
 }
 
@@ -9518,7 +9518,7 @@ fn pop_f64(stack: &mut Vec<Val>) -> Result<f64, WasmError> {
 fn pop_v128(stack: &mut Vec<Val>) -> Result<[u8; 16], WasmError> {
     match pop_val(stack)? {
         Val::V128(value) => Ok(value),
-        _other => Err(WasmError::Trap("expected v128 on stack, got")),
+        _other => Err(WasmError::Trap("expected v128 on stack")),
     }
 }
 
@@ -9712,7 +9712,7 @@ fn vals_to_i32(values: Vec<Val>) -> Result<Vec<i32>, WasmError> {
     for value in values {
         match value {
             Val::I32(number) => integers.push(number),
-            _other => return Err(WasmError::Trap("invoke: expected i32 result, got")),
+            _other => return Err(WasmError::Trap("invoke: expected i32 result")),
         }
     }
     Ok(integers)

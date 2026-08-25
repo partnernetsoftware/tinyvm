@@ -197,7 +197,7 @@ fn wabt_compiled_simd_game_kernels_match_tinyvm() {
             Err(error) => error,
             Ok(_) => panic!("out-of-bounds SIMD {operation} store must trap"),
         };
-        assert!(error.message().starts_with("memory access ["));
+        assert_eq!(error.message(), "memory access out of bounds");
         assert_eq!(
             &must(instance.memory(), "read tail after trap")[65_520..],
             tail_before
