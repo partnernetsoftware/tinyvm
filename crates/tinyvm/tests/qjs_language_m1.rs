@@ -425,3 +425,133 @@ fn qjs_m1_builds_objects_and_reads_their_properties() {
     );
     assert_eq!(value("return {} === {};"), Value::Bool(false));
 }
+
+/// A `Bytes` host result whose announced length is not a length is refused.
+///
+/// The two-pass read asks the host how many bytes it has, allocates that much
+/// and asks for the copy. Checking the copy against the announcement is not
+/// enough on its own: it compares one host answer to another, so a host that
+/// answers `-1` twice — which is exactly what a raw contract returns for "your
+/// buffer is too small" — used to pass it, and produced a String whose length
+/// header read `0xFFFFFFFF`. Worse, `__alloc` rounds sizes with `(n + 3) & -4`,
+/// which is negative for a negative `n`, so repeating it walked the bump
+/// pointer backwards below `DATA_ORIGIN` and over the fault word — making the
+/// guest report a budget problem for a script that merely had a type error.
+///
+/// So the announcement is checked for being a length before it becomes a size.
+#[test]
+fn qjs_m1_refuses_a_host_length_that_is_not_a_length() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use tinyvm::{Val, WasmError};
+    use tinyvm_qjs::{HostFn, HostResult, Names, Options, compile_qjs_m1_with};
+
+    fn module_for(source: &str, len: Rc<Cell<i32>>) -> tinyvm::WasmModule {
+        let table = vec![HostFn {
+            name: "reply".to_string(),
+            module: "sys".to_string(),
+            field: "reply".to_string(),
+            params: Vec::new(),
+            result: HostResult::Bytes {
+                length: "reply_len".to_string(),
+            },
+        }];
+        let wasm = compile_qjs_m1_with(
+            source,
+            Options {
+                names: Names::Declared(table),
+            },
+        )
+        .unwrap_or_else(|e| panic!("compiling {source:?}: {e}"));
+        let mut module = WasmModule::from_bytes_with(&wasm, Limits::default())
+            .unwrap_or_else(|e| panic!("load gate: {}", e.message()));
+        let announce = Rc::clone(&len);
+        module
+            .bind_import_typed("sys", "reply_len", move |_a, _m| {
+                Ok(vec![Val::I32(announce.get())])
+            })
+            .expect("bind sys.reply_len");
+        let copy = Rc::clone(&len);
+        module
+            .bind_import_typed("sys", "reply", move |args, memory| {
+                let [Val::I32(dst), Val::I32(cap)] = args else {
+                    return Err(WasmError::Trap("sys.reply wants (i32, i32)"));
+                };
+                // An honest host writes exactly what it was asked for.
+                if *cap > 0 {
+                    let at = *dst as usize;
+                    memory[at..at + *cap as usize].fill(b'z');
+                }
+                let _ = copy.get();
+                Ok(vec![Val::I32(*cap)])
+            })
+            .expect("bind sys.reply");
+        module
+    }
+
+    // The lie: a negative length, answered consistently by both passes.
+    let len = Rc::new(Cell::new(-1));
+    let module = module_for("return reply();", Rc::clone(&len));
+    let mut instance = module.instantiate().expect("instantiate");
+    let error = instance
+        .invoke_by_name("main", &[])
+        .expect_err("a negative announced length must trap, not build a String");
+    // Not a budget problem: nothing the host can raise makes -1 a length.
+    let memory = instance.memory().expect("guest memory");
+    assert_eq!(
+        guest_fault(&memory),
+        None,
+        "a bogus length is not `HeapExhausted` (trap was: {})",
+        error.message()
+    );
+    assert_eq!(error.class(), WasmFaultClass::Guest);
+
+    // Repeating it cannot walk the bump pointer below `DATA_ORIGIN`: the third
+    // allocation must never be handed the fault word's own address.
+    let len = Rc::new(Cell::new(-8));
+    let module = module_for(
+        "var a = reply(); var b = reply(); var c = reply(); return c;",
+        Rc::clone(&len),
+    );
+    let mut instance = module.instantiate().expect("instantiate");
+    match instance.invoke_by_name("main", &[]) {
+        Err(_) => {}
+        Ok(vals) => {
+            let Value::String(ptr) = Value::returned(&vals).expect("a V1 pair") else {
+                panic!("want a String, got {vals:?}");
+            };
+            panic!("a String record was placed at {ptr}, below DATA_ORIGIN = 8");
+        }
+    }
+
+    // The honest cases are untouched: zero is the empty String, and a real
+    // length still round-trips.
+    let len = Rc::new(Cell::new(0));
+    let module = module_for("return reply();", Rc::clone(&len));
+    let mut instance = module.instantiate().expect("instantiate");
+    let vals = instance.invoke_by_name("main", &[]).expect("zero-length");
+    let Value::String(ptr) = Value::returned(&vals).expect("a V1 pair") else {
+        panic!("want a String back");
+    };
+    let view = instance.memory().expect("guest memory");
+    let bytes: &[u8] = &view;
+    let at = ptr as usize;
+    assert_eq!(
+        u32::from_le_bytes(bytes[at..at + 4].try_into().expect("length header")),
+        0
+    );
+
+    let len = Rc::new(Cell::new(3));
+    let module = module_for("return reply();", Rc::clone(&len));
+    let mut instance = module.instantiate().expect("instantiate");
+    let vals = instance.invoke_by_name("main", &[]).expect("three bytes");
+    let Value::String(ptr) = Value::returned(&vals).expect("a V1 pair") else {
+        panic!("want a String back");
+    };
+    let view = instance.memory().expect("guest memory");
+    let bytes: &[u8] = &view;
+    let at = ptr as usize;
+    let n = u32::from_le_bytes(bytes[at..at + 4].try_into().expect("length header")) as usize;
+    assert_eq!(&bytes[at + 4..at + 4 + n], b"zzz");
+}

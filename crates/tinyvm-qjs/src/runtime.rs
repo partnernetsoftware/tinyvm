@@ -933,6 +933,29 @@ fn to_number_of(ctx: &Ctx, base: u32, out: &mut Vec<Ins>) {
 /// [`FAULT_HEAP_EXHAUSTED`] in [`FAULT_WORD`] before it does, so the host can
 /// tell "out of budget" from "broken script" without matching on a trap
 /// message that is identical for both.
+///
+/// # The postcondition, checked rather than assumed
+///
+/// [`FAULT_WORD`]'s doc rests on one claim: *the bump pointer is never below
+/// [`DATA_ORIGIN`]*, so the fault word is a word no allocation can ever hand
+/// out. Rounding with `(size + 3) & -4` does not preserve that on its own. The
+/// rounded size is negative for every `size <= -1`, and it is negative again
+/// for a `size` within three of `i32::MAX`, where `size + 3` overflows. Either
+/// one moves the bump pointer *backwards*, and enough of them walk it past
+/// [`DATA_ORIGIN`] to zero, where the next record written lands on top of the
+/// fault word -- and the guest then answers "out of budget" for a script whose
+/// only problem was a type error.
+///
+/// So the claim is a check, not a comment: if the bump pointer did not move
+/// forward, this call is refused. It is stated as `new <u old` rather than
+/// `size >= 0` deliberately, because that is the postcondition itself -- it
+/// covers the negative size, the overflowing size and any future arithmetic
+/// here, where a sign test would only cover the first.
+///
+/// Nothing is written to [`FAULT_WORD`] on this path. A size the allocator
+/// cannot represent is not a budget the host can raise, and claiming
+/// [`FAULT_HEAP_EXHAUSTED`] for it would be the same misclassification the
+/// fault word exists to prevent, only pointing the other way.
 fn alloc(ctx: &Ctx) -> FnBuild {
     let mut f = FnBuild::new(1);
     let p = f.local(ValType::I32);
@@ -948,6 +971,13 @@ fn alloc(ctx: &Ctx) -> FnBuild {
     b.push(Ins::I32And);
     b.push(Ins::I32Add);
     b.push(Ins::GlobalSet(g));
+    // The postcondition, checked: the bump pointer only ever moves forward.
+    b.push(Ins::GlobalGet(g));
+    b.push(Ins::LocalGet(p));
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::Unreachable);
+    b.push(Ins::End);
     b.push(Ins::Block(BlockType::Empty));
     b.push(Ins::Loop(BlockType::Empty));
     b.push(Ins::MemorySize);

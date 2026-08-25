@@ -146,6 +146,8 @@ pub(crate) enum Ins {
     I32Eqz,
     I32Eq,
     I32Ne,
+    I32LtS,
+    I32LtU,
     I32GeU,
     I32Add,
     I32Sub,

@@ -535,6 +535,8 @@ pub(crate) mod m1 {
                 Ins::I32Eqz => ir::Ins::I32Eqz,
                 Ins::I32Eq => ir::Ins::I32Eq,
                 Ins::I32Ne => ir::Ins::I32Ne,
+                Ins::I32LtS => ir::Ins::I32LtS,
+                Ins::I32LtU => ir::Ins::I32LtU,
                 Ins::I32GeU => ir::Ins::I32GeU,
                 Ins::I32Add => ir::Ins::I32Add,
                 Ins::I32Sub => ir::Ins::I32Sub,
@@ -1663,11 +1665,24 @@ pub(crate) mod m1 {
         /// [`HostResult::Bytes`]: ask the length, allocate a string record of
         /// that size on the engine's own heap, ask for the copy, and check it.
         ///
-        /// The check is the point. A host that reports one length and writes
-        /// another -- or answers with the negative "your buffer is too small"
-        /// a raw contract gives -- would otherwise produce a String with a
-        /// fabricated tail, which is indistinguishable from a real one. It
-        /// traps instead.
+        /// The checks are the point, and there are two of them because a host
+        /// can be wrong in two independent ways.
+        ///
+        /// The second one -- copied bytes against promised bytes -- catches a
+        /// host that writes a different amount than it announced. On its own it
+        /// is not enough: it compares one host answer to another host answer, so
+        /// two *matching* wrong answers pass it. In particular `-1` is what a
+        /// raw contract returns for "your buffer is too small", and a host that
+        /// answers `-1` to both calls used to get a String whose length header
+        /// read `0xFFFFFFFF` -- the fabricated tail this function exists to
+        /// prevent -- and, because `__alloc` rounds with `(size + 3) & -4`,
+        /// moved the bump pointer *backwards* over
+        /// [`crate::runtime::FAULT_WORD`].
+        ///
+        /// So the first check asks the question the second one cannot: is the
+        /// announced length a length at all. A negative answer is refused here,
+        /// at the boundary the host lied across, before it becomes a size, a
+        /// record header or an address.
         fn two_pass_string(&mut self, b: &Bound, slots: &[u32]) {
             let length = b.length.expect("a Bytes result binds a length import");
             let n = self.take_raw();
@@ -1677,6 +1692,13 @@ pub(crate) mod m1 {
             self.unwrap_args(slots, &params);
             self.push(Ins::Call(length));
             self.push(Ins::LocalSet(n));
+
+            self.push(Ins::LocalGet(n));
+            self.push(Ins::I32Const(0));
+            self.push(Ins::I32LtS);
+            self.push(Ins::If(BlockType::Empty));
+            self.push(Ins::Unreachable);
+            self.push(Ins::End);
 
             self.push(Ins::LocalGet(n));
             self.push(Ins::I32Const(STRING_HEADER));

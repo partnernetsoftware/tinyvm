@@ -289,6 +289,8 @@ fn ins_wat(ins: &Ins) -> String {
         Ins::I32Eqz => "i32.eqz".into(),
         Ins::I32Eq => "i32.eq".into(),
         Ins::I32Ne => "i32.ne".into(),
+        Ins::I32LtS => "i32.lt_s".into(),
+        Ins::I32LtU => "i32.lt_u".into(),
         Ins::I32GeU => "i32.ge_u".into(),
         Ins::I32Add => "i32.add".into(),
         Ins::I32Sub => "i32.sub".into(),
