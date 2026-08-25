@@ -400,9 +400,23 @@ as “almost approved” or “safe to ship externally.”
   addition" is not, so a program that never writes `JSON` is byte-identical to
   what it was. Naming it also turns the unwind channel on, because
   `JSON.parse` raises one; that is why the two arrived together.
-- 下游验收目标 `agenterm/scripts/qjs/lib/fleet.js` **原样整篇编译并运行**：6 280
-  源字节 → 20 935 wasm 字节，过装载门，实例化，29 个函数值属性全部可达，只剩一个
-  import `js.__host`。以前停在第 14 行第 727 字节。跑通的证据不是"编译过了"，而是
+- 下游验收目标 `agenterm/scripts/qjs/lib/fleet.js`：**编译与运行是两条不同强度的主张，
+  分开说。**（本条 2026-08-25 由独立复核收紧：原文写作「原样整篇编译并运行」，而它自己
+  两句之后就写了「embedder 要自带五行前奏」——既要前奏就不是原样，两句不能同真。）
+
+  | 主张 | 成立吗 | 条件 |
+  |------|--------|------|
+  | 原样整篇**编译** | ✅ | 仅在 `Names::HostImport` 下。6 280 源字节 → 20 935 wasm，过装载门，29 个函数值属性可达 |
+  | 产物**可被宿主喂饱** | ❌ | 它只 import 一样东西：`js.__host`。宿主得回一个带函数属性的客人对象，而门只说原始 i32/f64/字节，`Value` 没有 Object 变体 |
+  | 在**产品实际用的** `Names::Declared` 下编译 | ❌ | 停在第 682 字节：`no host function named __host` |
+  | 原样整篇**运行** | ❌ | 需 embedder 前置五行 `const __host = {...}`，即非原样 |
+
+  以前停在第 14 行第 727 字节，所以进展是真的——但真正可交付的形状是**按门的实际表面写
+  绑定**：`agenterm/scripts/qjs/lib/fleet.qjs` 在 `Names::Declared` 下直接编过
+  （3 966 → 12 442 字节，过装载门，import 恰是门提供的 `fleet_call` / `fleet_result`），
+  不需要任何前奏。`fleet.js` 需要前奏不是引擎的缺口，是它当初写给了另一套宿主表面。
+
+  跑通的证据不是"编译过了"，而是
   `crates/tinyvm-qjs/tests/fleet_acceptance.rs`：一个 wrapper 经声明的原始宿主门出去，
   broker 用 JSON 文本回答，`JSON.parse` 把它变成对象，调用方读出属性。剩下的一处缩减
   写在那份测试的文件头：`fleet.js` 用 `__host.fleet_call(...)` 触门，那是自由名上的属性
