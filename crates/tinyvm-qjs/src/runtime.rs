@@ -99,6 +99,33 @@ pub(crate) const FAULT_NONE: i32 = 0;
 /// A budget fact, not a defect in the script.
 pub(crate) const FAULT_HEAP_EXHAUSTED: i32 = 1;
 
+/// A `throw` reached the host with no `catch` between. Neither a budget fact
+/// nor a defect in the engine: the script ran exactly as written, ECMA-262
+/// says the program terminates with that exception, and the host's right
+/// answer is to report it -- not to raise a memory ceiling and not to tell
+/// the author their script is broken.
+///
+/// It is a *third* code and not a reuse of either existing one for the reason
+/// [`FAULT_WORD`] exists at all: a host that cannot tell "your script threw"
+/// from "your script is broken" will tell an author the wrong thing. Without
+/// it, an uncaught throw would arrive as the same bare `unreachable` a missing
+/// conversion executes, which is precisely the misclassification the fault
+/// word was added to prevent.
+///
+/// It does **not** carry the thrown value. A module exports no global, so a
+/// host cannot read the unwind channel that holds it; handing it out would
+/// mean exporting an engine-internal pair or widening the entry point's
+/// results, and both of those are decisions about the host boundary rather
+/// than about throwing.
+///
+/// Two producers, and they must stay one number: `super::convert`'s `__throw`
+/// when the module has no unwind channel, and `super::emit`'s entry-point
+/// epilogue when a throw reaches the top of the script. `crate::guest_fault`
+/// does not name it yet -- `lib.rs` is another lane's file -- so a host
+/// reading the word today gets `None`, the same answer an ordinary fault
+/// gives. Adding the arm is one line.
+pub(crate) const FAULT_UNCAUGHT_THROW: i32 = 2;
+
 /// `mem[FAULT_WORD] = code`.
 fn store_fault(code: i32, out: &mut Vec<Ins>) {
     out.push(Ins::I32Const(FAULT_WORD));
@@ -111,6 +138,15 @@ fn store_fault(code: i32, out: &mut Vec<Ins>) {
 #[allow(dead_code)]
 pub(crate) fn clear_fault(out: &mut Vec<Ins>) {
     store_fault(FAULT_NONE, out);
+}
+
+/// Emitted where a throw becomes a trap: `__throw` in a module with no unwind
+/// channel, and the entry point's epilogue where a throw ran out of handlers.
+/// The write has to come first -- once the trap has happened there is no
+/// guest instruction left to run, which is the same argument [`alloc`] makes
+/// for writing [`FAULT_HEAP_EXHAUSTED`] before its own refusal.
+pub(crate) fn record_uncaught_throw(out: &mut Vec<Ins>) {
+    store_fault(FAULT_UNCAUGHT_THROW, out);
 }
 
 /// The emitted runtime functions, in index order. Position in [`SET`] is the
@@ -1263,10 +1299,10 @@ fn str_eq() -> FnBuild {
 ///
 /// None of the three is a reason to build the shape table now, and all three
 /// are reasons this comment exists.
-const OBJ_HEADER: i32 = 12;
-const OBJ_LEN: u32 = 0;
-const OBJ_CAP: u32 = 4;
-const OBJ_ENTRIES: u32 = 8;
+pub(crate) const OBJ_HEADER: i32 = 12;
+pub(crate) const OBJ_LEN: u32 = 0;
+pub(crate) const OBJ_CAP: u32 = 4;
+pub(crate) const OBJ_ENTRIES: u32 = 8;
 
 /// The `[len: i32][utf8 bytes]` record's header, in bytes. A reader of a
 /// string wants the bytes, which start after it.
@@ -1278,10 +1314,10 @@ pub(crate) const STRING_HEADER: i32 = 4;
 /// value are the same kind of thing and `__str_eq` compares them. The value is
 /// the V1 pair stored whole -- tag beside payload -- which is what makes a
 /// read a load of two words and not a re-boxing.
-const ENTRY_BYTES: i32 = 16;
-const ENTRY_KEY: u32 = 0;
-const ENTRY_TAG: u32 = 4;
-const ENTRY_PAYLOAD: u32 = 8;
+pub(crate) const ENTRY_BYTES: i32 = 16;
+pub(crate) const ENTRY_KEY: u32 = 0;
+pub(crate) const ENTRY_TAG: u32 = 4;
+pub(crate) const ENTRY_PAYLOAD: u32 = 8;
 
 /// The alignment *exponent* every access into a record declares: 2, meaning
 /// four bytes. `__alloc` aligns to four, so the eight-byte alignment an

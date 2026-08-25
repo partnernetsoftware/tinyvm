@@ -73,6 +73,14 @@ pub(crate) enum TokenKind {
     False,
     Null,
     Undefined,
+    /// `try`, `catch`, `finally` and `throw`. Graduated out of
+    /// [`is_reserved`] when the engine learned to unwind; before that a
+    /// script that wrote one was refused by the lexer with the same phrase
+    /// [`TokenKind::capability`] still keeps for them.
+    Try,
+    Catch,
+    Finally,
+    Throw,
 
     // Delimiters.
     LParen,
@@ -91,6 +99,10 @@ pub(crate) enum TokenKind {
     /// [`TokenKind::capability`] still names that when the parser has no use
     /// for one here.
     Colon,
+    /// `?` -- the first half of a conditional expression, and the only thing
+    /// a lone `?` spells. `??` and `?.` are their own lexemes, read before
+    /// this one.
+    Question,
 
     // Operators.
     Plus,
@@ -153,6 +165,10 @@ impl TokenKind {
             Self::False => "the `false` literal",
             Self::Null => "the `null` literal",
             Self::Undefined => "the `undefined` value",
+            Self::Try => "the `try` keyword",
+            Self::Catch => "the `catch` keyword",
+            Self::Finally => "the `finally` keyword",
+            Self::Throw => "the `throw` keyword",
             Self::LParen => "a `(`",
             Self::RParen => "a `)`",
             Self::LBrace => "a `{`",
@@ -161,6 +177,7 @@ impl TokenKind {
             Self::RBracket => "a `]`",
             Self::Dot => "a `.`",
             Self::Colon => "a `:`",
+            Self::Question => "a `?`",
             Self::Semi => "a `;`",
             Self::Comma => "a `,`",
             Self::Plus => "a `+`",
@@ -225,10 +242,17 @@ impl TokenKind {
             // other thing it spells, which is still ahead of the engine.
             Self::LBracket | Self::RBracket => (Boundary::ThirdBinding, "array literals"),
             Self::Dot => (Boundary::ThirdBinding, "property access"),
-            // `:` graduated for an ObjectLiteral. Everywhere else it is the
-            // second half of `?:`, or a label -- and `?` already names the
-            // first of those, so this only speaks when a `:` arrives alone.
-            Self::Colon => (Boundary::Subset, "conditional expressions"),
+            // `:` graduated for an ObjectLiteral, and the M1 parser now also
+            // reads the one in `?:`. What is left -- a `:` that reaches a
+            // position neither of those two consumed -- is a label, so that
+            // is what it names. It used to say "conditional expressions",
+            // which was true until the milestone that landed them and would
+            // now be the engine disclaiming a capability it has.
+            Self::Colon => (Boundary::FullJs, "labelled statements"),
+            // `?` is lowered by the M1 parser and *not* by the M0 expression
+            // pipeline, which is a live caller of this table -- so the phrase
+            // stays, and `parse::Parser::program` is where M0 spends it.
+            Self::Question => (Boundary::Subset, "conditional expressions"),
             Self::Bang => (Boundary::Subset, "the logical `!` operator"),
             Self::Comma => (Boundary::Subset, "the comma operator"),
             Self::Str(_) => (Boundary::Subset, "string literals"),
@@ -249,6 +273,10 @@ impl TokenKind {
             Self::Let => (Boundary::FullJs, "the `let` keyword"),
             Self::Const => (Boundary::FullJs, "the `const` keyword"),
             Self::Var => (Boundary::FullJs, "the `var` keyword"),
+            Self::Try => (Boundary::FullJs, "the `try` keyword"),
+            Self::Catch => (Boundary::FullJs, "the `catch` keyword"),
+            Self::Finally => (Boundary::FullJs, "the `finally` keyword"),
+            Self::Throw => (Boundary::FullJs, "the `throw` keyword"),
             // Already carrying its own phrase, or already lowered. `Ident` is
             // deliberately absent: what a name means is the one thing
             // `crate::Options` chooses, so only the parser may name it.
@@ -487,6 +515,10 @@ impl Lexer<'_> {
             "false" => TokenKind::False,
             "null" => TokenKind::Null,
             "undefined" => TokenKind::Undefined,
+            "try" => TokenKind::Try,
+            "catch" => TokenKind::Catch,
+            "finally" => TokenKind::Finally,
+            "throw" => TokenKind::Throw,
             // A function the engine would have to *implement*, so resolving it
             // like an ordinary name would answer the wrong question. `eval` is
             // a scheduled capability, not an excluded one.
@@ -759,7 +791,7 @@ impl Lexer<'_> {
             [b'.', ..] => (1, TokenKind::Dot),
             [b':', ..] => (1, TokenKind::Colon),
             [b'&' | b'|' | b'^' | b'~', ..] => (1, subset(BITWISE)),
-            [b'?', ..] => (1, subset("conditional expressions")),
+            [b'?', ..] => (1, TokenKind::Question),
             _ => {
                 // Not ASCII punctuation the engine knows. Name the character
                 // itself, decoded as a `char` so a multi-byte one prints whole.
@@ -840,7 +872,6 @@ fn is_reserved(word: &str) -> bool {
             | "async"
             | "break"
             | "case"
-            | "catch"
             | "class"
             | "continue"
             | "debugger"
@@ -850,7 +881,6 @@ fn is_reserved(word: &str) -> bool {
             | "enum"
             | "export"
             | "extends"
-            | "finally"
             | "import"
             | "in"
             | "instanceof"
@@ -860,8 +890,6 @@ fn is_reserved(word: &str) -> bool {
             | "super"
             | "switch"
             | "this"
-            | "throw"
-            | "try"
             | "void"
             | "with"
             | "yield"
@@ -926,6 +954,11 @@ fn is_restricted(prev: &TokenKind, next: &TokenKind) -> bool {
         // Tested before the update rule, because `return\n++x` is the return's
         // restricted production and not an update expression at all.
         TokenKind::Return => true,
+        // `throw` [no LineTerminator here] Expression. Unlike `return` there
+        // is no shorter production to fall back on, so the semicolon this
+        // inserts is not a `throw undefined`: it is a `throw` with nothing to
+        // throw, and the parser refuses it by name.
+        TokenKind::Throw => true,
         // LeftHandSideExpression [no LineTerminator here] `++`/`--`. Only in
         // that position: with no operand to its left, `++` is the prefix
         // operator and no restricted production is in play.

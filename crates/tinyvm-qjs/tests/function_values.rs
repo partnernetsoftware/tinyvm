@@ -852,40 +852,35 @@ fn leb(bytes: &[u8], mut at: usize) -> (usize, usize) {
 /// working tree measures whatever that tree happens to be today. The upstream
 /// path is in the doc comment above `FLEET_JS`.
 ///
-/// It still does not compile whole, and the diagnostic is the measurement:
-/// after this milestone the wall is no longer the function value, it is the
-/// conditional expression on line 14.
+/// It compiles whole, **verbatim**, which it did not before the milestone
+/// that landed `?:` and `try`/`catch`. The two constructs the file used to
+/// stop at are still there in the snapshot -- this test is what says the
+/// engine reads them rather than that somebody rewrote them.
 #[test]
-fn fleet_js_now_stops_at_the_conditional_and_not_at_the_function_value() {
-    let error = compile_with_hosts(FLEET_JS).expect_err("two walls are left");
-    assert_eq!(
-        error.message, "this engine does not support conditional expressions yet",
-        "the remaining wall moved to the wrong construct"
-    );
-    // The offset, pinned, because the README quotes it. `FLEET_JS` is a raw
-    // string that opens with a newline, so it is one byte ahead of the same
-    // offset in the file itself -- which is 727, on line 14.
-    assert_eq!(error.offset, 728);
+fn fleet_js_compiles_verbatim() {
+    compile_with_hosts(FLEET_JS).expect("the library compiles as upstream writes it");
     assert_eq!(
         FLEET_JS.len(),
         6281,
-        "the snapshot is the 6 280-byte file plus that newline"
+        "the snapshot is the 6 280-byte file plus the raw string's opening newline"
     );
-    assert_eq!(FLEET_JS[..error.offset].matches('\n').count(), 14);
+    // The two constructs, still in the snapshot and still spelled the way the
+    // library spells them. Byte 728 is where the parser used to stop, which
+    // is 727 in the file itself, on line 14.
     assert!(
-        FLEET_JS[error.offset..].starts_with("? \"{}\" : params"),
-        "the offset must point at the `?` and not near it"
+        FLEET_JS[728..].starts_with("? \"{}\" : params"),
+        "the conditional must still be in the snapshot for this to mean anything"
     );
+    assert_eq!(FLEET_JS[..728].matches('\n').count(), 14);
+    assert!(FLEET_JS.contains("  } catch (_err) {\n"));
 }
 
-/// The same library with its two remaining walls written the way this engine
-/// spells them -- the conditional as an `if`, the `try` gone -- compiles,
-/// loads, instantiates and runs. Every one of its twenty-nine function-valued
-/// properties is reachable and every one of its namespace tables is built.
+/// The library, as upstream writes it, compiles, loads, instantiates and
+/// runs. Every one of its twenty-nine function-valued properties is reachable
+/// and every one of its namespace tables is built.
 #[test]
 fn the_whole_fleet_library_compiles_and_its_methods_are_reachable() {
-    let source = fleet_without_the_remaining_walls();
-    let wasm = compile_with_hosts(&source).expect("the fleet library compiles");
+    let wasm = compile_with_hosts(FLEET_JS).expect("the fleet library compiles");
     let module = WasmModule::from_bytes_with(&wasm, Limits::default())
         .expect("the fleet library clears the load gate");
     let imports: Vec<String> = module
@@ -896,8 +891,10 @@ fn the_whole_fleet_library_compiles_and_its_methods_are_reachable() {
     assert_eq!(imports, ["js.JSON", "js.__host"], "got {imports:?}");
     // A record, not a budget -- so a change in it is visible in a diff. The
     // README quotes this number; 6 625 of it is the conversion prelude every
-    // module carries, whatever the script.
-    assert_eq!(wasm.len(), 16_381, "the whole library's emitted size moved");
+    // module carries, whatever the script. It was 16 381 for the same library
+    // with its `?:` written as an `if` and its `try` deleted, so the two
+    // constructs the engine now reads cost it 19 bytes.
+    assert_eq!(wasm.len(), 16_400, "the whole library's emitted size moved");
 }
 
 /// The same shape, reduced to what can run with no host at all: a namespace
@@ -928,17 +925,6 @@ fn compile_with_hosts(source: &str) -> Result<Vec<u8>, CompileError> {
         Options {
             names: Names::HostImport,
         },
-    )
-}
-
-/// `FLEET_JS` with the conditional expression and the `try`/`catch` rewritten
-/// the way this engine spells them. Nothing else is touched: the twenty-nine
-/// function expressions, the twelve namespace tables and the ten calls
-/// through `__host` are exactly as upstream writes them.
-fn fleet_without_the_remaining_walls() -> String {
-    FLEET_JS.replace(
-        "  const resultJson = __host.fleet_call(opId, params === undefined ? \"{}\" : params);\n  try {\n    return JSON.parse(resultJson);\n  } catch (_err) {\n    return resultJson;\n  }\n",
-        "  let p = params;\n  if (p === undefined) { p = \"{}\"; }\n  const resultJson = __host.fleet_call(opId, p);\n  return JSON.parse(resultJson);\n",
     )
 }
 

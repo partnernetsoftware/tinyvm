@@ -1449,7 +1449,6 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     ("1 << 2", "bitwise operators"),
     ("1 >> 2", "bitwise operators"),
     ("1 >>> 2", "bitwise operators"),
-    ("true ? 1 : 2", "conditional expressions"),
     ("null ?? 1", "the nullish coalescing operator"),
     ("let x = 1; x ||= 2; return x;", "logical assignment"),
     ("let x = 1; x &&= 2; return x;", "logical assignment"),
@@ -1469,6 +1468,11 @@ const UNSUPPORTED: &[(&str, &str)] = &[
         "function f(a) { return a; } return f(...1);",
         "the spread and rest syntax",
     ),
+    // `?:`, `try`/`catch`/`finally` and `throw` left this table when the
+    // milestone that lowers them landed; `tests/conditional_and_try.rs` is
+    // where their behaviour is asserted now, and the diagnostic a `?` or a
+    // `try` in a position the parser cannot use still prints is the phrase
+    // the lexer keeps for them.
     // -- syntax whole milestones away ---------------------------------------
     ("let f = (x) => x; return 0;", "arrow functions"),
     ("`t`", "template literals"),
@@ -1477,8 +1481,6 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     ("while (true) { continue; }", "the `continue` keyword"),
     ("do { } while (false);", "the `do` keyword"),
     ("switch (1) { }", "the `switch` keyword"),
-    ("try { } catch (e) { }", "the `try` keyword"),
-    ("throw 1;", "the `throw` keyword"),
     ("class C { }", "the `class` keyword"),
     ("new C();", "the `new` keyword"),
     ("this;", "the `this` keyword"),
@@ -1777,9 +1779,12 @@ fn the_end_of_a_statement_names_the_missing_semicolon() {
         assert!(compile_qjs_m1(source).is_ok(), "{source:?}");
     }
     // And the two kinds that keep their phrase, because it is the truth.
+    // A `:` used to name the conditional expression here; the milestone that
+    // landed `?:` took that meaning away, so what a `:` the parser cannot use
+    // spells is a label, and that is what it now says.
     assert_eq!(
-        refuse("let a = 1 ? 2 : 3; return a;").message,
-        "this engine does not support conditional expressions yet"
+        refuse("let a = 1 : 2; return a;").message,
+        "this engine does not support labelled statements yet"
     );
     assert_eq!(
         refuse("let a = 1 ** 2; return a;").message,

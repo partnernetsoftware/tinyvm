@@ -259,12 +259,61 @@ fn emit(expr: &Expr, hosts: &[String], out: &mut Vec<Ins>) {
 ///
 /// # Where the `end`s come from
 ///
-/// Every branch this module emits targets a label it opened itself, at a
-/// nesting it knows statically, so no depth is ever computed from a stack of
-/// enclosing labels. That is deliberate: the M1 statement set has no `break`
-/// and no `continue` -- the two constructs whose branch target is *not* local
-/// -- so a label stack would be machinery with one possible answer. It is what
-/// the milestone that adds them must build.
+/// Every branch this module emits used to target a label it opened itself, at
+/// a nesting it knew statically. `try`/`catch` ended that: a `throw` five
+/// blocks deep has to reach a handler opened by a statement that is not its
+/// parent, which is exactly the non-local target `break` and `continue` would
+/// need. So [`m1::Lower`] now keeps the label depth (`depth`) and two stacks
+/// of open targets (`handlers`, `finalizers`), and every branch to something
+/// this frame did not just open is `self.depth - target`. Nothing else about
+/// the shapes below changed: an `if` and a loop still branch to their own
+/// labels by a constant.
+///
+/// # Unwinding, and what it costs the program that never throws
+///
+/// tinyvm's core does not implement the wasm exception-handling proposal.
+/// `crates/tinyvm/src/wasm.rs`'s opcode decoder has no arm for `try` (0x06),
+/// `catch` (0x07), `throw` (0x08), `rethrow` (0x09) or `try_table` (0x1F) --
+/// it ends at `_other => return Err(WasmError::Decode("unsupported opcode
+/// 0x"))`, line 2931 -- and its section table ranks only ids 1..=12, refusing
+/// the tag section (13) at `_ => return Err(WasmError::Decode("unsupported
+/// section id"))`, line 4852. There is no instruction to lower a handler
+/// onto, so the compiler encodes unwinding itself. Three designs were
+/// weighed, and the deciding number is what each costs on the path that does
+/// *not* throw, because that is every path in almost every program:
+///
+/// * **A sentinel value the caller tests.** An eighth tag, `thrown`. Rejected
+///   on the measured growth law the value-representation experiment recorded:
+///   one more type is one more test at every dispatch site, paid by every
+///   program whether or not it contains a `throw`, and paid by `__typeof`,
+///   `__truthy` and `__to_number` forever. It is also the disease this stack
+///   refuses in its other spelling -- a completion record is not a language
+///   value, and ECMA-262 does not make it one.
+/// * **A table of handler continuations.** Needs a computed jump, which in
+///   wasm means turning every function body into a `loop` around a
+///   `br_table`. That is a rewrite of the non-throwing path to buy the
+///   throwing one, which is the trade backwards.
+/// * **A flag, and a check after every call that could throw.** Chosen.
+///
+/// So a throw in flight is three module globals -- [`Unwind`] -- and the
+/// check is `global.get` + `br_if`: **two instructions and four bytes, at
+/// each call to a user function and each `call_indirect`**. The `br_if`'s
+/// target is the nearest enclosing handler, or, where there is none, the
+/// function's own label, which returns -- and the pair already on the stack
+/// is the callee's, so nothing has to be built to satisfy the return arity.
+///
+/// **A program with no `throw` in it emits none of this and pays nothing.**
+/// Not one instruction, not one global: nothing else can set the flag, so
+/// every check would be dead, and [`Scan::throws`] is what decides. That is
+/// the number `a_program_that_cannot_throw_pays_nothing` in
+/// `tests/conditional_and_try.rs` pins, against four module sizes measured
+/// before the feature existed.
+///
+/// What that buys is the divergence worth naming: **a trap is not a throw.**
+/// `try { undefined.a; } catch (e) {}` does not catch, because a property
+/// access on a primitive is an `unreachable` and this engine has no `Error`
+/// objects for it to be. Only a `throw` statement raises something a `catch`
+/// can see.
 pub(crate) mod m1 {
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -363,6 +412,99 @@ pub(crate) mod m1 {
     /// after it.
     const HEAP_GLOBAL: u32 = 0;
     const BINDING_GLOBALS: u32 = HEAP_GLOBAL + 1;
+
+    /// The code an uncaught `throw` writes into [`runtime::FAULT_WORD`].
+    ///
+    /// **This constant belongs in `runtime.rs`, beside `FAULT_NONE` and
+    /// `FAULT_HEAP_EXHAUSTED`, and `crate::GuestFault` needs the arm that
+    /// names it.** It is here only because those two files are another lane's;
+    /// moving it is one cut and paste plus one variant, and
+    /// `tests/conditional_and_try.rs` restates the number from outside so the
+    /// move cannot change it silently.
+    ///
+    /// A new code, and the reason it is warranted rather than convenient: the
+    /// fault word exists so a host can tell a *budget* failure from a *broken
+    /// script*, and an uncaught `throw` is neither. The script ran exactly as
+    /// written, ECMA-262 says the program terminates with that exception, and
+    /// the host's right answer is to report it -- not to raise a memory
+    /// ceiling and not to tell the author their script is wrong. Without a
+    /// code of its own it would arrive as the same bare `unreachable` a
+    /// missing conversion executes, which is precisely the misclassification
+    /// `FAULT_WORD` was added to prevent.
+    ///
+    /// What it does **not** carry is the thrown value. The three globals below
+    /// still hold it, and a module exports no global, so a host cannot read
+    /// it. Handing it out would mean exporting an engine-internal pair, or
+    /// widening the entry point's result -- both of them a decision about the
+    /// host boundary, and neither of them this milestone's.
+    pub(crate) const FAULT_UNCAUGHT_THROW: i32 = 2;
+
+    /// Where a throw in flight lives: a flag, and the thrown value beside it.
+    ///
+    /// Module globals rather than a return channel, because the value has to
+    /// survive a `return` that the wasm type system already spent on the
+    /// function's ordinary result. Three of them and not one: the thrown
+    /// value is an ordinary V1 pair -- ECMA-262 lets any value be thrown, and
+    /// this engine keeps that -- so it needs the same two words every other
+    /// value needs, and the flag cannot be folded into the tag because
+    /// `TAG_UNDEFINED` is 0 and `throw undefined` is a real program.
+    ///
+    /// Only present when [`Scan::throws`] is true, which is what keeps a
+    /// program that cannot throw byte-identical to what it was.
+    #[derive(Debug, Clone, Copy)]
+    struct Unwind {
+        /// `1` while a throw is looking for its handler, `0` otherwise.
+        flag: u32,
+        /// The thrown value's tag.
+        tag: u32,
+        /// The thrown value's payload.
+        payload: u32,
+    }
+
+    impl Unwind {
+        /// The three globals, taken in order from `base`.
+        fn at(base: u32) -> Self {
+            Self {
+                flag: base,
+                tag: base + 1,
+                payload: base + 2,
+            }
+        }
+
+        /// How many globals it occupies.
+        const WORDS: u32 = 3;
+    }
+
+    /// One enclosing `finally`, innermost last.
+    ///
+    /// A `finally` is the one construct here whose code runs on three
+    /// different paths -- fall-through, `return`, and a throw -- and has to
+    /// resume whichever one brought it. So the paths converge on one copy of
+    /// the finalizer and `pending` says what to do afterwards; emitting the
+    /// block once per path would triple it for every `return` in the try.
+    #[derive(Debug, Clone, Copy)]
+    struct Finalizer {
+        /// Label depth of the block whose `end` the finalizer's code follows.
+        /// Branching there is how a path enters it.
+        depth: u32,
+        /// The `i32` local holding what to resume: one of the three constants
+        /// below.
+        pending: u32,
+        /// One value local, holding the pending `return`'s value *or* the
+        /// pending throw's -- never both, because the two are alternatives.
+        /// Parking the thrown value here rather than leaving it in
+        /// [`Unwind`]'s globals is not tidiness: the finalizer may call a
+        /// function that throws and catches internally, and that call would
+        /// overwrite the globals with a value nobody is waiting for.
+        slot: u32,
+    }
+
+    /// Nothing to resume: the try block simply finished.
+    const PENDING_NONE: i32 = 0;
+    /// Resume a `return` of [`Finalizer::slot`].
+    const PENDING_RETURN: i32 = 1;
+    /// Resume the throw of [`Finalizer::slot`].
+    const PENDING_THROW: i32 = 2;
 
     /// A host name and the argument count every use of it agrees on.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -486,6 +628,14 @@ pub(crate) mod m1 {
             arity: scan.uniform_arity(program),
         });
 
+        // The three unwind globals sit *after* every binding global, so a
+        // program that cannot throw has the same global indices it always
+        // had. Computed here rather than where the globals are built, because
+        // the lowering needs the indices and the globals are built after it.
+        let unwind = scan
+            .throws
+            .then(|| Unwind::at(BINDING_GLOBALS + program.script().bindings.len() as u32 * WIDTH));
+
         let mut fns = FnTable::default();
         for (index, function) in program.functions.iter().enumerate() {
             let id = ast::FuncId(index as u32);
@@ -497,6 +647,7 @@ pub(crate) mod m1 {
                 &table,
                 &mut fns,
                 uniform,
+                unwind,
                 user_base,
                 id,
             )
@@ -580,6 +731,35 @@ pub(crate) mod m1 {
                 mutable: true,
                 init: ir::Const::I64(0),
             });
+        }
+        if let Some(unwind) = unwind {
+            debug_assert_eq!(
+                unwind.flag,
+                globals.len() as u32,
+                "the unwind globals follow every binding global"
+            );
+            // Flag, tag, payload -- and the flag starts clear, so a module
+            // that is instantiated and never called has no throw in flight.
+            globals.push(ir::Global {
+                ty: ir::ValType::I32,
+                mutable: true,
+                init: ir::Const::I32(0),
+            });
+            globals.push(ir::Global {
+                ty: ir::ValType::I32,
+                mutable: true,
+                init: ir::Const::I32(0),
+            });
+            globals.push(ir::Global {
+                ty: ir::ValType::I64,
+                mutable: true,
+                init: ir::Const::I64(0),
+            });
+            debug_assert_eq!(
+                globals.len() as u32,
+                unwind.flag + Unwind::WORDS,
+                "the three words are the whole of an unwind channel"
+            );
         }
 
         let data = if pool.is_empty() {
@@ -941,6 +1121,14 @@ pub(crate) mod m1 {
         indirect: bool,
         /// The widest argument list at an indirect call site.
         call_arity: u32,
+        /// Whether the program writes a `throw` anywhere.
+        ///
+        /// The yes-or-no that decides whether this module carries any
+        /// unwinding machinery at all. Nothing else can set the in-flight
+        /// flag -- a trap is not a throw -- so in a program with no `throw`
+        /// every check would be dead and every global unread, and none of
+        /// them is emitted. See this module's header.
+        throws: bool,
     }
 
     /// How one host name is used: the argument count every occurrence agrees
@@ -1087,6 +1275,27 @@ pub(crate) mod m1 {
                 host_stmt(program, body, scan)
             }
             ast::StmtKind::Return(value) => value.iter().try_for_each(|e| host_expr(e, scan)),
+            ast::StmtKind::Throw(value) => {
+                scan.throws = true;
+                host_expr(value, scan)
+            }
+            ast::StmtKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                block.iter().try_for_each(|s| host_stmt(program, s, scan))?;
+                if let Some(catch) = handler {
+                    catch
+                        .body
+                        .iter()
+                        .try_for_each(|s| host_stmt(program, s, scan))?;
+                }
+                match finalizer {
+                    Some(body) => body.iter().try_for_each(|s| host_stmt(program, s, scan)),
+                    None => Ok(()),
+                }
+            }
         }
     }
 
@@ -1162,6 +1371,11 @@ pub(crate) mod m1 {
                     }
                 }
             }
+            ast::ExprKind::Conditional { test, then, alt } => {
+                host_expr(test, scan)?;
+                host_expr(then, scan)?;
+                host_expr(alt, scan)
+            }
             ast::ExprKind::Unary(op, operand) => {
                 scan.type_of |= *op == ast::UnaryOp::TypeOf;
                 host_expr(operand, scan)
@@ -1222,9 +1436,30 @@ pub(crate) mod m1 {
         /// The signature every call through a value speaks, or `None` for a
         /// program the scan said has no such call and no such value.
         uniform: Option<Uniform>,
+        /// Where a throw in flight lives, or `None` for a program with no
+        /// `throw` in it -- which emits no check and no global.
+        unwind: Option<Unwind>,
         user_base: u32,
         id: ast::FuncId,
         f: FnBuild,
+        /// How many wasm labels are open around the cursor, not counting the
+        /// function's own. A branch to a target this frame did not just open
+        /// is `self.depth - target`, and the function's own label -- which is
+        /// a `return` -- is `self.depth` exactly.
+        ///
+        /// Maintained by [`Lower::push`] and by nothing else, which is why
+        /// every structured instruction this module emits goes through it. A
+        /// `repr` or `runtime` helper that writes straight into `f.body`
+        /// cannot break the count: those runs are balanced and none of them
+        /// branches out.
+        depth: u32,
+        /// The enclosing `catch`/`finally` entries a throw may reach, as
+        /// label depths, innermost last. Empty means a throw leaves this
+        /// function.
+        handlers: Vec<u32>,
+        /// The enclosing `finally` blocks a `return` has to run on its way
+        /// out, innermost last.
+        finalizers: Vec<Finalizer>,
         /// The script's completion value, per ECMA-262 -- see [`Lower::stmt`].
         /// `None` in every other function, where only `return` produces one.
         completion: Option<u32>,
@@ -1248,6 +1483,7 @@ pub(crate) mod m1 {
             table: &'a Table,
             fns: &'a mut FnTable,
             uniform: Option<Uniform>,
+            unwind: Option<Unwind>,
             user_base: u32,
             id: ast::FuncId,
         ) -> Self {
@@ -1292,9 +1528,13 @@ pub(crate) mod m1 {
                 table,
                 fns,
                 uniform,
+                unwind,
                 user_base,
                 id,
                 f,
+                depth: 0,
+                handlers: Vec::new(),
+                finalizers: Vec::new(),
                 completion,
                 free: Vec::new(),
                 free_raw: Vec::new(),
@@ -1384,13 +1624,26 @@ pub(crate) mod m1 {
             if let Some(binding) = self.self_name() {
                 self.instantiate(binding, self.id);
             }
-            if self.id == ast::Program::SCRIPT {
+            let entry = self.id == ast::Program::SCRIPT;
+            if entry {
                 // The fault word describes *this* call, so the entry point
                 // clears it before anything can write one. Without this a
                 // heap exhaustion recorded by an earlier call would still be
                 // sitting there when a later call trapped for its own,
                 // entirely different reason.
                 runtime::clear_fault(&mut self.f.body);
+            }
+            // A throw that reaches the entry point has nowhere to be handed
+            // to: every other function answers an uncaught throw by returning
+            // and letting its caller's check see the flag, and the script's
+            // caller is the host, which is not watching a global. So the
+            // script alone opens one block for it and registers it as the
+            // outermost handler; what follows the block is the fault the host
+            // *can* see.
+            let uncaught = entry && self.unwind.is_some();
+            if uncaught {
+                self.push(Ins::Block(BlockType::Empty));
+                self.handlers.push(self.depth);
             }
             self.stmts(&self.program.func(self.id).body)?;
             // Falling off the end. The script yields its completion value --
@@ -1400,6 +1653,21 @@ pub(crate) mod m1 {
             match self.completion {
                 Some(base) => load_local(base, &mut self.f.body),
                 None => const_undefined(&mut self.f.body),
+            }
+            if uncaught {
+                // The ordinary end of the script is a `return`, so the
+                // epilogue below is reached only by a branch to the block.
+                self.push(Ins::Return);
+                self.push(Ins::End);
+                self.handlers.pop();
+                // `runtime::store_fault` is private and `runtime.rs` is
+                // another lane's file, so this is its three instructions
+                // written out. `FAULT_UNCAUGHT_THROW` says why the code is
+                // its own.
+                self.push(Ins::I32Const(runtime::FAULT_WORD));
+                self.push(Ins::I32Const(FAULT_UNCAUGHT_THROW));
+                self.push(Ins::I32Store(ALIGN_WORD, 0));
+                self.push(Ins::Unreachable);
             }
             Ok(self.f)
         }
@@ -1424,7 +1692,18 @@ pub(crate) mod m1 {
             self.free_raw.push(index);
         }
 
+        /// Emit one instruction, keeping [`Lower::depth`] with it.
+        ///
+        /// The count is here and not at the call sites because a branch whose
+        /// target is not local reads it, and a single missed `end` would aim
+        /// every one of those branches at the wrong label -- silently, since
+        /// the module would still be well-typed.
         fn push(&mut self, ins: Ins) {
+            match ins {
+                Ins::Block(_) | Ins::Loop(_) | Ins::If(_) => self.depth += 1,
+                Ins::End => self.depth -= 1,
+                _ => {}
+            }
             self.f.body.push(ins);
         }
 
@@ -1524,9 +1803,15 @@ pub(crate) mod m1 {
                         Some(expr) => self.expr(expr)?,
                         None => const_undefined(&mut self.f.body),
                     }
-                    self.push(Ins::Return);
+                    self.finish_return();
                     Ok(())
                 }
+                ast::StmtKind::Throw(value) => self.throw_stmt(value),
+                ast::StmtKind::Try {
+                    block,
+                    handler,
+                    finalizer,
+                } => self.try_stmt(block, handler.as_ref(), finalizer.as_deref()),
                 // Hoisted before the program was walked: a declaration binds a
                 // name to a function index, and a function index needs no
                 // storage and nothing to run.
@@ -1574,6 +1859,320 @@ pub(crate) mod m1 {
                     self.store(place);
                     Ok(())
                 }
+            }
+        }
+
+        // -- unwinding -------------------------------------------------------
+
+        /// Where a throw goes from here: the nearest enclosing handler, or the
+        /// function's own label, which is a `return`.
+        ///
+        /// One number and not two cases, because `br self.depth` *is* the
+        /// return: the function body is a block whose label carries the
+        /// function's results, so branching to it hands back whatever pair is
+        /// on top of the stack. At a throw check that pair is the callee's
+        /// own, which is why the check needs nothing built to satisfy it.
+        fn unwind_target(&self) -> u32 {
+            match self.handlers.last() {
+                Some(&at) => self.depth - at,
+                None => self.depth,
+            }
+        }
+
+        /// The check after a call that could have thrown: two instructions,
+        /// and none at all in a program with no `throw` in it.
+        fn throw_check(&mut self) {
+            let Some(unwind) = self.unwind else {
+                return;
+            };
+            self.push(Ins::GlobalGet(unwind.flag));
+            let target = self.unwind_target();
+            self.push(Ins::BrIf(target));
+        }
+
+        /// `throw e`, ECMA-262 14.14.1: evaluate, then leave.
+        fn throw_stmt(&mut self, value: &ast::Expr) -> Result<(), CompileError> {
+            let unwind = self
+                .unwind
+                .expect("the scan sets `throws` for every `throw` in the tree");
+            self.expr(value)?;
+            // The pair comes off payload first.
+            self.push(Ins::GlobalSet(unwind.payload));
+            self.push(Ins::GlobalSet(unwind.tag));
+            self.push(Ins::I32Const(1));
+            self.push(Ins::GlobalSet(unwind.flag));
+            self.leave_with_throw();
+            Ok(())
+        }
+
+        /// Hand a throw whose globals are already set to the nearest handler,
+        /// or out of the function.
+        fn leave_with_throw(&mut self) {
+            match self.handlers.last() {
+                Some(&at) => {
+                    let back = self.depth - at;
+                    self.push(Ins::Br(back));
+                }
+                // Leaving the function: it owes its caller a pair, and
+                // nothing here has one, so it gets `undefined`. The caller
+                // reads the flag and never reads the value.
+                None => {
+                    const_undefined(&mut self.f.body);
+                    self.push(Ins::Return);
+                }
+            }
+        }
+
+        /// Perform a `return` of the JS value on top of the stack.
+        ///
+        /// Straight through when no `finally` stands between here and the
+        /// caller. Otherwise the value is parked and the innermost finalizer
+        /// is entered with a note to resume the return once it has run, which
+        /// is ECMA-262 14.15.3's "if F is not empty" -- and the note is what
+        /// lets the finalizer *override* the return by completing abruptly
+        /// itself.
+        fn finish_return(&mut self) {
+            match self.finalizers.last().copied() {
+                None => self.push(Ins::Return),
+                Some(f) => {
+                    store_local(f.slot, &mut self.f.body);
+                    self.push(Ins::I32Const(PENDING_RETURN));
+                    self.push(Ins::LocalSet(f.pending));
+                    let back = self.depth - f.depth;
+                    self.push(Ins::Br(back));
+                }
+            }
+        }
+
+        /// Enter a `catch` clause: the throw stops being in flight, and the
+        /// value it carried becomes the parameter (ECMA-262 14.15.3 step 4).
+        fn bind_caught(&mut self, param: Option<ast::BindingId>) {
+            match self.unwind {
+                Some(unwind) => {
+                    self.push(Ins::I32Const(0));
+                    self.push(Ins::GlobalSet(unwind.flag));
+                    if let Some(id) = param {
+                        let place = self.place(id);
+                        self.push(Ins::GlobalGet(unwind.tag));
+                        self.push(Ins::GlobalGet(unwind.payload));
+                        self.store(place);
+                    }
+                }
+                // A `catch` in a program with no `throw` in it. The clause is
+                // unreachable -- nothing can set a flag that does not exist --
+                // but it is still code in the module, and its parameter still
+                // has to hold something.
+                None => {
+                    if let Some(id) = param {
+                        let place = self.place(id);
+                        const_undefined(&mut self.f.body);
+                        self.store(place);
+                    }
+                }
+            }
+        }
+
+        /// `try`/`catch`/`finally`, ECMA-262 14.15.
+        fn try_stmt(
+            &mut self,
+            block: &[ast::Stmt],
+            handler: Option<&ast::Catch>,
+            finalizer: Option<&[ast::Stmt]>,
+        ) -> Result<(), CompileError> {
+            self.reset_completion();
+            match finalizer {
+                None => self.try_catch(
+                    block,
+                    handler.expect("the parser refuses a `try` with neither clause"),
+                ),
+                Some(fin) => self.try_finally(block, handler, fin),
+            }
+        }
+
+        /// `try { A } catch (e) { B }`, which is the two-block form this
+        /// module's header gives for `if`/`else` with the test replaced by a
+        /// branch out of the try body.
+        ///
+        /// ```text
+        /// block                  ;; the exit label
+        ///   block                ;; the handler: a throw inside A branches here
+        ///     <A>
+        ///     br 1               ;; A finished: skip the catch
+        ///   end
+        ///   <bind e, clear the flag>
+        ///   <B>
+        /// end
+        /// ```
+        fn try_catch(
+            &mut self,
+            block: &[ast::Stmt],
+            catch: &ast::Catch,
+        ) -> Result<(), CompileError> {
+            self.push(Ins::Block(BlockType::Empty));
+            let exit = self.depth;
+            self.push(Ins::Block(BlockType::Empty));
+            self.handlers.push(self.depth);
+            self.stmts(block)?;
+            self.handlers.pop();
+            let back = self.depth - exit;
+            self.push(Ins::Br(back));
+            self.push(Ins::End);
+            // 14.15.3: the catch block is *not* inside its own try, so the
+            // handler is popped before it is lowered and a `throw` here
+            // reaches whatever encloses the whole statement.
+            self.bind_caught(catch.param);
+            self.stmts(&catch.body)?;
+            self.push(Ins::End);
+            Ok(())
+        }
+
+        /// `try { A } [catch (e) { B }] finally { C }`.
+        ///
+        /// Three paths leave A -- it finishes, it returns, it throws -- and C
+        /// runs on all three and then resumes whichever it was. So they
+        /// converge on one copy of C and a `pending` local carries the answer
+        /// across it:
+        ///
+        /// ```text
+        /// pending := none
+        /// block                       ;; after
+        ///   block                     ;; fin: C follows this end
+        ///     block                   ;; rethrow: a throw out of B lands here
+        ///       block                 ;; handler: a throw out of A lands here
+        ///         <A>                 ;; return in A: park, pending := return, br fin
+        ///         br fin
+        ///       end
+        ///       <bind e>; <B>         ;; a throw out of B branches to rethrow
+        ///       br fin
+        ///     end
+        ///     <park the thrown value; pending := throw; clear the flag>
+        ///   end
+        ///   <C>                       ;; enclosing handler/finalizer, not this one
+        ///   <resume pending>
+        /// end
+        /// ```
+        ///
+        /// The `rethrow` block is absent when there is no `catch`, because
+        /// then the handler's continuation already *is* the parking code.
+        ///
+        /// Two details are semantics and not shape. The thrown value is
+        /// parked in a local rather than left in [`Unwind`]'s globals,
+        /// because C may call a function that throws and catches internally
+        /// and would overwrite them. And C is lowered with this try's handler
+        /// and finalizer already popped, which is what makes an abrupt
+        /// completion of C *replace* the pending one -- 14.15.3's last step,
+        /// and the reason `try { return 1; } finally { return 2; }` is 2.
+        fn try_finally(
+            &mut self,
+            block: &[ast::Stmt],
+            handler: Option<&ast::Catch>,
+            finalizer: &[ast::Stmt],
+        ) -> Result<(), CompileError> {
+            let pending = self.take_raw();
+            let slot = self.take();
+            self.push(Ins::I32Const(PENDING_NONE));
+            self.push(Ins::LocalSet(pending));
+
+            self.push(Ins::Block(BlockType::Empty));
+            let after = self.depth;
+            self.push(Ins::Block(BlockType::Empty));
+            let fin = self.depth;
+            self.finalizers.push(Finalizer {
+                depth: fin,
+                pending,
+                slot,
+            });
+
+            if let Some(catch) = handler {
+                self.push(Ins::Block(BlockType::Empty));
+                let rethrow = self.depth;
+                self.push(Ins::Block(BlockType::Empty));
+                self.handlers.push(self.depth);
+                self.stmts(block)?;
+                self.handlers.pop();
+                let back = self.depth - fin;
+                self.push(Ins::Br(back));
+                self.push(Ins::End);
+                self.handlers.push(rethrow);
+                self.bind_caught(catch.param);
+                self.stmts(&catch.body)?;
+                self.handlers.pop();
+                let back = self.depth - fin;
+                self.push(Ins::Br(back));
+                self.push(Ins::End);
+            } else {
+                self.push(Ins::Block(BlockType::Empty));
+                self.handlers.push(self.depth);
+                self.stmts(block)?;
+                self.handlers.pop();
+                let back = self.depth - fin;
+                self.push(Ins::Br(back));
+                self.push(Ins::End);
+            }
+
+            // Reached only by a throw that nothing above caught. Park it and
+            // fall through into C -- `br 0` here would be the same
+            // instruction as falling off the end of this block, so there is
+            // none.
+            self.park_pending_throw(slot, pending);
+            self.finalizers.pop();
+            self.push(Ins::End);
+
+            self.stmts(finalizer)?;
+            self.resume_pending(after, slot, pending);
+            self.push(Ins::End);
+
+            self.give(slot);
+            self.give_raw(pending);
+            Ok(())
+        }
+
+        /// Take the throw out of flight and hold it across the finalizer.
+        fn park_pending_throw(&mut self, slot: u32, pending: u32) {
+            let Some(unwind) = self.unwind else {
+                // No `throw` in the program: this path is unreachable, and
+                // the locals it would have written are never read.
+                return;
+            };
+            self.push(Ins::GlobalGet(unwind.tag));
+            self.push(Ins::GlobalGet(unwind.payload));
+            store_local(slot, &mut self.f.body);
+            self.push(Ins::I32Const(0));
+            self.push(Ins::GlobalSet(unwind.flag));
+            self.push(Ins::I32Const(PENDING_THROW));
+            self.push(Ins::LocalSet(pending));
+        }
+
+        /// After the finalizer: do what the path that entered it was doing.
+        ///
+        /// Emitted with this try's handler and finalizer already popped, so
+        /// both the resumed `return` and the resumed throw ask the *enclosing*
+        /// question -- which is how a `return` walks every finalizer between
+        /// it and the caller.
+        fn resume_pending(&mut self, after: u32, slot: u32, pending: u32) {
+            // Nothing pending: leave.
+            self.push(Ins::LocalGet(pending));
+            self.push(Ins::I32Eqz);
+            let out = self.depth - after;
+            self.push(Ins::BrIf(out));
+
+            self.push(Ins::LocalGet(pending));
+            self.push(Ins::I32Const(PENDING_RETURN));
+            self.push(Ins::I32Eq);
+            self.push(Ins::If(BlockType::Empty));
+            load_local(slot, &mut self.f.body);
+            self.finish_return();
+            self.push(Ins::End);
+
+            // What is left is a pending throw. Put it back in flight and hand
+            // it on.
+            if let Some(unwind) = self.unwind {
+                load_local(slot, &mut self.f.body);
+                self.push(Ins::GlobalSet(unwind.payload));
+                self.push(Ins::GlobalSet(unwind.tag));
+                self.push(Ins::I32Const(1));
+                self.push(Ins::GlobalSet(unwind.flag));
+                self.leave_with_throw();
             }
         }
 
@@ -1732,6 +2331,7 @@ pub(crate) mod m1 {
                     self.push(call);
                     Ok(())
                 }
+                ast::ExprKind::Conditional { test, then, alt } => self.conditional(test, then, alt),
                 ast::ExprKind::Logical(op, lhs, rhs) => self.logical(*op, lhs, rhs),
                 ast::ExprKind::Assign { op, target, value } => self.assign(*op, target, value),
             }
@@ -1908,6 +2508,8 @@ pub(crate) mod m1 {
             let arity = self.program.func(target).params.len() as u32;
             self.arguments(args, arity)?;
             self.push(Ins::Call(self.user_base + target.0));
+            // One of the two places a throw can arrive from somewhere else.
+            self.throw_check();
             Ok(())
         }
 
@@ -1952,6 +2554,10 @@ pub(crate) mod m1 {
             unbox_function(slot, &mut self.f.body);
             self.push(Ins::I32Load(ALIGN_WORD, FN_ELEMENT));
             self.push(Ins::CallIndirect(uniform.type_index, 0));
+            // The other one. The adapter in the table needs no check of its
+            // own: it forwards and returns, so a throw the target raised is
+            // still in flight when this returns.
+            self.throw_check();
             self.give(slot);
             Ok(())
         }
@@ -2221,6 +2827,48 @@ pub(crate) mod m1 {
                     box_bool(&inner, &mut self.f.body);
                 }
             }
+            Ok(())
+        }
+
+        /// `test ? then : alt`, ECMA-262 13.14.
+        ///
+        /// The two-block form this module's header gives for `if`/`else`,
+        /// with a scratch local carrying the value out for the reason
+        /// [`Lower::logical`] gives: `repr`'s `BlockType` has only `Empty`, so
+        /// a block that yielded a JS value would need a multi-value type
+        /// index.
+        ///
+        /// 13.14.1 evaluates the test, runs ToBoolean on it, and then
+        /// evaluates **one** branch. That is not a saving, it is the meaning:
+        /// a lowering that evaluated both and selected afterwards would run
+        /// the side effects of the branch the test rejected, and would answer
+        /// every value question correctly while doing it. `__truthy` is the
+        /// same ToBoolean `if` runs; there is one of it.
+        fn conditional(
+            &mut self,
+            test: &ast::Expr,
+            then: &ast::Expr,
+            alt: &ast::Expr,
+        ) -> Result<(), CompileError> {
+            let slot = self.take();
+            self.push(Ins::Block(BlockType::Empty));
+            let exit = self.depth;
+            self.push(Ins::Block(BlockType::Empty));
+            // The test is *inverted*: the branch it takes is the one to the
+            // else operand, which is what lets the then operand fall through.
+            self.truthy(test)?;
+            self.push(Ins::I32Eqz);
+            self.push(Ins::BrIf(0));
+            self.expr(then)?;
+            store_local(slot, &mut self.f.body);
+            let back = self.depth - exit;
+            self.push(Ins::Br(back));
+            self.push(Ins::End);
+            self.expr(alt)?;
+            store_local(slot, &mut self.f.body);
+            self.push(Ins::End);
+            load_local(slot, &mut self.f.body);
+            self.give(slot);
             Ok(())
         }
 

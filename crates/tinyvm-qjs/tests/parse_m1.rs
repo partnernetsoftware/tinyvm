@@ -130,6 +130,9 @@ fn sexpr(e: &Expr) -> String {
             let fix = if *prefix { "pre" } else { "post" };
             format!("({fix}{op} {})", sexpr(target))
         }
+        ExprKind::Conditional { test, then, alt } => {
+            format!("(?: {} {} {})", sexpr(test), sexpr(then), sexpr(alt))
+        }
         ExprKind::Binary(op, l, r) => format!("({} {} {})", op.symbol(), sexpr(l), sexpr(r)),
         ExprKind::Logical(op, l, r) => {
             let op = match op {
@@ -315,6 +318,33 @@ fn assignment_is_right_associative() {
     // `right = left`, not `left + 1`: the loop must be able to re-enter at the
     // same power for the second `=` to end up inside the first.
     assert_eq!(shape_after("var a, b;", "a = b = 1"), "(= a (= b 1))");
+}
+
+/// ECMA-262 13.14: `ConditionalExpression : ShortCircuitExpression ?
+/// AssignmentExpression : AssignmentExpression`. Two claims about shape, and
+/// the s-expression is the readable way to state either.
+#[test]
+fn the_conditional_sits_between_assignment_and_the_short_circuit_operators() {
+    assert_eq!(shape("1 ? 2 : 3"), "(?: 1 2 3)");
+    // Looser than `||`, so the whole `||` is the test.
+    assert_eq!(shape("1 || 2 ? 3 : 4"), "(?: (|| 1 2) 3 4)");
+    assert_eq!(shape("1 ? 2 : 3 || 4"), "(?: 1 2 (|| 3 4))");
+    // Tighter than assignment, so a conditional is what an `=` takes.
+    assert_eq!(shape_after("var a;", "a = 1 ? 2 : 3"), "(= a (?: 1 2 3))");
+    // And an AssignmentExpression is what each branch takes.
+    assert_eq!(shape_after("var a;", "1 ? a = 2 : 3"), "(?: 1 (= a 2) 3)");
+}
+
+/// Right-associative, which is what makes the second `?` land inside the
+/// first one's else branch rather than beside it.
+#[test]
+fn the_conditional_is_right_associative() {
+    assert_eq!(shape("1 ? 2 : 3 ? 4 : 5"), "(?: 1 2 (?: 3 4 5))");
+    assert_eq!(
+        shape("1 ? 2 ? 3 : 4 : 5"),
+        "(?: 1 (?: 2 3 4) 5)",
+        "and it nests in the then branch too"
+    );
 }
 
 #[test]
@@ -708,7 +738,9 @@ fn what_the_front_end_cannot_read_yet_names_the_construct() {
         ("$0.new;", "a property named with a reserved word"),
         ("[1];", "array"),
         ("1, 2;", "comma"),
-        ("1 ? 2 : 3;", "conditional"),
+        // `1 ? 2 : 3` left this table when the conditional landed; a `:` the
+        // parser cannot use is a label now, which is what it says.
+        ("a: 1;", "labelled statements"),
         ("2 ** 3;", "exponentiation"),
         ("1 & 2;", "bitwise"),
         ("for (x of y) { 1; }", "of"),

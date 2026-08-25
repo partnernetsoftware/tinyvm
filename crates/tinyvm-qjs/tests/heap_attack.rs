@@ -819,6 +819,13 @@ fn a_reserved_word_after_a_dot_is_a_property_name() {
         "true",
         "false",
         "undefined",
+        // Added by the milestone that landed unwinding: once a word is a
+        // token the lexer spells, `identifier_name` spells it too, and
+        // ECMA-262 13.2.5.1 makes every IdentifierName a PropertyName.
+        "try",
+        "catch",
+        "finally",
+        "throw",
     ];
     for word in spelled {
         let src = format!("var o = {{}}; o.{word} = 1; return o.{word};");
@@ -839,9 +846,6 @@ fn a_reserved_word_after_a_dot_is_a_property_name() {
         "of",
         "delete",
         "this",
-        "catch",
-        "try",
-        "throw",
         "default",
         "switch",
         "case",

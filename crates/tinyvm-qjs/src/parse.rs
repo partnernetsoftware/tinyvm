@@ -292,8 +292,9 @@ fn infix(kind: &TokenKind) -> Option<(BinaryOp, u8, u8)> {
 pub(crate) mod m1 {
     use crate::ast::m1::BinaryOp;
     use crate::ast::m1::{
-        Binding, BindingId, BindingKind, Declarator, Expr, ExprKind, FuncId, Function, LogicalOp,
-        MemberKey, Name, Program, Property, Res, Span, Stmt, StmtKind, UnaryOp, UpdateOp,
+        Binding, BindingId, BindingKind, Catch, Declarator, Expr, ExprKind, FuncId, Function,
+        LogicalOp, MemberKey, Name, Program, Property, Res, Span, Stmt, StmtKind, UnaryOp,
+        UpdateOp,
     };
     use crate::diag::{Boundary, CompileError, malformed, unsupported};
     use crate::lex::{
@@ -306,17 +307,27 @@ pub(crate) mod m1 {
     /// right-associative one `right = left` without the two colliding.
     ///
     /// The rungs JavaScript defines between these are absent because their
-    /// tokens are still [`TokenKind::Unsupported`] -- the comma operator, `?:`,
-    /// the bitwise and shift levels, `??`, `**`. Each arrives as one row.
+    /// tokens are still [`TokenKind::Unsupported`] -- the comma operator, the
+    /// bitwise and shift levels, `??`, `**`. Each arrives as one row.
+    ///
+    /// `?:` is the exception: it has a rung here and no row in [`infix`],
+    /// because its middle operand sits *between* two tokens and the table has
+    /// no shape for that. [`Parser::expression`] reads it directly, at
+    /// [`BP_CONDITIONAL`].
     const BP_ASSIGN: u8 = 2;
-    const BP_OR: u8 = 4;
-    const BP_AND: u8 = 6;
-    const BP_EQUALITY: u8 = 8;
-    const BP_RELATIONAL: u8 = 10;
-    const BP_ADDITIVE: u8 = 12;
-    const BP_MULTIPLICATIVE: u8 = 14;
+    /// ECMA-262 13.14, between assignment and the short-circuit operators:
+    /// `ConditionalExpression : ShortCircuitExpression ? AssignmentExpression
+    /// : AssignmentExpression`. Landing it is what pushed every rung above it
+    /// up by two; the numbers themselves mean nothing but their order.
+    const BP_CONDITIONAL: u8 = 4;
+    const BP_OR: u8 = 6;
+    const BP_AND: u8 = 8;
+    const BP_EQUALITY: u8 = 10;
+    const BP_RELATIONAL: u8 = 12;
+    const BP_ADDITIVE: u8 = 14;
+    const BP_MULTIPLICATIVE: u8 = 16;
     /// Unary and update, above every infix level: `-a * 2` is `(-a) * 2`.
-    const BP_PREFIX: u8 = 16;
+    const BP_PREFIX: u8 = 18;
 
     /// How much native stack one script's syntax may spend, counted in frames
     /// of recursive descent.
@@ -496,11 +507,16 @@ pub(crate) mod m1 {
         /// `;`. `tests/function_conformance.rs` is where it was caught.
         ///
         /// Two kinds of token keep their phrase, because for them it is true.
-        /// A `,` or a `:` is a JavaScript operator that would have *continued*
-        /// the expression and that this engine does not lower, so the
-        /// expression stopped for the reason the phrase gives. And the lexer's
-        /// `Unsupported` bucket is beyond the engine whatever the lexeme is --
-        /// `**` and `class` alike -- so naming it is never a lie.
+        /// A `,` is a JavaScript operator that would have *continued* the
+        /// expression and that this engine does not lower, so the expression
+        /// stopped for the reason the phrase gives. A `:` used to be in that
+        /// sentence for the same reason -- it was the second half of a `?:`
+        /// -- and the milestone that landed the conditional took that meaning
+        /// away; what a `:` here now means is a *label*, which is the phrase
+        /// the lexer keeps for it and which is equally true at this position.
+        /// And the lexer's `Unsupported` bucket is beyond the engine whatever
+        /// the lexeme is -- `**` and `class` alike -- so naming it is never a
+        /// lie.
         fn semicolon(&mut self) -> Result<(), CompileError> {
             if self.eat(&TokenKind::Semi) || semicolon_is_implied(self.tokens, self.pos) {
                 return Ok(());
@@ -804,6 +820,29 @@ pub(crate) mod m1 {
                 }
                 TokenKind::Function => self.function_declaration(span)?,
                 TokenKind::If => self.if_statement()?,
+                TokenKind::Try => self.try_statement()?,
+                TokenKind::Throw => {
+                    self.advance();
+                    // ECMA-262 12.10 rule 3 makes `throw` a restricted
+                    // production, and the lexer has already inserted the `;`
+                    // a line break after it puts there. Unlike `return` there
+                    // is no shorter production to fall back on, so a `;` here
+                    // is not a `throw undefined`.
+                    let token = self.peek().clone();
+                    if token.kind == TokenKind::Semi {
+                        return Err(malformed(
+                            if token.inserted {
+                                "needs the value to throw on the same line as the `throw`; ECMA-262 12.10 puts a `;` at that line break, so this reads as a `throw` with nothing to throw"
+                            } else {
+                                "needs a value after `throw`; ECMA-262 14.14 has no `throw` without one"
+                            },
+                            token.offset,
+                        ));
+                    }
+                    let value = self.expression(0)?;
+                    self.semicolon()?;
+                    StmtKind::Throw(value)
+                }
                 TokenKind::While => self.while_statement()?,
                 TokenKind::For => self.for_statement()?,
                 TokenKind::Return => {
@@ -856,6 +895,93 @@ pub(crate) mod m1 {
                 ),
                 self.peek().offset,
             ))
+        }
+
+        /// `try`/`catch`/`finally`, ECMA-262 14.15.
+        ///
+        /// All three parts are spelled `Block` in the grammar -- there is no
+        /// `try if (c) x;` -- so each is read by [`Parser::braced_block`] and
+        /// none of them goes through [`Parser::body_statement`].
+        fn try_statement(&mut self) -> Result<StmtKind, CompileError> {
+            self.deeper(1)?;
+            let at = self.peek().offset;
+            self.advance();
+            let block = self.braced_block("the `try` block")?;
+            let handler = if self.at(&TokenKind::Catch) {
+                Some(self.catch_clause()?)
+            } else {
+                None
+            };
+            let finalizer = if self.eat(&TokenKind::Finally) {
+                Some(self.braced_block("the `finally` block")?)
+            } else {
+                None
+            };
+            if handler.is_none() && finalizer.is_none() {
+                return Err(malformed(
+                    "needs a `catch` or a `finally` after the `try` block; ECMA-262 14.15 has no `try` with neither, and one with neither could only mean the block itself",
+                    at,
+                ));
+            }
+            self.shallower(1);
+            Ok(StmtKind::Try {
+                block,
+                handler,
+                finalizer,
+            })
+        }
+
+        /// A `{ ... }` with a scope of its own, read as a statement list.
+        fn braced_block(&mut self, what: &str) -> Result<Vec<Stmt>, CompileError> {
+            let open = self.peek().offset;
+            self.expect(&TokenKind::LBrace, &format!("needs a `{{` to open {what}"))?;
+            self.enter(false, self.func());
+            let body =
+                self.statements_until(&TokenKind::RBrace, &format!("{what} opened at byte {open}"));
+            self.leave();
+            body
+        }
+
+        /// One `catch` clause.
+        ///
+        /// The CatchParameter gets a scope of its own that the block's scope
+        /// nests inside, which is ECMA-262 14.15.4's two environments: it is
+        /// what makes the parameter shadow an outer name of the same
+        /// spelling, and what keeps a `let` of that name inside the block
+        /// from colliding with it.
+        fn catch_clause(&mut self) -> Result<Catch, CompileError> {
+            self.deeper(1)?;
+            self.advance();
+            self.enter(false, self.func());
+            let out = self.catch_rest();
+            self.leave();
+            self.shallower(1);
+            out
+        }
+
+        fn catch_rest(&mut self) -> Result<Catch, CompileError> {
+            // 14.15 makes the parameter optional: `catch { }` is a catch
+            // clause that does not name what it caught.
+            let param = if self.eat(&TokenKind::LParen) {
+                let token = self.peek().clone();
+                let TokenKind::Ident(name) = token.kind else {
+                    return Err(self.cannot_use("needs a name for the `catch` parameter"));
+                };
+                self.advance();
+                // A `let`-like binding: writable, and initialised on entry to
+                // the clause rather than by a declarator, so it has no
+                // temporal dead zone and `declare` leaves `initialised` unset.
+                let id = self.declare(&name, BindingKind::Let, Span(token.offset))?;
+                self.expect(
+                    &TokenKind::RParen,
+                    "needs a `)` to close the `catch` parameter",
+                )?;
+                Some(id)
+            } else {
+                None
+            };
+            let body = self.braced_block("the `catch` block")?;
+            Ok(Catch { param, body })
         }
 
         fn if_statement(&mut self) -> Result<StmtKind, CompileError> {
@@ -1150,7 +1276,42 @@ pub(crate) mod m1 {
             // tree walks it recursively. So the chain is charged too, and the
             // charge is released with this frame's.
             let mut chain = 0;
-            while let Some((what, lbp, rbp)) = infix(self.kind()) {
+            loop {
+                // 13.14 has no row in `infix`: its middle operand sits
+                // between two tokens rather than after one, and the table is
+                // `(what it builds, left power, right power)` and nothing
+                // else. It takes its rung of the same ladder all the same.
+                if self.at(&TokenKind::Question) {
+                    if BP_CONDITIONAL < min_bp {
+                        break;
+                    }
+                    self.deeper(1)?;
+                    chain += 1;
+                    self.advance();
+                    // Both branches are an AssignmentExpression. That is what
+                    // makes `a ? b : c ? d : e` group to the right: BP_ASSIGN
+                    // is below BP_CONDITIONAL, so a second `?` is read inside
+                    // the first one's else branch rather than beside it.
+                    let then = self.expression(BP_ASSIGN)?;
+                    self.expect(
+                        &TokenKind::Colon,
+                        "needs a `:` between the two branches of the conditional",
+                    )?;
+                    let alt = self.expression(BP_ASSIGN)?;
+                    let span = lhs.span;
+                    lhs = Expr {
+                        kind: ExprKind::Conditional {
+                            test: Box::new(lhs),
+                            then: Box::new(then),
+                            alt: Box::new(alt),
+                        },
+                        span,
+                    };
+                    continue;
+                }
+                let Some((what, lbp, rbp)) = infix(self.kind()) else {
+                    break;
+                };
                 if lbp < min_bp {
                     break;
                 }
@@ -1790,6 +1951,10 @@ pub(crate) mod m1 {
             TokenKind::False => "false",
             TokenKind::Null => "null",
             TokenKind::Undefined => "undefined",
+            TokenKind::Try => "try",
+            TokenKind::Catch => "catch",
+            TokenKind::Finally => "finally",
+            TokenKind::Throw => "throw",
             _ => return None,
         };
         Some(word.to_string())
@@ -1895,6 +2060,20 @@ pub(crate) mod m1 {
                         fill_expr(value, res);
                     }
                 }
+                StmtKind::Throw(value) => fill_expr(value, res),
+                StmtKind::Try {
+                    block,
+                    handler,
+                    finalizer,
+                } => {
+                    fill_stmts(block, res);
+                    if let Some(catch) = handler {
+                        fill_stmts(&mut catch.body, res);
+                    }
+                    if let Some(finalizer) = finalizer {
+                        fill_stmts(finalizer, res);
+                    }
+                }
             }
         }
     }
@@ -1925,6 +2104,11 @@ pub(crate) mod m1 {
                 for arg in args {
                     fill_expr(arg, res);
                 }
+            }
+            ExprKind::Conditional { test, then, alt } => {
+                fill_expr(test, res);
+                fill_expr(then, res);
+                fill_expr(alt, res);
             }
             ExprKind::Unary(_, operand) => fill_expr(operand, res),
             ExprKind::Update { target, .. } => fill_expr(target, res),

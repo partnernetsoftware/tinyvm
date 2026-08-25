@@ -272,6 +272,24 @@ pub(crate) mod m1 {
             body: Box<Stmt>,
         },
         Return(Option<Expr>),
+        /// `throw e`, ECMA-262 14.14. A statement and not an expression: its
+        /// completion is abrupt, so there is no value for it to be.
+        Throw(Expr),
+        /// `try`/`catch`/`finally`, ECMA-262 14.15.
+        ///
+        /// `handler` and `finalizer` are both optional and 14.15 requires at
+        /// least one of them; the parser refuses a `try` with neither, so
+        /// this is never `(None, None)` in a tree it returned. Each of the
+        /// three parts is a statement *list* rather than a `Stmt`, because
+        /// the grammar spells all three `Block` -- there is no
+        /// `try if (c) x;` -- and a list is what
+        /// `emit::m1::Lower::stmts` needs in order to instantiate the
+        /// function declarations directly inside it.
+        Try {
+            block: Vec<Stmt>,
+            handler: Option<Catch>,
+            finalizer: Option<Vec<Stmt>>,
+        },
         /// A hoisted `function f(){}`. It appears in the list where it was
         /// written, but its binding is in scope from the top of the enclosing
         /// scope, so nothing has to *run* here.
@@ -279,6 +297,19 @@ pub(crate) mod m1 {
             binding: BindingId,
             func: FuncId,
         },
+    }
+
+    /// One `catch` clause.
+    ///
+    /// `param` is an `Option` because ECMA-262 14.15 makes the CatchParameter
+    /// optional (`catch { }`), not because the parser might fail to read one.
+    /// A present one is an ordinary binding of the catch block's own scope,
+    /// which is what makes it shadow an outer name of the same spelling and
+    /// makes it writable.
+    #[derive(Debug, Clone, PartialEq)]
+    pub(crate) struct Catch {
+        pub(crate) param: Option<BindingId>,
+        pub(crate) body: Vec<Stmt>,
     }
 
     /// One `key: value` of an ObjectLiteral.
@@ -373,6 +404,20 @@ pub(crate) mod m1 {
             target: Box<Expr>,
         },
         Binary(BinaryOp, Box<Expr>, Box<Expr>),
+        /// `test ? then : alt`, ECMA-262 13.14.
+        ///
+        /// A node of its own and not a `Logical` with three operands, for the
+        /// reason `Logical` is not a `Binary`: only one of the two branches is
+        /// evaluated, and a post-order walk over a generic n-ary node would
+        /// evaluate both. It shares that property with `Logical` and differs
+        /// in one way that matters to the lowering -- its value is one of two
+        /// *branches* rather than one of two *operands*, so there is nothing
+        /// to reuse between them.
+        Conditional {
+            test: Box<Expr>,
+            then: Box<Expr>,
+            alt: Box<Expr>,
+        },
         /// `&&` and `||`.
         ///
         /// A separate node from [`ExprKind::Binary`] on purpose, and this is

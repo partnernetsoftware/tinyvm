@@ -930,6 +930,12 @@ fn only_some_reserved_words_may_name_a_property() {
         "undefined",
         "get",
         "set",
+        // The milestone that landed unwinding made these four tokens the
+        // lexer spells, and 13.2.5.1 admits every IdentifierName.
+        "try",
+        "catch",
+        "finally",
+        "throw",
     ] {
         number(&format!("const o = {{ {word}: 1 }}; return o.{word};"), 1.0);
         number(
@@ -954,10 +960,6 @@ fn only_some_reserved_words_may_name_a_property() {
         "default",
         "break",
         "continue",
-        "try",
-        "catch",
-        "finally",
-        "throw",
         "yield",
         "await",
         "async",
@@ -1417,11 +1419,6 @@ fn the_neighbouring_syntax_is_refused_by_name() {
         Boundary::Subset,
     );
     refuses_capability(
-        "const o = {}; return o.a ? 1 : 2;",
-        "conditional expressions",
-        Boundary::Subset,
-    );
-    refuses_capability(
         "const o = { a: 1 }; return `${o.a}`;",
         "template literals",
         Boundary::Subset,
@@ -1469,7 +1466,6 @@ fn every_refusal_names_a_boundary_and_a_place() {
         "const o = {}; return o?.a;",
         "const o = {}; const { a } = o; return 0;",
         "const o = {}; for (const k in o) { } return 0;",
-        "const o = {}; return o.a ? 1 : 2;",
         "return [1, 2];",
         "const o = {}; return o.;",
         "const o = {}; return o[;",
