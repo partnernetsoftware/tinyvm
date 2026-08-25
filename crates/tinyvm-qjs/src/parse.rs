@@ -478,11 +478,54 @@ pub(crate) mod m1 {
         /// 1 and 2 say is there. The lexer settles the half that is a fact
         /// about the token stream; this is the half that needs a parser --
         /// nothing here can use the token, which is the rest of rule 1.
+        ///
+        /// # Why this does not reach for a capability phrase
+        ///
+        /// [`Parser::cannot_use`] prefers the token's own capability phrase,
+        /// and at this position that phrase is usually a lie. The statement
+        /// dispatch's last arm takes *any* token as the start of an expression
+        /// statement, so a token standing here is the next statement's first
+        /// token and not one this position failed to lower.
+        /// `o.m = function (x) { return x; } function rec() {}` -- two
+        /// statements, one line, no `;` -- was refused with "this engine does
+        /// not support the `function` keyword yet", and the engine has
+        /// supported that keyword since M1. Disclaiming a capability the
+        /// engine *has* is the same lie as blaming the author with the sign
+        /// flipped, and it is worse to act on: it sends the reader looking for
+        /// a workaround for function declarations instead of at the missing
+        /// `;`. `tests/function_conformance.rs` is where it was caught.
+        ///
+        /// Two kinds of token keep their phrase, because for them it is true.
+        /// A `,` or a `:` is a JavaScript operator that would have *continued*
+        /// the expression and that this engine does not lower, so the
+        /// expression stopped for the reason the phrase gives. And the lexer's
+        /// `Unsupported` bucket is beyond the engine whatever the lexeme is --
+        /// `**` and `class` alike -- so naming it is never a lie.
         fn semicolon(&mut self) -> Result<(), CompileError> {
             if self.eat(&TokenKind::Semi) || semicolon_is_implied(self.tokens, self.pos) {
                 return Ok(());
             }
-            Err(self.cannot_use("needs a `;` to end the statement"))
+            let token = self.peek();
+            if matches!(
+                token.kind,
+                TokenKind::Unsupported(_) | TokenKind::Colon | TokenKind::Comma
+            ) {
+                return Err(self.cannot_use("needs a `;` to end the statement"));
+            }
+            let what = "needs a `;` to end the statement";
+            match &token.kind {
+                TokenKind::Eof => Err(malformed(
+                    &format!("{what}; the source ends first"),
+                    token.offset,
+                )),
+                other => Err(malformed(
+                    &format!(
+                        "{what}, and found {} instead; ECMA-262 12.10 supplies one only across a line break",
+                        other.name()
+                    ),
+                    token.offset,
+                )),
+            }
         }
 
         /// A `;` that was written rather than inserted.

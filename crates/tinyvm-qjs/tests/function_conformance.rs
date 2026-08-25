@@ -1180,10 +1180,15 @@ fn without_a_line_terminator_the_same_source_is_refused() {
     let error = refuses_somehow(
         "const o = {}; o.m = function (x) { return x; } function rec() { return o; } return 0;",
     );
-    assert!(
-        error.message.contains("`function` keyword"),
-        "if this diagnostic has been fixed to name the missing `;`, update this test \
-         and the note at the bottom of the file: {:?}",
+    // This used to read "this engine does not support the `function` keyword
+    // yet" -- a keyword the engine has had since M1 -- and this test asserted
+    // that wording so the fix would be a deliberate edit. It was fixed in
+    // `Parser::semicolon`; the assertion is now the true sentence.
+    assert_eq!(
+        error.message,
+        "this engine needs a `;` to end the statement, and found the `function` keyword \
+         instead; ECMA-262 12.10 supplies one only across a line break",
+        "{:?}",
         error.message
     );
 }
@@ -1328,9 +1333,14 @@ fn the_operators_that_do_not_convert_a_function_still_do_not() {
 // sends the reader to look for a workaround for function declarations instead
 // of at the missing semicolon.
 //
-// `without_a_line_terminator_the_same_source_is_refused` asserts the current
-// wording so that fixing it is a red build and a deliberate edit, rather than
-// a silent change to a sentence nobody had written down.
+// `without_a_line_terminator_the_same_source_is_refused` asserted that wording
+// so that fixing it would be a red build and a deliberate edit rather than a
+// silent change to a sentence nobody had written down. It was a red build, and
+// the edit is made: the position now says what it was looking for. The rest of
+// the debt -- operand and header positions, where the same table is reached by
+// callers that also can lower the token -- is still recorded, in
+// `conformance_m2.rs`'s `a_misplaced_token_currently_claims_a_capability_the_
+// engine_has`.
 
 // =========================================================================
 // Second pass: the questions the first pass suggested

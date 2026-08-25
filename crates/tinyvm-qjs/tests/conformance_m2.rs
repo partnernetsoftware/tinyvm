@@ -1668,16 +1668,24 @@ fn two_diagnostics_currently_name_the_engine_twice() {
 }
 
 /// DIVERGENCE (diagnostic honesty, not semantics): `TokenKind::capability` in
-/// `src/lex.rs` still carries phrases for lexemes M1 *does* lower, so a token
-/// in the wrong place claims the engine lacks a capability it demonstrably
-/// has -- a misplaced `else` reports "does not support the `else` keyword
-/// yet", next to a suite full of working `else` arms. Every source below
-/// compiles and runs in its correct spelling.
+/// `src/lex.rs` carries phrases for lexemes M1 *does* lower, so a token in the
+/// wrong place can claim the engine lacks a capability it demonstrably has --
+/// a misplaced `else` reports "does not support the `else` keyword yet", next
+/// to a suite full of working `else` arms. Every source below compiles and
+/// runs in its correct spelling.
 ///
-/// Retire by dropping the graduated kinds from that table, at which point
-/// these become ordinary structural diagnostics ("needs an operand here, and
-/// found the `else` keyword instead"). Asserted as-is so the debt is visible
-/// rather than merely absent.
+/// **One position has been fixed and is no longer in this list**: the end of
+/// a statement, where the phrase was wrong for nearly every token and where
+/// `o.m = function () {} function rec() {}` claimed the engine had no
+/// `function` keyword. See `the_end_of_a_statement_names_the_missing_semicolon`
+/// below and `Parser::semicolon`. The rows left are operand and header
+/// positions, where the fix is a different one: the table is not wrong, the
+/// caller is, and each caller has to say what it was looking for.
+///
+/// Retire the rest the same way, at which point these become ordinary
+/// structural diagnostics ("needs an operand here, and found the `else`
+/// keyword instead"). Asserted as-is so the debt is visible rather than
+/// merely absent.
 #[test]
 fn a_misplaced_token_currently_claims_a_capability_the_engine_has() {
     for (source, claimed, works) in [
@@ -1687,7 +1695,6 @@ fn a_misplaced_token_currently_claims_a_capability_the_engine_has() {
             "if (false) { } else { return 1; } return 0;",
         ),
         ("return 1; }", "block statements", "{ return 1; }"),
-        ("let x = 1; x \"a\";", "string literals", "return \"a\";"),
         (
             "if true) { }",
             "boolean literals",
@@ -1724,4 +1731,62 @@ fn a_misplaced_token_currently_claims_a_capability_the_engine_has() {
             "{works:?} must compile, or the claim above is not a divergence"
         );
     }
+}
+
+/// The position above that has been fixed: the end of a statement.
+///
+/// The statement dispatch's last arm takes *any* token as the start of an
+/// expression statement, so a token standing at the end of one is the next
+/// statement's first token and not a token the engine could not lower.
+/// `Parser::semicolon` therefore says what it was looking for.
+///
+/// Two kinds keep their capability phrase, because for them it is true: a `,`
+/// or a `:` is a JavaScript operator that would have continued the expression
+/// and that this engine does not lower, and the lexer's `Unsupported` bucket
+/// is beyond the engine whatever the lexeme is.
+#[test]
+fn the_end_of_a_statement_names_the_missing_semicolon() {
+    for (source, found) in [
+        (
+            "const o = {}; o.m = function (x) { return x; } function rec() { return 1; } return 0;",
+            "the `function` keyword",
+        ),
+        ("let x = 1; x \"a\";", "a string literal"),
+        ("let a = 1 if (1) { } return 1;", "the `if` keyword"),
+        ("let a = 1 return 1;", "the `return` keyword"),
+        ("let a = 1 let b = 2; return 1;", "the `let` keyword"),
+        ("let a = 1 { } return 1;", "a `{`"),
+    ] {
+        assert_eq!(
+            refuse(source).message,
+            format!(
+                "this engine needs a `;` to end the statement, and found {found} instead; \
+                 ECMA-262 12.10 supplies one only across a line break"
+            ),
+            "{source:?}"
+        );
+    }
+    // Written with the line break ECMA-262 12.10 rule 1 asks for, each one
+    // compiles -- which is what makes the diagnostic above a `;` and not a
+    // capability.
+    for source in [
+        "const o = {}; o.m = function (x) { return x; }\nfunction rec() { return 1; }\nreturn 0;",
+        "let a = 1\nif (a) { return 2; }\nreturn 1;",
+        "let a = 1\nreturn a;",
+    ] {
+        assert!(compile_qjs_m1(source).is_ok(), "{source:?}");
+    }
+    // And the two kinds that keep their phrase, because it is the truth.
+    assert_eq!(
+        refuse("let a = 1 ? 2 : 3; return a;").message,
+        "this engine does not support conditional expressions yet"
+    );
+    assert_eq!(
+        refuse("let a = 1 ** 2; return a;").message,
+        "this engine does not support exponentiation yet"
+    );
+    assert_eq!(
+        refuse("let a = 1 class X { } return 1;").message,
+        "this engine does not support the `class` keyword yet"
+    );
 }
