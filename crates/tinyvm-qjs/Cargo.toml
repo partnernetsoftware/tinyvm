@@ -15,3 +15,14 @@ tinyvm = { path = "../tinyvm" }
 # encoder against a reference assembler, so "canonical wasm" is measured rather
 # than asserted. Never a runtime dependency -- owning the encoding is the point.
 wat = "1"
+# Test-only differential oracle for `JSON.parse`/`JSON.stringify`: which texts
+# are valid JSON, and how a string is escaped, are questions a second
+# implementation can answer, so they are measured rather than asserted. Never a
+# runtime dependency -- see `tests/json.rs` for the three places this oracle is
+# the wrong one and the spec is consulted instead.
+# `float_roundtrip` is not optional here: without it serde_json's own parser is
+# not correctly rounded, so it reads back a double it printed itself as a
+# different double -- measured on `1.001592857142857e-295`, where this crate
+# agreed with serde's *text* and disagreed with serde's *value*. An oracle that
+# does not round-trip cannot judge one that does.
+serde_json = { version = "1", features = ["float_roundtrip"] }
