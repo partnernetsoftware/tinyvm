@@ -638,7 +638,7 @@ fn parse_prd_x_leaves(prd: &str) -> Vec<String> {
 /// test must exist in this package's integration tests and assert something
 /// concrete — the point of naming it here is that a leaf can no longer be
 /// satisfied by a text row.
-const LEAF_TESTS: [(&str, &str); 175] = [
+const LEAF_TESTS: [(&str, &str); 178] = [
     ("eval(bytes)", "eval_bytes"),
     (
         "in-guest throughput gate",
@@ -687,6 +687,14 @@ const LEAF_TESTS: [(&str, &str); 175] = [
     (
         "host calls with declared raw signatures",
         "qjs_m1_reaches_a_declared_host_door_with_arguments",
+    ),
+    (
+        "object literals, property access, assignment",
+        "qjs_m1_builds_objects_and_reads_their_properties",
+    ),
+    (
+        "a host length answer must be a length",
+        "qjs_m1_refuses_a_host_length_that_is_not_a_length",
     ),
     (
         "nesting bounded by a diagnostic, not an abort",
@@ -926,6 +934,10 @@ const LEAF_TESTS: [(&str, &str); 175] = [
     (
         "string-free fault classification",
         "every_host_configured_ceiling_names_its_own_limits_field",
+    ),
+    (
+        "every allocator refusal reads Allocation",
+        "every_allocation_call_site_produces_a_fault_the_classifier_calls_allocation",
     ),
     ("start once", "instance_runs_start_exactly_once"),
     (

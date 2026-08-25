@@ -60,7 +60,9 @@ tinyvm (35)                                      [~]
 │   │   ├── commissar demo (example commissar)            [x]
 │   │   ├── V1 values across the call boundary            [x]
 │   │   ├── declarations, functions, control flow         [x]
+│   │   ├── object literals, property access, assignment [x]
 │   │   ├── host calls with declared raw signatures       [x]
+│   │   │   └── a host length answer must be a length    [x]
 │   │   ├── nesting bounded by a diagnostic, not an abort [x]
 │   │   ├── every rejection names the engine boundary     [x]
 │   │   ├── an exhausted heap is legible, not a bare trap [x]
@@ -148,6 +150,7 @@ tinyvm (35)                                      [~]
 │   │   ├── bounds-checked guest memory windows            [x]
 │   │   ├── two-pass variable-length host result           [x]
 │   │   └── string-free fault classification               [x]
+│   │       └── every allocator refusal reads Allocation  [x]
 │   ├── standard resource imports                        [~]
 │   │   ├── standard imported globals                     [x]
 │   │   ├── standard imported linear memories             [x]
@@ -329,12 +332,36 @@ as “almost approved” or “safe to ship externally.”
   wasm parameters per JavaScript argument and returns two results; `Value` is the
   host's door across that boundary. `compile_qjs` stays beside it only until its
   `i32`-in/`i32`-out callers move.
+- Objects are a sixth tag on that same pair, not a second ABI. A record is a
+  flat `[len][cap][entries]` header over `[key][tag][payload]` entries — a
+  vector, not a shape table, because the population this milestone exists for
+  (`fleet.js`) is twelve namespace tables of twelve *different* shapes with one
+  instance each, plus parameter objects built per call and read once, and a
+  hidden class only pays when many objects share a shape. The reasoning and the
+  three conditions that would overturn it are recorded at `OBJ_HEADER` in
+  `runtime.rs`, so the next milestone inherits the argument rather than the
+  conclusion. Keys are Strings (`o[1]` and `o["1"]` are one slot), a missing
+  property reads `undefined` rather than trapping, property order is insertion
+  order, and `===` on two Objects is reference identity — which needed no new
+  type test, because the V1 pair's payload comparison already *is* one.
+- The growth law the value-representation experiment measured — each additional
+  type costs one type test per dispatch site — is now being paid, so dispatch
+  order is a decision and not an accident. Every Object arm is appended last in
+  `__typeof`, `__truthy` and `__to_number`, so no type that existed before
+  objects pays for them; the two sites that depart from Number-first
+  (`__obj_get`/`__obj_set` test Object first, `__to_key` tests String first) say
+  so where they depart.
 - A compiled `.qjs` reaches a host capability *with arguments* through
   `Names::Declared`: the embedder declares raw wasm functions — module, field,
   signature — and how each JavaScript argument maps onto their parameters, and
   the compiler unwraps. A String argument becomes `(ptr, len)` into linear
   memory; a variable-length byte result becomes a String again through a
-  two-pass read onto the guest's own bump heap. **The door stays raw.** It never
+  two-pass read onto the guest's own bump heap — whose announced length is
+  checked to *be* a length before it becomes a size, because comparing the
+  copied count against the announced one only compares two host answers to each
+  other, and `-1` twice (a raw contract's "your buffer is too small") passed
+  that check while producing a String with a fabricated 4 GiB tail and walking
+  the bump pointer backwards over the fault word. **The door stays raw.** It never
   learns what a JavaScript value is, so the same host stands behind a
   hand-written `.wasm` guest and a compiled `.qjs` one, through one import
   table. Making the door speak `(tag, payload)` would break every hand-written
@@ -421,6 +448,14 @@ as “almost approved” or “safe to ship externally.”
   ——`max_steps` / `max_call_depth` / `max_activation_slots` / `max_memory_pages` /
   `max_table_elems`，宿主知道该抬哪个数。`WasmError` 的类型形状不变，没有新变体。
   分类只靠一条命名规则：分配失败的文案一律以 `allocation` 结尾，这条规则由测试扫源码守着。
+- 但这条规则得从**分配点**扫，不能从文案扫。原来的守卫只检查"含 `alloc` 的文案必须以
+  `allocation` 结尾"——它只复查已经守规矩的那些站点，忘了说 `allocation` 的那些正因为
+  忘了说而扫不到。改成从每个 `try_reserve*` 出发跟到它的失败臂之后，一次抓出 24 个站点、
+  28 条文案：21 条被 `class()` 判成 `Guest`（宿主内存不够被说成脚本坏了），3 条被判成
+  `ResourceCeiling`（`operand stack`——宿主被告知撞上了一条它没设、也抬不了的固定上限）。
+  文案全部改成以 `allocation` 结尾；`instance address space` / `function locals` /
+  `operand stack` 三条是一词两用，按本仓已有的先例拆开，非分配的那一侧保留原名。
+  `WasmError` 的形状不变，没有新变体。
 
 ### 4. VM capability and TinyArcade profile are separate
 
