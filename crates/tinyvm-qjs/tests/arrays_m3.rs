@@ -647,9 +647,13 @@ fn an_array_cannot_leave_through_the_host_face() {
     // an array's contents returns a property of it.
     let vals = attempt("return [1];").expect("runs").1;
     let err = Value::returned(&vals).expect_err("an Array has no host-side variant");
-    assert!(
-        err.contains("Array") || err.contains("unknown tag"),
-        "the refusal should name what it cannot carry, got {err:?}"
+    // Named, not "unknown tag 7". The tag landed with this milestone and the
+    // arm did not, so for one commit a host that returned an array was told
+    // something that reads as a defect in the engine. Found by the downstream
+    // crate's own README-claim lock, which is what that lock is for.
+    assert_eq!(
+        err,
+        "V1: an Array is a guest heap reference; `Value` has no variant for one yet"
     );
 }
 

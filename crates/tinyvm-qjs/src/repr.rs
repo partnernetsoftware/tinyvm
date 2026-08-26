@@ -598,6 +598,18 @@ pub(crate) fn host_decode(vals: &[Val]) -> Result<HostVal, String> {
                     .to_string(),
             );
         }
+        // Named for the reason the Object arm gives, and added late: the tag
+        // landed with the Array milestone and this arm did not, so a host
+        // that returned one was told "unknown tag 7" -- which reads as a
+        // defect in the engine and tells the reader nothing about what to do
+        // instead. An Array is the Object case exactly: a real value, a
+        // guest heap reference, and no layout the host has.
+        TAG_ARRAY => {
+            return Err(
+                "V1: an Array is a guest heap reference; `Value` has no variant for one yet"
+                    .to_string(),
+            );
+        }
         other => return Err(format!("V1: unknown tag {other}")),
     })
 }
