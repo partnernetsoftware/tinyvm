@@ -901,15 +901,17 @@ fn the_whole_fleet_library_compiles_and_its_methods_are_reachable() {
     // same library with its `?:` written as an `if`, its `try` deleted and
     // `JSON` an opaque host import.
     //
-    // The Array milestone moved it 20 935 -> 22 076, **+1 141**, and the two
-    // halves of that are worth separating because only one of them is the
-    // type:
+    // The Array milestone moved it 20 935 -> 22 457, **+1 522**, in two stages
+    // and three parts. Separated because only one part is the type itself:
     //
-    // * **+753 is the array set itself**, measured on the same source before
-    //   and after: `return JSON.stringify({a:1});` went 14 284 -> 15 037. This
+    // * **+753 is the array set**, measured on the same source before and
+    //   after: `return JSON.stringify({a:1});` went 14 284 -> 15 037. This
     //   library pays it because it names `JSON`, and `JSON.parse` can return
     //   an array out of text no `[` appears in.
-    // * **+388 is spread across its ~130 member accesses**, about three bytes
+    // * **+377 is `__json_parr` and `__json_ser_arr`**, the same source going
+    //   15 037 -> 15 414. That is the stage that makes `tabs.list` usable, so
+    //   it is the one the whole milestone was for.
+    // * **+392 is spread across its ~130 member accesses**, about three bytes
     //   each. A program that can hold an array routes every property access
     //   through `__prop_get`/`__prop_set`, and a Static key reaches them as a
     //   boxed String pair rather than a bare pointer. That is the cost of the
@@ -924,7 +926,7 @@ fn the_whole_fleet_library_compiles_and_its_methods_are_reachable() {
     // `__typeof`'s and `__truthy`'s Array arms under the same gate -- without
     // which they cost every module 11 bytes, which is what the first
     // measurement of this milestone actually showed.
-    assert_eq!(wasm.len(), 22_076, "the whole library's emitted size moved");
+    assert_eq!(wasm.len(), 22_457, "the whole library's emitted size moved");
 }
 
 /// The same shape, reduced to what can run with no host at all: a namespace

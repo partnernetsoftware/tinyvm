@@ -662,6 +662,7 @@ pub(crate) mod m1 {
                     tag: u.tag,
                     payload: u.payload,
                 }),
+                arrays: arr_base,
                 names: convert::JsonNames::intern(&mut pool),
             };
             convert::build_json(&jcx)

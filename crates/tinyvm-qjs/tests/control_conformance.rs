@@ -966,11 +966,14 @@ const JSON_CORPUS: &[(&str, Want)] = &[
         Want::Str("\"a\u{2028}b\""),
     ),
     // -- the parse grammar, and everything it excludes (25.5.1) --
-    // The one row where this engine and ECMA-262 part company, and it parts
-    // at the value representation rather than at JSON: 25.5.1 answers with an
-    // Array and this engine has no Array type to answer with. It throws, by
-    // name, rather than approximating one -- see the test below this one.
-    ("return JSON.parse(\"[1]\");", Want::Throws),
+    // This used to be the one row where this engine and ECMA-262 parted
+    // company, and it parted at the value representation rather than at JSON:
+    // 25.5.1 answers with an Array and there was none to answer with, so it
+    // threw by name rather than approximating one. The Array milestone landed
+    // the type; the row now asserts the spec's own answer, like every other.
+    ("return JSON.parse(\"[1]\").length;", Want::Num(1.0)),
+    ("return JSON.parse(\"[1,2,3]\")[1];", Want::Num(2.0)),
+    ("return JSON.parse(\"[]\").length;", Want::Num(0.0)),
     (
         "try { JSON.parse(\"nope\"); } catch (e) { return 1; }",
         Want::Num(1.0),
@@ -1024,6 +1027,10 @@ const JSON_CORPUS: &[(&str, Want)] = &[
 /// cannot represent reaching a `throw`, which is the only row that is not the
 /// specification's own answer.
 #[derive(Debug, Clone, Copy)]
+/// `Throws` is kept with no row using it. It is the slot the next divergence
+/// from 25.5 goes in, and the corpus test asserts the count is zero -- so the
+/// variant existing is what makes that assertion able to fail.
+#[allow(dead_code)]
 enum Want {
     Num(f64),
     Bool(bool),
@@ -1066,52 +1073,73 @@ fn every_row_of_the_json_corpus_answers_what_ecma262_requires() {
     }
     assert_eq!(
         JSON_CORPUS.len(),
-        39,
+        41,
         "the corpus is a fixed list, so a row cannot be dropped to make this pass"
     );
-    // Thirty-eight of the thirty-nine are ECMA-262's own answer. The one that
-    // is not is named, so the exemption cannot grow quietly.
+    // **All forty-one are now ECMA-262's own answer.** There used to be one
+    // exemption -- `JSON.parse("[1]")`, which threw because there was no Array
+    // to answer with -- and this assertion existed so the exemption could not
+    // grow quietly. It shrank instead, which is the outcome it was hoping for,
+    // so it now says zero and will catch the next one being added.
     assert_eq!(
         JSON_CORPUS
             .iter()
             .filter(|(_, w)| matches!(w, Want::Throws))
             .count(),
-        1
+        0,
+        "a divergence from 25.5 was added; name it here and say why"
     );
 }
 
-/// The Array row, on its own, because it is a **product** consequence and not
-/// a JSON one.
+/// The Array rows, on their own, because they are a **product** consequence
+/// and not a JSON one.
 ///
-/// `[1,2]` is perfectly good JSON and this engine has no Array type, so the
-/// parser refuses it by name rather than approximating it. `fleet.js` exists
-/// to parse whatever the Fleet broker answered, and a broker answer that is or
-/// contains a JSON array -- `tabs.list` is the obvious one -- takes the
-/// `catch` and comes back as the raw text. A caller that expects a value gets
-/// a string. That is a downstream behaviour change and the reason this row is
-/// written out rather than folded into the corpus.
+/// This test used to be `a_json_array_is_refused_by_name_and_the_refusal_is_catchable`
+/// and it asserted the opposite: that `JSON.parse("[1,2]")` threw "this engine
+/// does not support JSON arrays yet", and that the `try`/`catch` `fleet.js`
+/// wraps every broker answer in therefore handed a caller the **raw text**
+/// where a value was expected. `tabs.list` was the named example.
+///
+/// That was the single largest thing standing between this engine and the
+/// acceptance target's real traffic, and it is what the Array milestone was
+/// for. The assertions below are the same shapes, answering correctly.
 #[test]
-fn a_json_array_is_refused_by_name_and_the_refusal_is_catchable() {
-    assert_eq!(
-        text("try { JSON.parse(\"[1,2]\"); } catch (e) { return e; }"),
-        "this engine does not support JSON arrays yet",
-        "the sentence names the engine's boundary, not the text"
-    );
+fn a_json_array_parses_and_the_fleet_shape_gets_a_value() {
     // Anywhere in the text, not only at the top.
-    for source in [
-        "try { JSON.parse(\"[]\"); } catch (e) { return 1; }",
-        "try { JSON.parse(\"{\\\"tabs\\\":[]}\"); } catch (e) { return 1; }",
-        "try { JSON.parse(\"{\\\"a\\\":{\\\"b\\\":[1]}}\"); } catch (e) { return 1; }",
-    ] {
-        assert_eq!(num(source), 1.0, "{source:?}");
-    }
-    // And the shape `fleet.js` writes: the raw text comes back.
+    assert_eq!(num("return JSON.parse(\"[1,2]\")[1];"), 2.0);
+    assert_eq!(num("return JSON.parse(\"[]\").length;"), 0.0);
+    assert_eq!(
+        num("return JSON.parse(\"{\\\"tabs\\\":[]}\").tabs.length;"),
+        0.0
+    );
+    assert_eq!(
+        num("return JSON.parse(\"{\\\"a\\\":{\\\"b\\\":[1]}}\").a.b[0];"),
+        1.0
+    );
+
+    // The shape `fleet.js` writes, on the answer `tabs.list` actually gives:
+    // the `catch` is not taken, and the caller indexes a value.
     assert_eq!(
         text(
             "function call(s) { try { return JSON.parse(s); } catch (_err) { return s; } } \
-             return call(\"[1,2]\");"
+             return call(\"[{\\\"id\\\":\\\"tab1\\\"}]\")[0].id;"
         ),
-        "[1,2]"
+        "tab1"
+    );
+
+    // And the `catch` still catches what it is for: text that is not JSON.
+    assert_eq!(
+        text(
+            "function call(s) { try { return JSON.parse(s); } catch (_err) { return s; } } \
+             return call(\"[1,\");"
+        ),
+        "[1,"
+    );
+
+    // Round-trip, which is the other half of being usable.
+    assert_eq!(
+        text("return JSON.stringify(JSON.parse(\"[1,[2,{\\\"c\\\":3}]]\"));"),
+        "[1,[2,{\"c\":3}]]"
     );
 }
 

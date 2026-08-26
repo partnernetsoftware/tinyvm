@@ -47,6 +47,8 @@
 // the runtime's operators and the conversions' bignum have their own files --
 // so the dead-code allowance is about this reader and not about the module.
 #[allow(dead_code)]
+#[path = "../src/array.rs"]
+mod array;
 #[path = "../src/convert.rs"]
 mod convert;
 #[allow(dead_code)]
@@ -89,6 +91,7 @@ struct Engine {
 
 /// The three function sets, placed the way `emit::m1::lower` places them.
 struct Bases {
+    array_names: array::Names,
     pool: StringPool,
     rt: RtCtx,
     cv: convert::Ctx,
@@ -111,6 +114,7 @@ impl Bases {
         let prim_names = PrimNames::intern(&mut pool);
         let cv_names = convert::Names::intern(&mut pool);
         let js_names = convert::JsonNames::intern(&mut pool);
+        let array_names = array::Names::intern(&mut pool);
         let convert_base = runtime::SET.len() as u32;
         let json_base = convert_base + convert::SET.len() as u32;
         let rt = RtCtx {
@@ -137,9 +141,13 @@ impl Bases {
             runtime_base: 0,
             convert_base,
             unwind,
+            // The array set follows the JSON set in the module, which is where
+            // `emit` puts it and what `JsonCtx::beside` computes.
+            arrays: json_base + convert::JSON_SET.len() as u32,
             names: js_names,
         };
         Bases {
+            array_names,
             pool,
             rt,
             cv,
@@ -152,6 +160,17 @@ impl Bases {
         let mut all = runtime::build(&self.rt);
         all.extend(convert::build(&self.cv));
         all.extend(convert::build_json(&self.js));
+        // The array set follows the JSON set and is not optional here:
+        // `JSON.parse` calls `__arr_new` and `__arr_push`, and `__json_ser`
+        // dispatches to `__json_ser_arr`. A fixture that left it out would
+        // build a module whose JSON functions call whatever happens to sit at
+        // those indices -- which is exactly what the load gate answered with
+        // "validation: type mismatch" when this was first assembled.
+        all.extend(array::build(&array::Ctx {
+            func_base: self.js.arrays,
+            runtime_base: self.rt.func_base,
+            names: self.array_names,
+        }));
         all
     }
 }
@@ -844,10 +863,14 @@ fn every_refusal_names_its_message_in_exactly_one_place() {
     let b = Bases::new(Some(UNWIND));
     let funcs = convert::build_json(&b.js);
     let names = b.js.names;
+    // `names.array` left this table when the Array milestone landed the type:
+    // `[1,2]` is parsed now, so there is no refusal to place. The cycle
+    // message gained a second home for the same reason -- an array that
+    // contains itself is the same TypeError an object that does gets.
     let expected: [(i32, &str, usize); 7] = [
-        (names.array, "__json_pval", 1),
         (names.surrogate, "__json_pstr", 4),
         (names.cycle, "__json_ser_obj", 1),
+        (names.cycle, "__json_ser_arr", 1),
         (names.replacer, "__json_stringify", 2),
         (names.reviver, "__json_parse", 1),
         (names.eof, "__json_pstr", 1),
@@ -865,13 +888,22 @@ fn every_refusal_names_its_message_in_exactly_one_place() {
             .count();
         assert_eq!(seen, count, "{symbol} names the message at {address}");
     }
-    // And the `[` refusal is the engine's boundary in words, not a claim that
-    // the text is malformed.
-    assert!(
-        !funcs
+    // And the array parser refuses malformed *text* with the syntax message,
+    // never with a sentence about this engine's boundary: `[1,` is a broken
+    // document and `[1,2]` is a document this engine now reads. Getting this
+    // backwards is what the deleted `names.array` row used to guard against
+    // in the other direction.
+    let parr = funcs
+        .iter()
+        .find(|f| f.name == "__json_parr")
+        .expect("the array parser is in the set");
+    assert_eq!(
+        parr.body
             .iter()
-            .any(|f| f.body.contains(&Ins::I32Const(names.array)) && f.name != "__json_pval"),
-        "only the value dispatcher refuses an array"
+            .filter(|ins| **ins == Ins::I32Const(names.syntax))
+            .count(),
+        1,
+        "the array parser's one refusal is a syntax error"
     );
 }
 
@@ -1012,7 +1044,10 @@ fn with_an_unwind_channel_a_bad_parse_is_caught_and_fleet_js_falls_back() {
         (r#"{"ok":true}"#, true),
         ("plain broker text, not JSON", false),
         ("broker_invalid_arguments: tabs.set-note", false),
-        ("[1,2,3]", false),
+        // `[1,2,3]` used to be in the `false` column, and it was the row that
+        // mattered: a broker answer that is an array took this `catch` and
+        // came back as text. The Array milestone moved it to `true`.
+        ("[1,2,3]", true),
         ("", false),
         ("42", true),
     ] {
@@ -1046,14 +1081,22 @@ fn with_an_unwind_channel_a_bad_parse_is_caught_and_fleet_js_falls_back() {
 
 #[test]
 fn a_throw_in_flight_leaves_every_function_in_the_set() {
-    // The seven propagation checks, exercised where each of them is: a throw
-    // raised deep inside a nested document has to come back out through
-    // `__json_pval`, `__json_pobj` and `__json_parse` without any of them
-    // carrying on. If one check were missing the answer would be a half-built
-    // object rather than the fallback.
+    // The propagation checks, exercised where each of them is: a throw raised
+    // deep inside a nested document has to come back out through
+    // `__json_pval`, `__json_pobj`, `__json_parr` and `__json_parse` without
+    // any of them carrying on. If one check were missing the answer would be a
+    // half-built object rather than the fallback.
+    //
+    // The first row used to be `{"a":{"b":{"c":[1]}}}`, which raised because
+    // the innermost value was an array. It parses now, so the row that
+    // exercises the same depth raises for a reason that is still a reason --
+    // and two rows were added to carry the throw out through the *array*
+    // parser, which the object parser's checks say nothing about.
     let mut e = Engine::catching();
     for text in [
-        r#"{"a":{"b":{"c":[1]}}}"#,
+        r#"{"a":{"b":{"c":[nope]}}}"#,
+        r#"{"a":[1,[2,{"b":nope}]]}"#,
+        r#"[1,2,"#,
         r#"{"a":1,"b":{"c":nope}}"#,
         r#"{"a":"\ud800"}"#,
         r#"{"a":"\uZZ00"}"#,
@@ -1118,7 +1161,10 @@ fn without_an_unwind_channel_the_same_refusals_are_recorded_traps() {
     // The other body of `__throw`. Same refusals, same one function deciding,
     // and a host that reads the fault word can still tell what happened.
     let mut e = Engine::new();
-    for text in ["[1]", "nope", r#"{"a":"\ud800"}"#] {
+    // `[1]` used to lead this list, as the engine-boundary refusal. It parses
+    // now, so the list is what it always should have been: text that is not
+    // JSON, and text this engine's String cannot hold.
+    for text in ["nope", "[1,", r#"{"a":"\ud800"}"#] {
         assert!(e.parse_value(text).is_err(), "{text:?}");
         assert_eq!(e.fault(), runtime::FAULT_UNCAUGHT_THROW, "{text:?}");
     }

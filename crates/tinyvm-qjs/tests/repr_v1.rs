@@ -31,6 +31,9 @@
 //! - `Ctx::func_base` is new: the experiment's modules had no imports, this
 //!   compiler's have `js.<name>`.
 
+#[allow(dead_code)]
+#[path = "../src/array.rs"]
+mod array;
 #[path = "../src/convert.rs"]
 mod convert;
 #[path = "../src/repr.rs"]

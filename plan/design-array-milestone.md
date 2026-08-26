@@ -3,10 +3,15 @@
 Owner: [tinyvm PRD](../prd/PRD.md) · Downstream consumer:
 `agenterm/crates/agenterm-qjswasm`
 
-Status: **stage 1 landed** — the type, the literal, indexing, `length`, and the
-property dispatch. Stage 2 is `JSON.parse`/`JSON.stringify` of an array, which
-is what the acceptance target in *Why now* actually needs; until it lands,
-`fleet.tabs.list()` still comes back as text.
+Status: **landed, both stages.** Stage 1 was the type, the literal, indexing,
+`length`, and the property dispatch. Stage 2 is `JSON.parse` and
+`JSON.stringify` of an array, which is what the acceptance target in *Why now*
+actually needed. `fleet.tabs.list()` now returns a list a script can index —
+asserted upstream in `tests/fleet_acceptance.rs::an_array_answer_is_a_list_the_caller_can_index`.
+
+What remains is downstream: bumping `agenterm-qjswasm`'s pin so
+`script_engine_equivalence.rs`'s fifth case — the one written to fail on
+success — actually fails and can be moved in with the other four.
 
 Implementing it corrected this file twice, and both corrections are recorded in
 place rather than rewritten away. §2.2's admission rule was **wrong** and is
@@ -236,8 +241,11 @@ numbers are locked rather than quoted.
 | `return 1;` | 9 784 | 9 784 | **0** |
 | `let o = {a:1}; o.b = 2; return o.a;` | 9 905 | 9 905 | **0** |
 | `let o = {a:1}; let k = "a"; return o[k];` | 9 865 | 9 865 | **0** |
-| `return JSON.stringify({a:1});` | 14 284 | 15 037 | **+753** |
-| `scripts/qjs/lib/fleet.js` | 20 935 | 22 076 | **+1 141** |
+| `return JSON.stringify({a:1});` | 14 284 | 15 414 | **+1 130** |
+| `scripts/qjs/lib/fleet.js` | 20 935 | 22 457 | **+1 522** |
+
+The two JSON rows split by stage: the type is **+753** (14 284 → 15 037) and
+`__json_parr` + `__json_ser_arr` are **+377** more (15 037 → 15 414).
 
 **§1.1 held only after being broken.** The first implementation cost every
 program **11 bytes**, including `return 1;`. The leak was `__typeof`'s and
@@ -247,11 +255,12 @@ the same gate the set uses, and the three array-free rows above are identical
 to the byte. Eleven bytes is small and the promise is not — a gate that leaks
 is a gate nobody can quote.
 
-**The array set costs 753 bytes**, measured on one source before and after, and
-against the JSON set's 4 421 as the comparable.
+**The array set costs 753 bytes** and the JSON half 377 more, measured on one
+source before and after, against the JSON set's own 4 421 as the comparable.
 
-**`fleet.js`'s +1 141 is 753 + 388.** The remaining 388 is spread across its
-~130 member accesses, about three bytes each: the price of the §2.2 correction.
+**`fleet.js`'s +1 522 is 753 + 377 + 392.** The remaining 392 is spread across
+its ~130 member accesses, about three bytes each: the price of the §2.2
+correction.
 
 **Still owed, and still not estimated:** the *steps* an indexed loop costs
 against the same loop over an object with string keys — the number that either
@@ -263,13 +272,24 @@ wrong answer would change the representation rather than the surface.
 
 Not "arrays exist". Three things, in order, each falsifiable:
 
-1. `JSON.parse("[1,2,3]")` returns an Array, and `JSON.stringify` of one
+1. ✅ `JSON.parse("[1,2,3]")` returns an Array, and `JSON.stringify` of one
    round-trips — including an array nested in an object, which is what a
    broker answer actually looks like.
-2. `fleet.tabs.list()` through the real `agenterm/scripts/qjs/lib/fleet.qjs`
-   returns something a script can index and take `.length` of.
-3. `agenterm/tests/script_engine_equivalence.rs`'s fifth case fails, and is
+   (`arrays_m3::a_parsed_array_round_trips`, and the corpus rows in
+   `control_conformance`, where `JSON.parse("[1]")` moved from the one
+   `Want::Throws` row to an ordinary answer and the exemption count is now
+   asserted to be **zero**.)
+2. ✅ `fleet.tabs.list()` returns something a script can index and take
+   `.length` of — asserted upstream against the shape `fleet.js` writes, in
+   `fleet_acceptance::an_array_answer_is_a_list_the_caller_can_index` and
+   `control_conformance::a_json_array_parses_and_the_fleet_shape_gets_a_value`.
+   Not yet asserted through the *product's* own binding, which needs the pin
+   bump.
+3. ⬜ `agenterm/tests/script_engine_equivalence.rs`'s fifth case fails, and is
    moved in with the other four — the two engines then agree on all five.
+   **This is the one still open, and it is the one that matters**, because it
+   is the only assertion of the three that the downstream product makes rather
+   than this repo.
 
 Item 3 is the one that matters: it is the only case in that file written to
 fail on success, and it is what turns "arrays landed" from a claim into a

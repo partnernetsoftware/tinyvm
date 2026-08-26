@@ -3099,6 +3099,12 @@ fn str_cmp(ctx: &Ctx) -> FnBuild {
 #[allow(dead_code)]
 pub(crate) mod json {
     use super::*;
+    // Relative rather than `crate::`, for the reason this file's own
+    // `use super::runtime::{...}` is: `tests/json.rs` and friends pull these
+    // modules in with `#[path]`, so inside a test binary `convert` is a
+    // top-level module and `crate::array` is not a path that exists.
+    use super::super::array::{ARR_ELEMS, ARR_LEN, Ar, ELEM_BYTES, ELEM_PAYLOAD, ELEM_TAG};
+    use super::super::repr::{box_array, is_array, unbox_array};
 
     /// The string buffer these algorithms build their answers in:
     /// `[len: i32][cap: i32][data: i32]`, over a raw byte array.
@@ -3158,6 +3164,7 @@ pub(crate) mod json {
         Quote,
         Ser,
         SerObj,
+        SerArr,
         Stringify,
         // 25.5.1, the JSON grammar
         PAt,
@@ -3168,6 +3175,7 @@ pub(crate) mod json {
         PStr,
         PNum,
         PObj,
+        PArr,
         PVal,
         Parse,
         /// The namespace object itself.
@@ -3186,6 +3194,7 @@ pub(crate) mod json {
         Js::Quote,
         Js::Ser,
         Js::SerObj,
+        Js::SerArr,
         Js::Stringify,
         Js::PAt,
         Js::PWs,
@@ -3195,6 +3204,7 @@ pub(crate) mod json {
         Js::PStr,
         Js::PNum,
         Js::PObj,
+        Js::PArr,
         Js::PVal,
         Js::Parse,
         Js::Ns,
@@ -3215,6 +3225,7 @@ pub(crate) mod json {
                 Js::Quote => "__json_quote",
                 Js::Ser => "__json_ser",
                 Js::SerObj => "__json_ser_obj",
+                Js::SerArr => "__json_ser_arr",
                 Js::Stringify => "__json_stringify",
                 Js::PAt => "__jp_at",
                 Js::PWs => "__jp_ws",
@@ -3224,6 +3235,7 @@ pub(crate) mod json {
                 Js::PStr => "__json_pstr",
                 Js::PNum => "__json_pnum",
                 Js::PObj => "__json_pobj",
+                Js::PArr => "__json_parr",
                 Js::PVal => "__json_pval",
                 Js::Parse => "__json_parse",
                 Js::Ns => "__json_ns",
@@ -3264,7 +3276,6 @@ pub(crate) mod json {
         pub(crate) no: i32,
         pub(crate) syntax: i32,
         pub(crate) eof: i32,
-        pub(crate) array: i32,
         pub(crate) surrogate: i32,
         pub(crate) cycle: i32,
         pub(crate) replacer: i32,
@@ -3281,7 +3292,6 @@ pub(crate) mod json {
                 no: pool.intern("false"),
                 syntax: pool.intern("JSON.parse: unexpected token"),
                 eof: pool.intern("JSON.parse: unexpected end of input"),
-                array: pool.intern("this engine does not support JSON arrays yet"),
                 surrogate: pool
                     .intern("this engine does not support unpaired surrogates in JSON text yet"),
                 cycle: pool.intern("JSON.stringify: converting circular structure to JSON"),
@@ -3325,6 +3335,15 @@ pub(crate) mod json {
         /// with `None` the refusals are still refusals, they are just not
         /// catchable.
         pub(crate) unwind: Option<Throwing>,
+        /// Function index of `__arr_new` — the first of
+        /// [`super::super::array::SET`].
+        ///
+        /// Not an `Option`: `emit`'s scan sets its array gate from
+        /// `arrays |= json`, so a module that has this set has that one too.
+        /// `JSON.parse` is exactly why -- it can return an array from text no
+        /// `[` appears in, which is the half of the array predicate that is
+        /// not about the source's syntax.
+        pub(crate) arrays: u32,
         pub(crate) names: JsonNames,
     }
 
@@ -3339,6 +3358,10 @@ pub(crate) mod json {
 
         fn cv(&self, cv: Cv) -> Ins {
             Ins::Call(self.convert_base + cv.offset())
+        }
+
+        fn ar(&self, ar: Ar) -> Ins {
+            Ins::Call(self.arrays + ar.offset())
         }
 
         fn alloc(&self) -> Ins {
@@ -3360,6 +3383,7 @@ pub(crate) mod json {
                 runtime_base: rt.func_base,
                 convert_base: cv.func_base,
                 unwind,
+                arrays: func_base + JSON_SET.len() as u32,
                 names,
             }
         }
@@ -3384,6 +3408,7 @@ pub(crate) mod json {
             Js::Quote => (vec![I32, I32], vec![], json_quote(ctx)),
             Js::Ser => (vec![I32, I64, I32, I32], vec![I32], json_ser(ctx)),
             Js::SerObj => (vec![I32, I32, I32], vec![], json_ser_obj(ctx)),
+            Js::SerArr => (vec![I32, I32, I32], vec![], json_ser_arr(ctx)),
             Js::Stringify => (jvalues(3), jvalues(1), json_stringify(ctx)),
             Js::PAt => (vec![I32], vec![I32], jp_at()),
             Js::PWs => (vec![I32], vec![], jp_ws(ctx)),
@@ -3393,6 +3418,7 @@ pub(crate) mod json {
             Js::PStr => (vec![I32], vec![I32], json_pstr(ctx)),
             Js::PNum => (vec![I32], vec![F64], json_pnum(ctx)),
             Js::PObj => (vec![I32], jvalues(1), json_pobj(ctx)),
+            Js::PArr => (vec![I32], jvalues(1), json_parr(ctx)),
             Js::PVal => (vec![I32], jvalues(1), json_pval(ctx)),
             Js::Parse => (jvalues(2), jvalues(1), json_parse(ctx)),
             Js::Ns => (vec![I32, I32], vec![I32], json_ns(ctx)),
@@ -3978,7 +4004,19 @@ pub(crate) mod json {
         f.body.push(Ins::Return);
         f.body.push(Ins::End);
 
-        // There is no eighth tag. Reaching here is a defect in this engine, not in
+        // Appended last, under `repr`'s dispatch-order rule: no type that
+        // serialized before arrays existed pays a test for them.
+        is_array(0, &mut f.body);
+        f.body.push(Ins::If(BlockType::Empty));
+        unbox_array(0, &mut f.body);
+        f.body.push(ld(buf));
+        f.body.push(ld(stack));
+        f.body.push(ctx.call(Js::SerArr));
+        f.body.push(ic(1));
+        f.body.push(Ins::Return);
+        f.body.push(Ins::End);
+
+        // There is no ninth tag. Reaching here is a defect in this engine, not in
         // the script, which is why it is a trap and not an answer.
         f.body.push(Ins::Unreachable);
         f
@@ -4107,6 +4145,145 @@ pub(crate) mod json {
             },
         );
         put(ctx, b, buf, b'}' as i32);
+        f
+    }
+
+    /// `__json_ser_arr(a, buf, stack)`: 25.5.2.5 SerializeJSONArray.
+    ///
+    /// The sibling of [`json_ser_obj`] and deliberately its near-copy, down to
+    /// the cycle node it pushes -- an array that contains itself is the same
+    /// TypeError as an object that does, and the chain walked is the
+    /// ancestors' for the same reason.
+    ///
+    /// # One step differs, and it is the step people get wrong
+    ///
+    /// 25.5.2.4 step 5 *omits* an object property whose value serializes to
+    /// nothing. 25.5.2.5 step 8 **writes `null`** for the same value in an
+    /// array, because an array's indices are positional and dropping one would
+    /// renumber every element after it. So `[undefined, 1]` is `[null,1]`
+    /// while `{a: undefined, b: 1}` is `{"b":1}`, and the two arms of this file
+    /// disagree on purpose.
+    fn json_ser_arr(ctx: &JsonCtx) -> FnBuild {
+        let mut f = FnBuild::new(3);
+        let buf = 1;
+        let stack = 2;
+        let walk = f.local(ValType::I32);
+        let node = f.local(ValType::I32);
+        let len = f.local(ValType::I32);
+        let elems = f.local(ValType::I32);
+        let i = f.local(ValType::I32);
+        let ep = f.local(ValType::I32);
+        let tag = f.local(ValType::I32);
+        let keep = f.local(ValType::I32);
+        let names = ctx.names;
+        let b = &mut f.body;
+
+        b.push(ld(stack));
+        b.push(st(walk));
+        while_loop(
+            b,
+            |b| b.push(ld(walk)),
+            |b| {
+                if_then(
+                    b,
+                    |b| {
+                        b.push(ld(walk));
+                        b.push(Ins::I32Load(ALIGN_WORD, CY_OBJ));
+                        b.push(ld(0));
+                        b.push(Ins::I32Eq);
+                    },
+                    |b| fail(ctx, b, names.cycle, Ret::None),
+                );
+                b.push(ld(walk));
+                b.push(Ins::I32Load(ALIGN_WORD, CY_PARENT));
+                b.push(st(walk));
+            },
+        );
+        b.push(ic(CY_BYTES));
+        b.push(ctx.alloc());
+        b.push(st(node));
+        b.push(ld(node));
+        b.push(ld(stack));
+        b.push(Ins::I32Store(ALIGN_WORD, CY_PARENT));
+        b.push(ld(node));
+        b.push(ld(0));
+        b.push(Ins::I32Store(ALIGN_WORD, CY_OBJ));
+
+        put(ctx, b, buf, b'[' as i32);
+        b.push(ld(0));
+        b.push(Ins::I32Load(ALIGN_WORD, ARR_LEN));
+        b.push(st(len));
+        b.push(ld(0));
+        b.push(Ins::I32Load(ALIGN_WORD, ARR_ELEMS));
+        b.push(st(elems));
+        b.push(ic(0));
+        b.push(st(i));
+        while_loop(
+            b,
+            |b| lt(b, i, len),
+            |b| {
+                if_then(
+                    b,
+                    |b| {
+                        b.push(ld(i));
+                        b.push(ic(0));
+                        b.push(Ins::I32Ne);
+                    },
+                    |b| put(ctx, b, buf, b',' as i32),
+                );
+                b.push(ld(elems));
+                b.push(ld(i));
+                b.push(ic(ELEM_BYTES));
+                b.push(Ins::I32Mul);
+                b.push(Ins::I32Add);
+                b.push(st(ep));
+                b.push(ld(ep));
+                b.push(Ins::I32Load(ALIGN_WORD, ELEM_TAG));
+                b.push(st(tag));
+                // Step 8: the two tags `__json_ser` answers with "wrote
+                // nothing" become `null` here rather than disappearing. The
+                // test is exact -- the same two tags `json_ser_obj` uses to
+                // decide to *omit* -- so nothing has to be written and taken
+                // back.
+                //
+                // Written as two tests of one local rather than as one
+                // if/else, because this instruction set has no `else`: see
+                // `runtime::obj_new`, which says the same thing about a zero
+                // pointer.
+                b.push(ld(tag));
+                b.push(ic(TAG_UNDEFINED));
+                b.push(Ins::I32Ne);
+                b.push(ld(tag));
+                b.push(ic(TAG_FUNCTION));
+                b.push(Ins::I32Ne);
+                b.push(Ins::I32And);
+                b.push(st(keep));
+                if_then(
+                    b,
+                    |b| b.push(ld(keep)),
+                    |b| {
+                        b.push(ld(tag));
+                        b.push(ld(ep));
+                        b.push(Ins::I64Load(ALIGN_WORD, ELEM_PAYLOAD));
+                        b.push(ld(buf));
+                        b.push(ld(node));
+                        b.push(ctx.call(Js::Ser));
+                        b.push(Ins::Drop);
+                        check(ctx, b, Ret::None);
+                    },
+                );
+                if_then(
+                    b,
+                    |b| {
+                        b.push(ld(keep));
+                        b.push(Ins::I32Eqz);
+                    },
+                    |b| puts(ctx, b, buf, names.null),
+                );
+                bump(b, i, 1);
+            },
+        );
+        put(ctx, b, buf, b']' as i32);
         f
     }
 
@@ -4829,12 +5006,83 @@ pub(crate) mod json {
         f
     }
 
+    /// `__json_parr(state) -> value`: 25.5.1's JSONArray.
+    ///
+    /// The sibling of [`json_pobj`] with the keys taken out, and the same two
+    /// shapes: the empty-array early exit before the loop, so `[]` never looks
+    /// for an element, and one loop that reads a value then demands either a
+    /// `,` or a `]`.
+    ///
+    /// `__arr_new(0)` rather than a guessed capacity: the length is not known
+    /// until the text is read, and guessing would allocate for arrays that do
+    /// not need it. `__arr_push` owns the growth, so this function does not
+    /// have a second opinion about capacity.
+    ///
+    /// The element is parsed into a local before it is pushed, for the reason
+    /// [`json_pobj`] gives about its member: pushing it inline would leave the
+    /// array pointer stranded on the stack with a throw in flight underneath
+    /// it.
+    fn json_parr(ctx: &JsonCtx) -> FnBuild {
+        let mut f = FnBuild::new(1);
+        let a = f.local(ValType::I32);
+        let c = f.local(ValType::I32);
+        let v = f.value_local();
+        let names = ctx.names;
+        let b = &mut f.body;
+
+        advance(b, 0, 1);
+        b.push(ic(0));
+        b.push(ctx.ar(Ar::New));
+        b.push(st(a));
+        skip_ws_at(ctx, b, 0);
+        at_byte(ctx, b, 0);
+        b.push(ic(0x5d));
+        b.push(Ins::I32Eq);
+        b.push(Ins::If(BlockType::Empty));
+        advance(b, 0, 1);
+        box_array(&[ld(a)], b);
+        b.push(Ins::Return);
+        b.push(Ins::End);
+
+        b.push(Ins::Loop(BlockType::Empty));
+        skip_ws_at(ctx, b, 0);
+        b.push(ld(0));
+        b.push(ctx.call(Js::PVal));
+        store_local(v, b);
+        check(ctx, b, Ret::Value);
+        b.push(ld(a));
+        load_local(v, b);
+        b.push(ctx.ar(Ar::Push));
+        skip_ws_at(ctx, b, 0);
+        at_byte(ctx, b, 0);
+        b.push(st(c));
+        b.push(ld(c));
+        b.push(ic(0x2c));
+        b.push(Ins::I32Eq);
+        b.push(Ins::If(BlockType::Empty));
+        advance(b, 0, 1);
+        b.push(Ins::Br(1));
+        b.push(Ins::End);
+        b.push(ld(c));
+        b.push(ic(0x5d));
+        b.push(Ins::I32Eq);
+        b.push(Ins::If(BlockType::Empty));
+        advance(b, 0, 1);
+        box_array(&[ld(a)], b);
+        b.push(Ins::Return);
+        b.push(Ins::End);
+        fail(ctx, b, names.syntax, Ret::Value);
+        b.push(Ins::End);
+        b.push(Ins::Unreachable);
+        f
+    }
+
     /// `__json_pval(state) -> value`: 25.5.1's JSONValue, dispatched on one byte.
     ///
-    /// The `[` arm is the one refusal here that is about this engine rather than
-    /// about the text: `[1,2]` is perfectly good JSON and there is no Array to
-    /// build it into. Saying "unexpected token" would send the reader looking for
-    /// a typo that is not there.
+    /// The `[` arm used to be the one refusal here that was about this engine
+    /// rather than about the text -- `[1,2]` is perfectly good JSON and there
+    /// was no Array to build it into. The Array milestone landed the type, so
+    /// it parses, and `JsonNames::array` went with it.
     fn json_pval(ctx: &JsonCtx) -> FnBuild {
         let mut f = FnBuild::new(1);
         let c = f.local(ValType::I32);
@@ -4857,7 +5105,9 @@ pub(crate) mod json {
         b.push(ic(0x5b));
         b.push(Ins::I32Eq);
         b.push(Ins::If(BlockType::Empty));
-        fail(ctx, b, names.array, Ret::Value);
+        b.push(ld(0));
+        b.push(ctx.call(Js::PArr));
+        b.push(Ins::Return);
         b.push(Ins::End);
 
         b.push(ld(c));

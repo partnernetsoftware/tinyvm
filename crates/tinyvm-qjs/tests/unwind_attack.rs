@@ -40,6 +40,8 @@
 // the runtime's operators and the conversions' bignum have their own files --
 // so the dead-code allowance is about this reader and not about the module.
 #[allow(dead_code)]
+#[path = "../src/array.rs"]
+mod array;
 #[path = "../src/convert.rs"]
 mod convert;
 #[allow(dead_code)]
@@ -82,6 +84,7 @@ struct Engine {
 
 /// The three function sets, placed the way `emit::m1::lower` places them.
 struct Bases {
+    array_names: array::Names,
     pool: StringPool,
     rt: RtCtx,
     cv: convert::Ctx,
@@ -104,6 +107,7 @@ impl Bases {
         let prim_names = PrimNames::intern(&mut pool);
         let cv_names = convert::Names::intern(&mut pool);
         let js_names = convert::JsonNames::intern(&mut pool);
+        let array_names = array::Names::intern(&mut pool);
         let convert_base = runtime::SET.len() as u32;
         let json_base = convert_base + convert::SET.len() as u32;
         let rt = RtCtx {
@@ -130,9 +134,11 @@ impl Bases {
             runtime_base: 0,
             convert_base,
             unwind,
+            arrays: json_base + convert::JSON_SET.len() as u32,
             names: js_names,
         };
         Bases {
+            array_names,
             pool,
             rt,
             cv,
@@ -145,6 +151,15 @@ impl Bases {
         let mut all = runtime::build(&self.rt);
         all.extend(convert::build(&self.cv));
         all.extend(convert::build_json(&self.js));
+        // Not optional: `JSON.parse` calls `__arr_new`/`__arr_push` and
+        // `__json_ser` dispatches to `__json_ser_arr`. Leaving it out builds a
+        // module whose JSON functions call whatever sits at those indices,
+        // which the load gate answers with "validation: type mismatch".
+        all.extend(array::build(&array::Ctx {
+            func_base: self.js.arrays,
+            runtime_base: self.rt.func_base,
+            names: self.array_names,
+        }));
         all
     }
 }
@@ -1449,18 +1464,17 @@ fn no_host_can_get_between_a_script_and_its_json() {
     }
 }
 
-/// `[1,2]` is perfectly good JSON and this engine has no Array, so the parser
-/// refuses it by name rather than approximating it. That is the right call
-/// and `convert.rs:4835` argues it; what is recorded here is the *product*
-/// consequence, because it is not written down anywhere else.
+/// An array anywhere in the text parses, and this row is the *product*
+/// consequence of that, because it is not written down anywhere else.
 ///
-/// `fleet.js` exists to parse whatever the Fleet broker answered. A broker
+/// This test used to be `an_array_anywhere_in_the_text_is_refused_by_name`.
+/// `fleet.js` exists to parse whatever the Fleet broker answered, and an
 /// answer that is or contains a JSON array -- `tabs.list` is the obvious one
-/// -- takes the `catch` and comes back as the raw text, so a caller that
-/// expects a value gets a string. That is a downstream behaviour change, not
-/// a defect in this lane, and it is the reason the row is here.
+/// -- took the `catch` and came back as raw text, so a caller expecting a
+/// value got a string. The Array milestone is what changed that, and these
+/// are the same five documents answering correctly.
 #[test]
-fn an_array_anywhere_in_the_text_is_refused_by_name() {
+fn an_array_anywhere_in_the_text_parses() {
     let mut e = Engine::new();
     for text in [
         "[]",
@@ -1473,13 +1487,10 @@ fn an_array_anywhere_in_the_text_is_refused_by_name() {
             serde_json::from_str::<serde_json::Value>(text).is_ok(),
             "{text} is valid JSON, so this row means what it says"
         );
+        e.clear_fault();
         let outcome = e.parse_value(text);
-        assert!(outcome.is_err(), "an array was accepted: {text}");
-        assert_eq!(
-            e.fault(),
-            runtime::FAULT_UNCAUGHT_THROW,
-            "{text} trapped without recording a throw"
-        );
+        assert!(outcome.is_ok(), "an array was refused: {text}");
+        assert_eq!(e.fault(), 0, "{text} recorded a throw it did not raise");
     }
 }
 

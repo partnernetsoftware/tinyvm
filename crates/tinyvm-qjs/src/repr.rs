@@ -420,6 +420,17 @@ pub(crate) fn unbox_object(base: u32, out: &mut Vec<Ins>) {
     out.push(Ins::I32WrapI64);
 }
 
+/// -> `i32` guest pointer to an array record. Traps when the value is not an
+/// Array, for the reason [`unbox_object`] gives about `undefined.a`.
+///
+/// Unused without `emit`, for the reason [`box_array`] gives.
+#[allow(dead_code)]
+pub(crate) fn unbox_array(base: u32, out: &mut Vec<Ins>) {
+    require_tag(base, TAG_ARRAY, out);
+    out.push(Ins::LocalGet(base + 1));
+    out.push(Ins::I32WrapI64);
+}
+
 /// -> `i32` guest pointer to a function record. Traps when the value is not a
 /// Function -- which is what makes `undefined()` a clean fault, raised before
 /// any table is touched, rather than a `call_indirect` into whatever the

@@ -482,6 +482,90 @@ fn a_non_index_property_write_on_an_array_traps() {
 }
 
 // =========================================================================
+// JSON
+// =========================================================================
+
+#[test]
+fn json_stringify_writes_an_array() {
+    string("return JSON.stringify([]);", "[]");
+    string("return JSON.stringify([1, 2, 3]);", "[1,2,3]");
+    string(
+        "return JSON.stringify([\"a\", true, null]);",
+        "[\"a\",true,null]",
+    );
+    string("return JSON.stringify([[1], [2, 3]]);", "[[1],[2,3]]");
+    string("return JSON.stringify({ a: [1, 2] });", "{\"a\":[1,2]}");
+}
+
+#[test]
+fn an_absent_element_is_null_where_an_absent_property_is_omitted() {
+    // 25.5.2.5 step 8 against 25.5.2.4 step 5, and the two disagree on
+    // purpose: an array's indices are positional, so dropping an element would
+    // renumber every one after it. An object's properties are named, so
+    // dropping one changes nothing else.
+    string("return JSON.stringify([undefined, 1]);", "[null,1]");
+    string(
+        "return JSON.stringify({ a: undefined, b: 1 });",
+        "{\"b\":1}",
+    );
+    string(
+        "let f = function () { return 1; }; return JSON.stringify([f, 1]);",
+        "[null,1]",
+    );
+}
+
+#[test]
+fn json_parse_builds_an_array() {
+    number("return JSON.parse(\"[]\").length;", 0.0);
+    number("return JSON.parse(\"[1,2,3]\").length;", 3.0);
+    number("return JSON.parse(\"[1,2,3]\")[1];", 2.0);
+    number("return JSON.parse(\"{\\\"a\\\":[1,2]}\").a[1];", 2.0);
+    string(
+        "return JSON.parse(\"[{\\\"id\\\":\\\"tab1\\\"}]\")[0].id;",
+        "tab1",
+    );
+    string("return typeof JSON.parse(\"[1]\");", "object");
+}
+
+#[test]
+fn a_parsed_array_round_trips() {
+    string(
+        "return JSON.stringify(JSON.parse(\"[1,[2,{\\\"c\\\":3}]]\"));",
+        "[1,[2,{\"c\":3}]]",
+    );
+}
+
+#[test]
+fn a_malformed_array_is_a_syntax_error_and_is_catchable() {
+    // The refusals here are about the *text*, not about this engine -- which
+    // is the distinction the deleted "this engine does not support JSON arrays
+    // yet" message used to sit on the wrong side of.
+    for text in ["[1,", "[1 2]", "[,]", "[1,]"] {
+        let source = format!(
+            "let n = 0; try {{ JSON.parse(\"{text}\"); }} catch (e) {{ n = 1; }} return n;"
+        );
+        assert_eq!(run(&source), Out::Number(1.0), "{text:?}");
+    }
+}
+
+#[test]
+fn an_array_that_contains_itself_is_the_same_type_error_an_object_gets() {
+    // 25.5.2.5 step 1, the same cycle chain `__json_ser_obj` walks, and
+    // catchable for the same reason.
+    number(
+        "let a = [1]; a[1] = a; let n = 0;          try { JSON.stringify(a); } catch (e) { n = 1; } return n;",
+        1.0,
+    );
+    // A DAG is not a cycle: the chain walked is the ancestors', so a value
+    // reached twice by two paths serializes twice, which is what 25.5.2.2
+    // requires.
+    string(
+        "let inner = [1]; return JSON.stringify([inner, inner]);",
+        "[[1],[1]]",
+    );
+}
+
+// =========================================================================
 // The gate
 // =========================================================================
 
@@ -514,9 +598,10 @@ fn naming_json_brings_the_array_set_because_parse_can_return_one() {
         .expect("compiles")
         .len();
     assert_eq!(
-        n, 15_037,
-        "the array set costs 753 bytes on top of the JSON set's 14 284; if this moved, \
-         say so in `function_values::the_whole_fleet_library_compiles_and_its_methods_are_reachable`, \
+        n, 15_414,
+        "the array set costs 1 130 bytes on top of the JSON set's 14 284 -- 753 for the \
+         type and 377 more for `JSON.parse`/`JSON.stringify` of one. If this moved, say \
+         so in `function_values::the_whole_fleet_library_compiles_and_its_methods_are_reachable`, \
          which quotes the same arithmetic"
     );
 }

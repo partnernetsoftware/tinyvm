@@ -257,17 +257,26 @@ allocation on a heap that never frees. Cycles are checked against a chain of
 *ancestors* and not a seen-set, so a DAG still serializes twice, as 25.5.2.2
 requires.
 
-Two boundaries are the engine's and say so:
+One boundary is the engine's and says so:
 
 ```js
-JSON.parse("[1]")                 // throws: this engine does not support JSON arrays yet
 JSON.stringify(o, null, 2)        // throws: no replacer and no space argument yet
 ```
 
-The Array one has a downstream consequence worth stating: `fleet.js` wraps
-every broker answer in `try { JSON.parse(t) } catch { return t }`, so an answer
-that is or contains a JSON array — `tabs.list` is the obvious one — comes back
-as the raw text and a caller expecting a value gets a String.
+There used to be a second — `JSON.parse("[1]")` threw "this engine does not
+support JSON arrays yet" — with a downstream consequence worth stating:
+`fleet.js` wraps every broker answer in `try { JSON.parse(t) } catch { return
+t }`, so an answer that was or contained a JSON array (`tabs.list` being the
+obvious one) came back as raw text and a caller expecting a value got a String.
+
+**The Array milestone closed it.** `JSON.parse("[1,2,3]")` is an Array,
+`JSON.stringify` of one round-trips, and an array nested in an object works in
+both directions. Two spec details are worth naming because they are easy to
+get backwards: 25.5.2.5 step 8 writes `null` for an element that serializes to
+nothing, where 25.5.2.4 step 5 *omits* the property — so `[undefined,1]` is
+`[null,1]` while `{a:undefined,b:1}` is `{"b":1}`; and an array that contains
+itself is the same catchable TypeError an object that does gets, walking the
+same ancestor chain, so a DAG still serializes twice.
 
 Naming `JSON` also turns the unwind channel on, whether or not the script
 writes `throw`, because `JSON.parse` raises one. That is the condition
@@ -400,7 +409,9 @@ type — one arm appended last in each of `__typeof`, `__truthy` and
 encoder: a function-valued property costs about **128 bytes** (the function,
 its adapter, its element and the assignment), a call through a value costs
 about **70 bytes** where the direct call it replaces costs about 28, and
-`fleet.js` in whole comes to 20 935.
+`fleet.js` in whole comes to 22 457 — it was 20 935 before the Array
+milestone, which added 1 130 for the array set and 392 spread across the
+library's ~130 member accesses.
 
 ## What it does not compile, and how it says so
 
@@ -609,7 +620,7 @@ cargo run -p tinyvm-qjs --example commissar
 stop at **line 14, byte 727**, on the conditional in `call()`. It does not stop
 anywhere.
 
-**Verbatim, whole**: 6 280 source bytes → **20 935 bytes** of wasm, clearing
+**Verbatim, whole**: 6 280 source bytes → **22 457 bytes** of wasm, clearing
 tinyvm's load gate, instantiating, with 29 function-valued properties reachable
 and exactly **one** import, `js.__host`. It was 16 400 with `JSON` resolving to
 an opaque `js.JSON` import that no host could answer; the 4 535 it grew by is
@@ -661,12 +672,16 @@ invented. Closing that gap properly means a way to declare an *object-shaped*
 host namespace, and that is a decision about the host boundary rather than
 about this library.
 
-Two behaviours a caller will meet, neither of them a defect in the parser:
+One behaviour a caller will meet, and it is not a defect in the parser:
 
 | | |
 | --- | --- |
-| a broker answer that is or contains a JSON **array** (`tabs.list`) | takes the `catch` and comes back as the raw text — this engine has no Array type, and `JSON.parse` refuses one by name rather than approximating it |
 | `o.m()` inside a wrapper | the function `o.m` holds is called and it cannot see `o`; there is no `this` yet. Inert for every method in this library, and what the `this` milestone has to fix |
+
+The other row here used to be the array one — a broker answer that was or
+contained a JSON array took the `catch` and came back as raw text. The Array
+milestone removed it; `tests/fleet_acceptance.rs::an_array_answer_is_a_list_the_caller_can_index`
+is the same shape asserting the new answer.
 
 ## Who consumes it
 

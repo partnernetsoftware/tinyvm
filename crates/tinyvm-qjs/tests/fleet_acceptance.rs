@@ -292,28 +292,26 @@ fn a_non_json_answer_takes_the_catch_and_comes_back_as_text() {
     );
 }
 
-/// A JSON **array** in the answer also takes the `catch`, because this engine
-/// has no Array type -- so `tabs.list` comes back as text where JavaScript
-/// would give a list.
+/// A JSON **array** in the answer is a list the caller can index.
 ///
-/// A downstream behaviour change and not a defect in the parser: refusing by
-/// name is the honest answer where approximating one would not be. It is
-/// written here, in the file about the product, because nowhere else says what
-/// it costs the caller.
+/// This test used to be `an_array_answer_comes_back_as_text_because_there_is_no_array_type`,
+/// and it asserted that `tabs.list` -- the most obviously useful operation in
+/// the catalog -- took the binding's `catch` and handed the caller the raw
+/// text. It is written here, in the file about the product, because nowhere
+/// else said what that cost the caller; the Array milestone is what changed
+/// the answer, and this is the same shape asserting the new one.
 #[test]
-fn an_array_answer_comes_back_as_text_because_there_is_no_array_type() {
+fn an_array_answer_is_a_list_the_caller_can_index() {
     let broker = primed(r#"[{"tab":"t1"},{"tab":"t2"}]"#);
     let source = format!(
         "{CALL}
         const fleet = {{}};
         fleet.tabs = {{}};
         fleet.tabs.list = function () {{ return call(\"tabs.list\"); }};
-        return fleet.tabs.list();"
+        const tabs = fleet.tabs.list();
+        return tabs.length + \"/\" + tabs[0].tab + \"/\" + tabs[1].tab;"
     );
-    assert_eq!(
-        drive(&source, &broker),
-        Out::Str(r#"[{"tab":"t1"},{"tab":"t2"}]"#.into())
-    );
+    assert_eq!(drive(&source, &broker), Out::Str("2/t1/t2".into()));
 }
 
 /// Three wrappers in one module, called in turn, with the broker answering

@@ -34,6 +34,8 @@
 // file. Dead-code is therefore about the *reader* here and not about the
 // module, so it is allowed on the `mod` and nowhere wider.
 #[allow(dead_code)]
+#[path = "../src/array.rs"]
+mod array;
 #[path = "../src/convert.rs"]
 mod convert;
 #[allow(dead_code)]
