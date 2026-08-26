@@ -44,6 +44,47 @@ TinyArcade 是第一个 embedding 和持续验收负载，不是 VM 的语言边
 instance，逐帧驱动游戏，安全 suspend/resume；单枚坏卡带只能失败自身，不能拖死、越界
 分配或破坏 App。
 
+## 记忆宫殿：一段 `.qjs` 走到宿主门的七个房间
+
+树说「有什么」，图说「东西放在哪」。每个房间放一件**只属于它**的知识，判据是
+**它随什么变**：随 JS 语言或 wasm 规范变的，在本仓；随某个 embedder 的业务变的，
+不在本仓。这条判据就是编译器归属那次讨论的结论，也是 `compile_qjs` 至今不认识任何
+embedder 词汇的原因。
+
+```mermaid
+flowchart TD
+  subgraph LANG["tinyvm-qjs — 随语言与规范变"]
+    R1["① lex / parse / AST<br/><i>a rejection names the engine, not the author</i>"]
+    R2["② lower to V1<br/>eight tags · dispatch order<br/><i>Number, then String, then the rest</i>"]
+    R3["③ runtime prelude<br/>bump heap · object and array records<br/><i>gated: unused means unemitted</i>"]
+    R4["④ encode .wasm<br/>standard bytes · LEB128"]
+    R1 --> R2 --> R3 --> R4
+  end
+
+  subgraph CORE["tinyvm — bytes only"]
+    R5["⑤ load gate<br/>validate · Limits"]
+    R6["⑥ interpret<br/>no JIT · per-call budget<br/><i>steps / depth / slots</i>"]
+    R5 --> R6
+  end
+
+  subgraph HOST["the embedder — not this repo"]
+    R7["⑦ slot + host door<br/><i>Names::Declared, no vocabulary of ours</i>"]
+  end
+
+  SRC(["source .qjs"]) --> R1
+  R4 --> R5
+  R6 <--> R7
+  R6 --> OUT(["Value::returned<br/>one V1 pair"])
+  FW["fault word<br/>heap exhausted / uncaught throw"] -.->|"the guest writes its own reason"| R7
+```
+
+**房间 ③ 是最容易放错的一间。** `runtime::SET` 是**无条件**的——`Rt::offset()` 是它在
+那个切片里的下标——所以往里加一臂就是给每个模块加一臂。数组落地时 `__typeof` 和
+`__truthy` 的 Array 臂正是这样被加进去的，**每个程序多付 11 字节**，包括 `return 1;`。
+门控的先例是 `convert::JSON_SET`，而它的门之所以站得住，是因为谓词**精确**：名字出现。
+数组的精确谓词是「有 ArrayLiteral 节点，或程序提到 `JSON`」——后者不能省，因为
+`JSON.parse` 能从编译器看不见的文本里造出数组。
+
 ## Capability tree
 
 Legend: `[x]` 已有可执行证据 · `[~]` 部分完成 · `[ ]` 规划 · `[–]` 有意排除
@@ -65,6 +106,17 @@ tinyvm (35)                                      [~]
 │   │   ├── Number<->String conversion, per ECMA-262      [x]
 │   │   ├── conditional expressions, try/catch/finally    [x]
 │   │   ├── JSON.parse / JSON.stringify, per ECMA-262 25.5 [x]
+│   │   ├── arrays: the eighth tag, a dense vector        [x]
+│   │   │   ├── literal, a[i], .length, nesting           [x]
+│   │   │   ├── out of range reads undefined, not a fault [x]
+│   │   │   ├── a write past the end fills, no holes      [x]
+│   │   │   ├── JSON reads and writes one                 [x]
+│   │   │   ├── a string key is not an index (10.4.2.1)   [~] recorded divergence
+│   │   │   ├── a non-index property write traps          [~] nowhere to put it
+│   │   │   └── methods (push / map) need a prototype     [ ]
+│   │   ├── an array-free program pays nothing for arrays [x] 9 784 -> 9 784 bytes
+│   │   ├── an indexed read is 36.6x the object spelling  [x] 526 vs 19 235 steps
+│   │   ├── closures that capture an outer local          [ ] the largest gap left
 │   │   ├── host calls with declared raw signatures       [x]
 │   │   │   └── a host length answer must be a length    [x]
 │   │   ├── nesting bounded by a diagnostic, not an abort [x]
