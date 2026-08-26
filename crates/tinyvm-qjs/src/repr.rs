@@ -256,6 +256,13 @@ pub(crate) const TAG_FUNCTION: i32 = 6;
 /// the index is a Number -- and then scan. A dense vector reads element `i`
 /// with one bounds test and one multiply-add. An array's whole reason to
 /// exist is that the index *is* the address.
+///
+/// Measured rather than asserted: **526 steps per element read against
+/// 19 235**, the same two loops spelled both ways, taken as a slope so the
+/// setup is not in it. The object figure also rises with size and the array's
+/// does not. `tests/arrays_m3.rs`'s
+/// `an_indexed_read_costs_what_the_eighth_tag_was_chosen_for` is the
+/// rerunnable form.
 pub(crate) const TAG_ARRAY: i32 = 7;
 
 /// The wasm value types one JS value occupies, in stack order.

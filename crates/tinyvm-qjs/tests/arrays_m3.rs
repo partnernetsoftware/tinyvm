@@ -606,6 +606,88 @@ fn naming_json_brings_the_array_set_because_parse_can_return_one() {
     );
 }
 
+/// **The measurement `plan/design-array-milestone.md` §2.1 owed**, and the one
+/// that either justifies the eighth tag or refutes it.
+///
+/// §2.1 rejected spelling an array as an object with integer-named keys on
+/// cost, and the argument was *reasoned* rather than measured: the object
+/// record finds a key by walking its entries with `__str_eq`, and the key for
+/// `a[i]` is a Number, so every index access would run `__num_to_string` --
+/// Dragon4 -- to build a fresh record and then scan. This is that claim as a
+/// number.
+///
+/// # It measures the slope, not the total
+///
+/// A total would mix in the setup loop, the allocator, and the module prelude,
+/// none of which is what §2.1 is about. So each spelling is run at two sizes
+/// and the difference divided by the gap: **steps per one more element read**.
+/// That is the marginal cost, which is the quantity a growth-law argument is
+/// made of -- a design that is cheap today and linear where the other is flat
+/// loses, and only the slope can say so.
+///
+/// The two loops are otherwise identical, down to the accumulator and the
+/// bound, and both are built by the same `for` loop so neither gets a literal
+/// the other does not.
+#[test]
+fn an_indexed_read_costs_what_the_eighth_tag_was_chosen_for() {
+    /// Steps for one top-level call of `source`.
+    #[track_caller]
+    fn steps(source: &str) -> u64 {
+        let wasm = compile_qjs_m1(source).expect("compiles");
+        // A generous ceiling: the object spelling at 210 keys is quadratic in
+        // the scan and the point is to let it finish, not to bound it.
+        let limits = Limits {
+            max_steps: 1 << 32,
+            ..Limits::default()
+        };
+        let module = WasmModule::from_bytes_with(&wasm, limits).expect("loads");
+        let mut instance = module.instantiate().expect("instantiates");
+        instance
+            .invoke_by_name("main", &Value::args(&[]))
+            .expect("runs");
+        instance.last_steps()
+    }
+
+    // Build with `c[i] = i`, then read with `c[i]` -- the same two loops for
+    // both spellings, so the only difference is what `c` is.
+    let program = |open: &str, n: u32| {
+        format!(
+            "let c = {open};              for (let i = 0; i < {n}; i = i + 1) {{ c[i] = i; }}              let s = 0;              for (let j = 0; j < {n}; j = j + 1) {{ s = s + c[j]; }}              return s;"
+        )
+    };
+
+    const SMALL: u32 = 10;
+    const LARGE: u32 = 110;
+    let gap = u64::from(LARGE - SMALL);
+
+    let array_slope = (steps(&program("[]", LARGE)) - steps(&program("[]", SMALL))) / gap;
+    let object_slope = (steps(&program("{}", LARGE)) - steps(&program("{}", SMALL))) / gap;
+
+    println!("per element: array {array_slope} steps, object {object_slope} steps");
+
+    // The verdict, stated as a floor rather than as the exact numbers, because
+    // the exact numbers move with every unrelated change to `__add` or the
+    // loop lowering and a test that pins them would fail for reasons that are
+    // not about this decision. What is being asserted is the *shape* of the
+    // difference §2.1 predicted.
+    assert!(
+        array_slope * 4 < object_slope,
+        "the dense vector should be several times cheaper per element than the \
+         object spelling; measured array {array_slope}, object {object_slope}. If \
+         this ever stops holding, `plan/design-array-milestone.md` §2.1 is the \
+         section to reopen -- its argument, not this test, is what would be wrong."
+    );
+    // And the array's own slope should be flat in the size, which is the other
+    // half of the claim: the index is the address, so element 100 costs what
+    // element 1 costs.
+    let array_far = (steps(&program("[]", 410)) - steps(&program("[]", 310))) / 100;
+    assert!(
+        array_far <= array_slope + 1,
+        "an indexed read must not get more expensive as the array grows: \
+         {array_slope} steps per element at 10..110, {array_far} at 310..410"
+    );
+}
+
 #[test]
 fn the_record_is_the_dense_vector_the_design_says_it_is() {
     // The layout has no observable surface in this subset -- there is no

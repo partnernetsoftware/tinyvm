@@ -16,8 +16,8 @@ success — actually fails and can be moved in with the other four.
 Implementing it corrected this file twice, and both corrections are recorded in
 place rather than rewritten away. §2.2's admission rule was **wrong** and is
 struck through below. §1.1's promise was **broken by the first implementation**,
-measured, and then made true. The two measurements §6 said were owed: one is
-now taken and is in §5, the other is still owed and still says so.
+measured, and then made true. Both measurements §6 said were owed are taken
+and are in §5; the second one settled §2.1 at 36.6× and was not close.
 
 ## Why now
 
@@ -262,11 +262,33 @@ source before and after, against the JSON set's own 4 421 as the comparable.
 its ~130 member accesses, about three bytes each: the price of the §2.2
 correction.
 
-**Still owed, and still not estimated:** the *steps* an indexed loop costs
-against the same loop over an object with string keys — the number that either
-justifies §2.1's eighth tag or refutes it. §2.1 stands as **reasoned**, not
-measured. It is not blocking: nothing in stage 1 depends on the answer, and a
-wrong answer would change the representation rather than the surface.
+**§2.1 is now measured, and it was not close.** The same two loops — build
+with `c[i] = i`, read with `c[i]` — spelled once over an array and once over an
+object, at two sizes, taking the difference:
+
+| spelling | steps per one more element read |
+|----------|--------------------------------:|
+| dense vector (`[]`) | **526** |
+| object with integer-named keys (`{}`) | **19 235** |
+
+**36.6×**, measured as a *slope* rather than a total so the setup loop, the
+allocator and the module prelude are not in it. And the object figure
+understates itself: its scan is linear in the key count, so the per-element
+cost keeps rising with size, where the array's does not — the same measurement
+at 310..410 gives the array the same 526.
+
+That is the argument §2.1 made, as a number: the object record finds a key by
+walking its entries with `__str_eq`, and the key for `a[i]` is a Number, so
+every access runs Dragon4 to build a record and then scans.
+
+`arrays_m3::an_indexed_read_costs_what_the_eighth_tag_was_chosen_for` is the
+rerunnable form. It asserts a floor (`array * 4 < object`) rather than the
+exact numbers, because those move with any unrelated change to `__add` or the
+loop lowering and a test that pinned them would fail for reasons that are not
+about this decision.
+
+**Nothing is owed any more.** Both measurements this file called for are
+taken.
 
 ## §6 Acceptance
 
@@ -295,5 +317,4 @@ Item 3 is the one that matters: it is the only case in that file written to
 fail on success, and it is what turns "arrays landed" from a claim into a
 measurement someone else can rerun.
 
-Both measurements this file asked for are accounted for in §5: the byte one is taken,
-the step one is still owed and says so.
+Both measurements this file asked for are in §5, and both are taken.
