@@ -150,6 +150,23 @@ pub(crate) mod m1 {
         pub(crate) bindings: Vec<BindingId>,
         pub(crate) body: Vec<Stmt>,
         pub(crate) span: Span,
+        /// Bindings of an *enclosing* function that this one reads, in the
+        /// order they became its environment.
+        ///
+        /// Empty for every function that captures nothing, which is every
+        /// function in a program with no closure -- so the environment
+        /// machinery is absent from such a program rather than present and
+        /// unused. The order is this function's environment layout: the
+        /// creator fills a cell vector in exactly this order, and a read
+        /// inside resolves to that index.
+        ///
+        /// **Flat, not a chain.** A function three levels down that reads a
+        /// binding from the top holds that cell directly rather than walking
+        /// two parents at run time. Its creator has the cell -- in its own
+        /// locals if it declared it, in its own environment if it captured it
+        /// too -- so building the vector costs one copy per entry and reading
+        /// one costs one load, at any depth.
+        pub(crate) captures: Vec<BindingId>,
     }
 
     /// One declared name.
@@ -179,6 +196,20 @@ pub(crate) mod m1 {
         /// many wasm locals one binding costs is the representation's business
         /// and not the front end's.
         pub(crate) slot: u32,
+        /// Whether some nested function reads this binding.
+        ///
+        /// A captured binding cannot live in a wasm local: the frame dies and
+        /// the closure outlives it. It moves to a one-word heap cell, and the
+        /// declaring function reads and writes *through that cell too* -- the
+        /// classic bug is the declaring function keeping its local and the two
+        /// diverging on the first assignment. ECMA-262 closes over the
+        /// binding, not its value, so `let a = 1; …; a = 2; …` must be visible
+        /// through the closure.
+        ///
+        /// Only captured bindings are boxed. Boxing every local would charge a
+        /// closure-free script an allocation per local per call, which is the
+        /// cost `plan/design-closure-milestone.md` §1.2 forbids.
+        pub(crate) captured: bool,
     }
 
     /// How a name was declared. The distinction outlives scoping: `Const` says
@@ -212,6 +243,17 @@ pub(crate) mod m1 {
         /// has to outlive a frame; which module-level storage that is, is the
         /// lowering's choice.
         Global(BindingId),
+        /// A binding of an **enclosing function**, read from inside a nested
+        /// one: a capture.
+        ///
+        /// Distinct from [`Local`](Self::Local) because the storage is
+        /// different -- a captured binding is boxed into a heap cell that
+        /// outlives the frame -- and distinct from [`Global`](Self::Global)
+        /// because a cell is reached through this function's environment
+        /// rather than at a module-level address. The index into that
+        /// environment is [`Function::captures`]'s position, which the
+        /// lowering looks up rather than the parser storing twice.
+        Captured(BindingId),
         /// A name bound to a known function, whether it is being called or
         /// read. It names the function rather than storage, which is why it
         /// resolves from any depth and captures nothing either way: a call to

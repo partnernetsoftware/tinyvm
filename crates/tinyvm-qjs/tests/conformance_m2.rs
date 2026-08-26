@@ -1509,10 +1509,8 @@ const UNSUPPORTED: &[(&str, &str)] = &[
         "function f() { return $0; } return f();",
         "an argument reference inside a nested function",
     ),
-    (
-        "function outer() { let a = 1; function inner() { return a; } return inner(); } return outer();",
-        "closures that capture a variable",
-    ),
+    // The closure row left this table when captures landed;
+    // `tests/closures_m3.rs` asserts their behaviour now.
     // -- a character the engine has no lexeme for ---------------------------
     ("#x", "the character `#`"),
 ];
@@ -1579,11 +1577,10 @@ fn the_boundary_is_classified_not_just_worded() {
     );
     assert_eq!(refuse("this;").boundary, Boundary::FullJs);
     assert_eq!(refuse("class C { }").boundary, Boundary::FullJs);
-    assert_eq!(
-        refuse("function o() { let a = 1; function i() { return a; } return i(); } return o();")
-            .boundary,
-        Boundary::FullJs
-    );
+    // A capture used to be the third `FullJs` case here. It compiles now, so
+    // the row is a construct that is still ahead of the engine -- and one
+    // whose absence a closure does not bring back.
+    assert_eq!(refuse("async function f() {}").boundary, Boundary::FullJs);
 }
 
 /// Under `Names::Unbound` a free name has nothing to resolve against, and the

@@ -435,16 +435,31 @@ fn the_parameter_list_shadows_the_self_name() {
 /// A closure that captures an outer local must never be silently
 /// miscompiled. Function values do not change that: the value is a table
 /// index, and a table index carries no environment.
+/// A closure that captures **runs** now, and this test used to assert it was
+/// refused because "a table index carries no environment".
+///
+/// It does not, and that was the whole design problem: the environment rides
+/// in the function *record* -- the thing the payload became when identity was
+/// fixed -- and reaches the callee as a leading parameter that the adapter
+/// forwards. The four sources are unchanged, answering instead of refusing.
 #[test]
-fn a_closure_that_captures_is_still_refused() {
-    for source in [
+fn a_closure_that_captures_runs() {
+    number(
         "function outer() { let a = 1; function inner() { return a; } return inner(); } return outer();",
-        "function outer() { let a = 1; return function () { return a; }; } return 0;",
+        1.0,
+    );
+    number(
+        "function outer() { let a = 1; return function () { return a; }; } return outer()();",
+        1.0,
+    );
+    number(
         "function outer() { let a = 1; let f = function () { return a; }; return f(); } return outer();",
-        "function outer(p) { return function () { return p; }; } return 0;",
-    ] {
-        refuses_capability(source, "closures that capture a variable", Boundary::FullJs);
-    }
+        1.0,
+    );
+    number(
+        "function outer(p) { return function () { return p; }; } return outer(9)();",
+        9.0,
+    );
 }
 
 /// The script's own bindings outlive every frame, so reading one from inside

@@ -330,7 +330,8 @@ pub(crate) mod m1 {
         unbox_string,
     };
     use crate::runtime::{
-        self, ALIGN_WORD, Conversions, Ctx, FN_ELEMENT, FnBuild, Rt, STRING_HEADER, StringPool,
+        self, ALIGN_WORD, Conversions, Ctx, FN_ELEMENT, FN_ENV, FnBuild, Rt, STRING_HEADER,
+        StringPool,
     };
 
     /// The name every compiled script exports, as at M0.
@@ -621,6 +622,7 @@ pub(crate) mod m1 {
                 str_cmp: convert_base + convert::Cv::StrCmp.offset(),
             },
             arrays: scan.arrays,
+            captures: scan.captures,
         };
         let cv = convert::Ctx {
             func_base: convert_base,
@@ -704,9 +706,20 @@ pub(crate) mod m1 {
         // The uniform signature has to exist before the first call site names
         // it, and only for a program that has one: an unused type-section entry
         // would make every script pay a byte for a capability it never used.
-        let uniform = scan.needs_table().then(|| Uniform {
-            type_index: intern(&mut types, values(scan.uniform_arity(program)), values(1)),
-            arity: scan.uniform_arity(program),
+        // The uniform signature leads with an `i32` environment once anything
+        // in the program captures. It is one signature for the whole table, so
+        // the widening is all-or-nothing -- an adapter whose target captures
+        // nothing simply never reads slot 0. Gated, so a closure-free program
+        // interns the type it always did.
+        let uniform = scan.needs_table().then(|| {
+            let mut params = values(scan.uniform_arity(program));
+            if scan.captures {
+                params.insert(0, ValType::I32);
+            }
+            Uniform {
+                type_index: intern(&mut types, params, values(1)),
+                arity: scan.uniform_arity(program),
+            }
         });
 
         // `JSON`'s two globals follow the unwind channel's three, so nothing
@@ -738,6 +751,7 @@ pub(crate) mod m1 {
                 unwind,
                 json,
                 user_base,
+                scan.captures,
                 id,
             )
             .function()?;
@@ -746,7 +760,15 @@ pub(crate) mod m1 {
             } else {
                 function.params.len() as u32
             };
-            let type_index = intern(&mut types, values(arity), values(1));
+            // A capturing function's signature leads with its environment
+            // pointer. Every other function's is exactly what it always was,
+            // which is the whole of `plan/design-closure-milestone.md` §1.2 at
+            // the signature level.
+            let mut params = values(arity);
+            if !function.captures.is_empty() {
+                params.insert(0, ValType::I32);
+            }
+            let type_index = intern(&mut types, params, values(1));
             funcs.push(func(
                 debug_name(program, id),
                 type_index,
@@ -781,7 +803,12 @@ pub(crate) mod m1 {
                     (convert::Js::Stringify.offset(), Json::ARITY),
                     (convert::Js::Parse.offset(), 2),
                 ] {
-                    let mut body: Vec<Ins> = (0..arity * WIDTH).map(Ins::LocalGet).collect();
+                    // `JSON`'s two capture nothing, so they skip slot 0 the
+                    // same way a non-capturing user function's adapter does.
+                    let env_slot = u32::from(scan.captures);
+                    let mut body: Vec<Ins> = (0..arity * WIDTH)
+                        .map(|i| Ins::LocalGet(env_slot + i))
+                        .collect();
                     body.push(Ins::Call(json_base + offset));
                     let index = adapter_base + in_table.len() as u32;
                     funcs.push(func(
@@ -802,7 +829,16 @@ pub(crate) mod m1 {
                     arity <= uniform.arity,
                     "the uniform arity bounds every parameter list"
                 );
-                let mut body: Vec<Ins> = (0..arity * WIDTH).map(Ins::LocalGet).collect();
+                // Slot 0 is the environment when the program has closures. An
+                // adapter whose target captures **forwards** it; one whose
+                // target does not simply leaves it unread, exactly as it
+                // already leaves surplus arguments unread (13.3.8.1).
+                let env_slot = u32::from(scan.captures);
+                let mut body: Vec<Ins> = Vec::new();
+                if !program.func(*id).captures.is_empty() {
+                    body.push(Ins::LocalGet(0));
+                }
+                body.extend((0..arity * WIDTH).map(|i| Ins::LocalGet(env_slot + i)));
                 body.push(Ins::Call(user_base + id.0));
                 funcs.push(func(
                     format!("<adapter of {}>", debug_name(program, *id)),
@@ -1255,6 +1291,17 @@ pub(crate) mod m1 {
         indirect: bool,
         /// The widest argument list at an indirect call site.
         call_arity: u32,
+        /// Whether any function in the program captures a binding of an
+        /// enclosing one.
+        ///
+        /// The closure gate. It widens the uniform call signature by one
+        /// leading `i32` and the function record by one word, and it does
+        /// neither for a program that has no closure -- which is the promise
+        /// `plan/design-closure-milestone.md` §1.2 makes and §2.4 asks to be
+        /// gated. Exact by construction: it is a property of the resolved
+        /// tree, read straight off `Function::captures`, not a guess about
+        /// syntax.
+        captures: bool,
         /// Whether the program can produce an Array, which is exactly: it
         /// writes an ArrayLiteral, or it names `JSON`.
         ///
@@ -1374,6 +1421,10 @@ pub(crate) mod m1 {
         // needs the set whether or not it writes `[`. Both halves are set
         // here so neither can be forgotten at the other's site.
         out.arrays |= out.json;
+        // Read off the resolved tree rather than accumulated while walking:
+        // `record_captures` has already settled every function's layout by
+        // the time a `Program` exists, so the scan only has to ask.
+        out.captures = program.functions.iter().any(|f| !f.captures.is_empty());
         Ok(out)
     }
 
@@ -1590,7 +1641,38 @@ pub(crate) mod m1 {
         Local(u32),
         /// Base index of a pair of globals.
         Global(u32),
+        /// A **captured** binding this function owns: the raw local at this
+        /// index holds an `i32` pointer to the binding's heap cell.
+        ///
+        /// It reuses the `i32` half of the pair of locals the binding would
+        /// otherwise occupy, so the local layout is unchanged and `slot`
+        /// still indexes it. The `i64` half goes unread, which costs a
+        /// declared local and no instructions -- against renumbering every
+        /// binding after a captured one, which would cost a second slot
+        /// mapping that has to agree with the first.
+        Cell(u32),
+        /// A binding captured **from an enclosing function**: this function's
+        /// environment holds the cell pointer at this index.
+        Env(u32),
     }
+
+    /// One captured binding's storage: `[tag: i32][payload: i64]`, the V1 pair
+    /// stored whole exactly as an object entry or an array element stores one.
+    ///
+    /// Twelve bytes and not eight: a cell holds a *JavaScript value*, and
+    /// narrowing it to a payload would mean the cell deciding a type the
+    /// binding never had.
+    const CELL_BYTES: i32 = 12;
+    const CELL_TAG: u32 = 0;
+    const CELL_PAYLOAD: u32 = 4;
+
+    /// An environment is `[cell: i32]*` and nothing else.
+    ///
+    /// No length word: every index into it is a compile-time constant --
+    /// `Function::captures`'s position -- so a length would be a word written
+    /// once and read never. `plan/design-closure-milestone.md` §2.5 specified
+    /// `[n][cells…]`; the note is corrected rather than the word emitted.
+    const ENV_SLOT: i32 = 4;
 
     /// Which pair of accessors a member expression reaches. See
     /// [`Lower::accessor`].
@@ -1653,6 +1735,17 @@ pub(crate) mod m1 {
         /// The signature every call through a value speaks, or `None` for a
         /// program the scan said has no such call and no such value.
         uniform: Option<Uniform>,
+        /// Whether *any* function in the program captures: the gate that
+        /// decides the record's width and the uniform signature's shape. Not
+        /// about this function -- `env_param` is that one.
+        captures: bool,
+        /// `1` when this function takes a leading environment parameter --
+        /// that is, when it captures anything -- and `0` otherwise.
+        ///
+        /// Every binding local is offset by it, so a function that captures
+        /// nothing has exactly the local layout it had before closures
+        /// existed. Wasm local `0` of a capturing function is its environment.
+        env_param: u32,
         /// Index of `__arr_new`, or `None` for a program the array gate
         /// refused -- which emits none of that set and keeps the pre-array
         /// lowering of a computed access, exactly as it was.
@@ -1711,6 +1804,7 @@ pub(crate) mod m1 {
             unwind: Option<Unwind>,
             json: Option<Json>,
             user_base: u32,
+            captures: bool,
             id: ast::FuncId,
         ) -> Self {
             let function = program.func(id);
@@ -1735,7 +1829,11 @@ pub(crate) mod m1 {
                     .all(|(position, binding)| program.binding(*binding).slot == position as u32),
                 "a function's parameters must be the first of its bindings, in order"
             );
-            let mut f = FnBuild::new(arity * WIDTH);
+            // A capturing function's environment is its first wasm parameter.
+            // Zero for every other function, which is why a program with no
+            // closure emits the parameter lists it always did.
+            let env_param = u32::from(!function.captures.is_empty());
+            let mut f = FnBuild::new(env_param + arity * WIDTH);
             // The bindings this function owns, minus its parameters, in slot
             // order: that is what makes `slot * WIDTH` the local index for a
             // parameter and a body binding alike. The script's bindings are
@@ -1758,7 +1856,9 @@ pub(crate) mod m1 {
                 unwind,
                 json,
                 user_base,
+                captures,
                 id,
+                env_param,
                 f,
                 depth: 0,
                 handlers: Vec::new(),
@@ -1813,10 +1913,36 @@ pub(crate) mod m1 {
 
         /// One fresh function object, on the stack: 15.2.5's "a new object"
         /// for a FunctionExpression and 10.2.11's for a declaration.
+        /// One function object: its table element, and -- once any function
+        /// in the program captures -- its environment.
+        ///
+        /// A function that captures nothing still gets the word, holding 0.
+        /// The record has to be one shape for `indirect_call` to read `FN_ENV`
+        /// without knowing which function it holds, and the gate is what keeps
+        /// a closure-free program from carrying the word at all.
         fn function_value(&mut self, func: ast::FuncId) {
             let element = self.fns.element(func);
             let new = self.ctx.call(Rt::FnNew);
-            box_function(&[Ins::I32Const(element), new], &mut self.f.body);
+            if self.captures {
+                let mut inner = vec![Ins::I32Const(element)];
+                if self.program.func(func).captures.is_empty() {
+                    inner.push(Ins::I32Const(0));
+                    inner.push(new);
+                    box_function(&inner, &mut self.f.body);
+                } else {
+                    // `build_env` emits into the body, so the element const has
+                    // to be there first for the argument order to hold.
+                    self.push(Ins::I32Const(element));
+                    self.build_env(func);
+                    self.push(new);
+                    let value = self.take_raw();
+                    self.push(Ins::LocalSet(value));
+                    box_function(&[Ins::LocalGet(value)], &mut self.f.body);
+                    self.give_raw(value);
+                }
+            } else {
+                box_function(&[Ins::I32Const(element), new], &mut self.f.body);
+            }
         }
 
         /// The binding a named function expression makes for its own name,
@@ -1833,6 +1959,7 @@ pub(crate) mod m1 {
         }
 
         fn function(mut self) -> Result<FnBuild, CompileError> {
+            self.open_cells();
             // ECMA-262 15.2.5 step 4 binds a named function expression's own
             // name inside the function, before the body runs.
             //
@@ -1984,12 +2111,130 @@ pub(crate) mod m1 {
 
         // -- storage ---------------------------------------------------------
 
+        /// Where one binding's storage is, from this function's point of view.
+        ///
+        /// Four answers now, and the two new ones are both about capture: a
+        /// binding this function owns *and* something nested reads lives in a
+        /// cell whose pointer is in a local; a binding an enclosing function
+        /// owns is reached through this function's environment.
         fn place(&self, id: ast::BindingId) -> Place {
             let binding = self.program.binding(id);
             if binding.func == ast::Program::SCRIPT {
                 Place::Global(BINDING_GLOBALS + binding.slot * WIDTH)
+            } else if binding.func == self.id {
+                let base = self.env_param + binding.slot * WIDTH;
+                if binding.captured {
+                    Place::Cell(base)
+                } else {
+                    Place::Local(base)
+                }
             } else {
-                Place::Local(binding.slot * WIDTH)
+                Place::Env(self.capture_index(id))
+            }
+        }
+
+        /// This binding's index in the environment, which is its position in
+        /// `Function::captures` -- the layout the parser's `record_captures`
+        /// pass fixed and every creator of this function fills in that order.
+        fn capture_index(&self, id: ast::BindingId) -> u32 {
+            self.program
+                .func(self.id)
+                .captures
+                .iter()
+                .position(|c| *c == id)
+                .expect("a Res::Captured occurrence is in its function's capture list")
+                as u32
+        }
+
+        /// Box every binding this function owns that something nested reads.
+        ///
+        /// Runs before anything else in the body, because a capture can be
+        /// read by a function instantiated at the very top of it.
+        ///
+        /// A captured **parameter** is the case with an order to get right:
+        /// its value arrives in the pair of locals whose `i32` half is about
+        /// to become the cell pointer, so the pair is read into the cell
+        /// *before* the pointer overwrites it. Reading after would store the
+        /// address of the cell into the cell.
+        ///
+        /// A captured body binding starts as `undefined`, which is what a
+        /// zeroed cell already is: `TAG_UNDEFINED` is 0 and so is the payload,
+        /// and `__alloc` hands out zeroed memory. So nothing is written for
+        /// one -- the same reason a fresh local needs no initialiser.
+        fn open_cells(&mut self) {
+            if self.id == ast::Program::SCRIPT {
+                // The script's bindings are globals; they outlive every frame
+                // already, which is why reading one from a nested function is
+                // `Res::Global` and not a capture at all.
+                return;
+            }
+            let function = self.program.func(self.id);
+            let params = function.params.len() as u32;
+            let owned: Vec<(u32, bool)> = function
+                .bindings
+                .iter()
+                .filter(|id| self.program.binding(**id).captured)
+                .map(|id| {
+                    let slot = self.program.binding(*id).slot;
+                    (slot, slot < params)
+                })
+                .collect();
+            for (slot, is_param) in owned {
+                let base = self.env_param + slot * WIDTH;
+                let cell = self.take_raw();
+                self.push(Ins::I32Const(CELL_BYTES));
+                let alloc = self.ctx.call(Rt::Alloc);
+                self.push(alloc);
+                self.push(Ins::LocalSet(cell));
+                if is_param {
+                    self.push(Ins::LocalGet(cell));
+                    self.push(Ins::LocalGet(base));
+                    self.push(Ins::I32Store(ALIGN_WORD, CELL_TAG));
+                    self.push(Ins::LocalGet(cell));
+                    self.push(Ins::LocalGet(base + 1));
+                    self.push(Ins::I64Store(ALIGN_WORD, CELL_PAYLOAD));
+                }
+                self.push(Ins::LocalGet(cell));
+                self.push(Ins::LocalSet(base));
+                self.give_raw(cell);
+            }
+        }
+
+        /// Build the environment `callee` expects and leave its pointer on the
+        /// stack.
+        ///
+        /// One allocation and one store per entry, filled from wherever *this*
+        /// function keeps that cell: its own local if it declared the binding,
+        /// its own environment if it captured it too. That second case is what
+        /// makes the closures flat -- a function three levels down is handed
+        /// the cell rather than a chain to walk.
+        fn build_env(&mut self, callee: ast::FuncId) {
+            let captures = self.program.func(callee).captures.clone();
+            let env = self.take_raw();
+            self.push(Ins::I32Const(captures.len() as i32 * ENV_SLOT));
+            let alloc = self.ctx.call(Rt::Alloc);
+            self.push(alloc);
+            self.push(Ins::LocalSet(env));
+            for (index, id) in captures.iter().enumerate() {
+                self.push(Ins::LocalGet(env));
+                let place = self.place(*id);
+                self.cell_pointer(place);
+                self.push(Ins::I32Store(ALIGN_WORD, index as u32 * ENV_SLOT as u32));
+            }
+            self.push(Ins::LocalGet(env));
+            self.give_raw(env);
+        }
+
+        /// Leave the cell pointer for `place` on the stack.
+        fn cell_pointer(&mut self, place: Place) {
+            match place {
+                Place::Cell(base) => self.push(Ins::LocalGet(base)),
+                // Environment is always wasm local 0 of a capturing function.
+                Place::Env(index) => {
+                    self.push(Ins::LocalGet(0));
+                    self.push(Ins::I32Load(ALIGN_WORD, index * ENV_SLOT as u32));
+                }
+                other => unreachable!("{other:?} is not a cell"),
             }
         }
 
@@ -2000,6 +2245,18 @@ pub(crate) mod m1 {
                     for k in 0..WIDTH {
                         self.push(Ins::GlobalGet(base + k));
                     }
+                }
+                // Two loads through the cell, tag then payload -- the pair as
+                // it was stored, not re-boxed.
+                Place::Cell(_) | Place::Env(_) => {
+                    self.cell_pointer(place);
+                    let cell = self.take_raw();
+                    self.push(Ins::LocalSet(cell));
+                    self.push(Ins::LocalGet(cell));
+                    self.push(Ins::I32Load(ALIGN_WORD, CELL_TAG));
+                    self.push(Ins::LocalGet(cell));
+                    self.push(Ins::I64Load(ALIGN_WORD, CELL_PAYLOAD));
+                    self.give_raw(cell);
                 }
             }
         }
@@ -2012,6 +2269,24 @@ pub(crate) mod m1 {
                     for k in (0..WIDTH).rev() {
                         self.push(Ins::GlobalSet(base + k));
                     }
+                }
+                // Through the cell, which is what makes capture by *binding*
+                // rather than by value: the declaring function writes where
+                // every closure over it reads.
+                Place::Cell(_) | Place::Env(_) => {
+                    let pair = self.take();
+                    store_local(pair, &mut self.f.body);
+                    self.cell_pointer(place);
+                    let cell = self.take_raw();
+                    self.push(Ins::LocalSet(cell));
+                    self.push(Ins::LocalGet(cell));
+                    self.push(Ins::LocalGet(pair));
+                    self.push(Ins::I32Store(ALIGN_WORD, CELL_TAG));
+                    self.push(Ins::LocalGet(cell));
+                    self.push(Ins::LocalGet(pair + 1));
+                    self.push(Ins::I64Store(ALIGN_WORD, CELL_PAYLOAD));
+                    self.give_raw(cell);
+                    self.give(pair);
                 }
             }
         }
@@ -2848,7 +3123,7 @@ pub(crate) mod m1 {
 
         fn name(&mut self, name: &ast::Name) -> Result<(), CompileError> {
             match &name.res {
-                ast::Res::Local(id) | ast::Res::Global(id) => {
+                ast::Res::Local(id) | ast::Res::Global(id) | ast::Res::Captured(id) => {
                     let place = self.place(*id);
                     self.load(place);
                     Ok(())
@@ -2919,6 +3194,13 @@ pub(crate) mod m1 {
                 ast::ExprKind::Function(func) => *func,
                 _ => return self.indirect_call(callee, args),
             };
+            // A capturing callee takes its environment first. The caller
+            // builds it, because the caller is the one that has the cells --
+            // in its own locals if it declared them, in its own environment if
+            // it captured them too.
+            if !self.program.func(target).captures.is_empty() {
+                self.build_env(target);
+            }
             let arity = self.program.func(target).params.len() as u32;
             self.arguments(args, arity)?;
             self.push(Ins::Call(self.user_base + target.0));
@@ -2964,6 +3246,15 @@ pub(crate) mod m1 {
             let slot = self.take();
             self.expr(callee)?;
             store_local(slot, &mut self.f.body);
+            // The environment goes first because the uniform signature leads
+            // with it. It comes out of the record, which is what the callee
+            // value's payload *is* -- the adapter cannot ask which funcref it
+            // was reached through, so the call site that already holds the
+            // record is the one place the answer exists.
+            if self.captures {
+                unbox_function(slot, &mut self.f.body);
+                self.push(Ins::I32Load(ALIGN_WORD, FN_ENV));
+            }
             self.arguments(args, uniform.arity)?;
             unbox_function(slot, &mut self.f.body);
             self.push(Ins::I32Load(ALIGN_WORD, FN_ELEMENT));
@@ -3408,7 +3699,7 @@ pub(crate) mod m1 {
         fn target(&mut self, target: &ast::Expr) -> Result<Target, CompileError> {
             match &target.kind {
                 ast::ExprKind::Name(ast::Name {
-                    res: ast::Res::Local(id) | ast::Res::Global(id),
+                    res: ast::Res::Local(id) | ast::Res::Global(id) | ast::Res::Captured(id),
                     ..
                 }) => Ok(Target::Binding(self.place(*id))),
                 ast::ExprKind::Member { object, key } => {

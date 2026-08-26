@@ -87,6 +87,8 @@ impl Prog {
             // Built directly rather than through the lowering, so this picks
             // the gate a program with no array would have picked.
             arrays: false,
+            // These build the runtime directly; no program, so nothing captures.
+            captures: false,
         };
         let cv = convert::Ctx {
             func_base: base,

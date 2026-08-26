@@ -3,7 +3,9 @@
 Owner: [tinyvm PRD](../prd/PRD.md) · Downstream consumer:
 `agenterm/crates/agenterm-qjswasm`
 
-Status: **designed, not implemented.** Written the way
+Status: **landed** (2026-08-27). Everything below is what was built, with two
+corrections marked in place: §2.5's environment layout dropped a word, and §4's
+owed measurement is taken. Written the way
 `design-array-milestone.md` was, and for the same reason: reading the call
 machinery end to end turned up decisions that look free from outside and are
 not. Every number in this file is a byte count or a line of existing code; the
@@ -139,12 +141,15 @@ slot, the same way the adapter already drops surplus arguments (13.3.8.1).
 
 ### 2.5 The cell vector is its own record, not an Array
 
-`[n: i32][cell: i32]…`, allocated when a function value that captures is
-created. Deliberately **not** the `TAG_ARRAY` record: an environment is not a
-JavaScript value, nothing can reach it from the language, and giving it a tag
-would put it one `typeof` away from being one. The array record also carries a
-capacity word and stores whole V1 pairs, neither of which an environment
-needs.
+~~`[n: i32][cell: i32]…`~~ — **`[cell: i32]…` and nothing else.** The length
+word was specified here and not built: every index into an environment is a
+compile-time constant (`Function::captures`'s position), so `n` would have been
+a word written once and read never. Corrected rather than emitted.
+
+Deliberately **not** the `TAG_ARRAY` record: an environment is not a JavaScript
+value, nothing can reach it from the language, and giving it a tag would put it
+one `typeof` away from being one. The array record also carries a capacity word
+and stores whole V1 pairs, neither of which an environment needs.
 
 ## §3 What this does not answer
 
@@ -178,8 +183,22 @@ Not "closures exist". Four things, each falsifiable:
 4. `agenterm/scripts/qjs/lib/fleet.qjs` still compiles to the same bytes,
    because it captures nothing and must therefore pay nothing.
 
-**One measurement is owed and may not be estimated**: the bytes a program with
-one closure pays over the same program without one, split into the fixed part
-(the widened uniform signature) and the per-closure part (the record word, the
-cell vector, the boxing). §2.4's gate stands as *reasoned* until that number
-exists.
+**Measured, and split the way this section asked.**
+
+| | bytes |
+|---|------:|
+| the gate: uniform signature slot, record word, `__fn_new`'s parameter and store | **21** |
+| each capturing function: environment parameter, cell prologue, environment built per creation site | **99** |
+
+Separating the two needs the "one more function" baseline subtracted, which is
+why the test uses four programs: a second *capturing* function costs one more
+function plus one more capture, and only the difference of those two
+differences is the capture. `closures_m3::what_one_closure_costs_is_written_down`
+is the rerunnable form.
+
+And §1.2 held **without needing a fix**, which the array milestone's did not:
+`return 1;` is 9 784 bytes before and after, and so are the object-only,
+function-value and `JSON` programs, and `fleet.js` is 22 457 either way. The
+difference is that the array gate was added after the arms it controls, and
+this one was built into every site from the start -- the environment parameter,
+the record word and the widened signature each sit behind `Scan::captures`.

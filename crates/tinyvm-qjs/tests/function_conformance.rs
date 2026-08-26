@@ -927,15 +927,27 @@ fn an_arrow_function_is_refused_by_name() {
 /// name. Reading a **script** binding is not a capture -- the script's
 /// bindings outlive every frame -- and that exception is what makes a
 /// namespace table's methods able to see the table.
+/// A function value that captures **works** now, and this test used to assert
+/// it was refused.
+///
+/// The three sources are unchanged: the same shapes, answering. The third is
+/// the one worth keeping in a file about function *objects* -- a captured
+/// binding reached through a property, which is a closure and a namespace
+/// table at once.
 #[test]
-fn a_function_value_that_captures_a_binding_is_refused() {
-    for source in [
-        "function outer() { let a = 1; return function () { return a; }; } return 0;",
-        "function outer(p) { const o = {}; o.m = function () { return p; }; return o; } return 0;",
+fn a_function_value_that_captures_a_binding_works() {
+    number(
+        "function outer() { let a = 1; return function () { return a; }; } return outer()();",
+        1.0,
+    );
+    number(
+        "function outer(p) { const o = {}; o.m = function () { return p; }; return o; } return outer(4).m();",
+        4.0,
+    );
+    number(
         "function outer() { let a = 1; const o = {}; o.m = function () { return a; }; return o.m(); } return outer();",
-    ] {
-        refuses_capability(source, "closures that capture a variable", Boundary::FullJs);
-    }
+        1.0,
+    );
     // The script's own bindings, by contrast, are readable from any function.
     number(
         "let a = 40; let f = function () { return a + 2; }; return f();",
@@ -1747,8 +1759,9 @@ fn every_refusal_in_this_area_speaks_for_the_engine() {
         "const o = {}; o.m = (a) => a; return 0;",
         "let f = a => a; return 0;",
         "const o = {}; o.m = () => 1; return 0;",
-        "function outer() { let a = 1; return function () { return a; }; } return 0;",
-        "function outer(p) { const o = {}; o.m = function () { return p; }; return o; } return 0;",
+        // The two capture rows left this list when closures landed; they are
+        // assertions about answers now, in
+        // `a_function_value_that_captures_a_binding_works`.
         "let f = function () {}; return new f();",
         "let f = function g() {}; return g();",
         "let g = f; let f = function () {}; return 0;",

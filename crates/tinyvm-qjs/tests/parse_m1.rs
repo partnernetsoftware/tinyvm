@@ -597,12 +597,37 @@ fn a_function_may_be_declared_inside_a_function() {
 }
 
 #[test]
-fn a_nested_function_may_not_capture_a_variable_of_an_enclosing_function() {
-    let message = refuse("function outer() { let x = 1; function inner() { return x; } }");
-    assert!(message.contains("capture"), "{message}");
+fn a_nested_function_capturing_an_enclosing_binding_resolves_and_lays_out_its_environment() {
+    // This used to be `..._may_not_capture_...` and asserted a refusal. The
+    // parser's job is now to *record* the capture, and both halves of that
+    // record are what the lowering reads: the binding is marked so its storage
+    // becomes a cell, and the reading function's `captures` is the environment
+    // layout every creator of it fills in that order.
+    let p =
+        program("function outer() { let x = 1; function inner() { return x; } return inner(); }");
+
+    let x = p
+        .bindings
+        .iter()
+        .find(|b| b.name == "x")
+        .expect("the binding is there");
+    assert!(x.captured, "a binding something nested reads is captured");
+
+    let inner = p
+        .functions
+        .iter()
+        .find(|f| f.name.as_deref() == Some("inner"))
+        .expect("the nested function is there");
+    assert_eq!(inner.captures.len(), 1, "inner captures exactly `x`");
+
+    let outer = p
+        .functions
+        .iter()
+        .find(|f| f.name.as_deref() == Some("outer"))
+        .expect("the enclosing function is there");
     assert!(
-        message.starts_with("this engine does not support "),
-        "{message}"
+        outer.captures.is_empty(),
+        "the function that *owns* the binding captures nothing -- it has the cell"
     );
 }
 

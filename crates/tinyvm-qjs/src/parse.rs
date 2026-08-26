@@ -695,6 +695,10 @@ pub(crate) mod m1 {
                 initialised: None,
                 func,
                 slot,
+                // Set by `resolve_one` the first time a nested function reads
+                // it. Nothing else may set it: a binding is captured exactly
+                // when an occurrence resolves from inside another function.
+                captured: false,
             });
             self.functions[func.0 as usize].bindings.push(id);
             self.scopes[target].names.push((name.to_string(), id));
@@ -1189,6 +1193,7 @@ pub(crate) mod m1 {
                 bindings: Vec::new(),
                 body: Vec::new(),
                 span,
+                captures: Vec::new(),
             });
             id
         }
@@ -1870,8 +1875,53 @@ pub(crate) mod m1 {
         // -- resolution ------------------------------------------------------
 
         /// Every recorded occurrence, now that every declaration is in.
-        fn resolve(&self) -> Result<Vec<Res>, CompileError> {
-            self.pending.iter().map(|p| self.resolve_one(p)).collect()
+        fn resolve(&mut self) -> Result<Vec<Res>, CompileError> {
+            let resolved: Vec<Res> = self
+                .pending
+                .iter()
+                .map(|p| self.resolve_one(p))
+                .collect::<Result<_, _>>()?;
+            self.record_captures(&resolved);
+            Ok(resolved)
+        }
+
+        /// Turn every [`Res::Captured`] into an environment layout.
+        ///
+        /// Runs after resolution and not during it, because a capture is a
+        /// fact about an occurrence *and* about every function between the
+        /// occurrence and the binding's owner -- and the second half is only
+        /// knowable once the first is settled. `resolve_one` stays pure; this
+        /// is the one pass that writes back.
+        ///
+        /// **Flat closures.** A function three levels below the owner holds
+        /// the cell directly, and so does every function between: each one
+        /// captures the binding so it can hand the cell to the next. That
+        /// costs one entry per level in the layout and one load per read, at
+        /// any depth -- against a parent chain, which costs one load per level
+        /// on every read, forever, to save a word once.
+        ///
+        /// The walk goes up *scopes*, not functions, because scopes are what
+        /// carry the parent link; distinct `func` values along that chain are
+        /// the function nesting.
+        fn record_captures(&mut self, resolved: &[Res]) {
+            for (p, res) in self.pending.iter().zip(resolved) {
+                let Res::Captured(id) = res else { continue };
+                let owner = self.bindings[id.0 as usize].func;
+                self.bindings[id.0 as usize].captured = true;
+
+                let mut scope = Some(p.scope);
+                while let Some(at) = scope {
+                    let func = self.scopes[at].func;
+                    if func == owner {
+                        break;
+                    }
+                    let captures = &mut self.functions[func.0 as usize].captures;
+                    if !captures.contains(id) {
+                        captures.push(*id);
+                    }
+                    scope = self.scopes[at].parent;
+                }
+            }
         }
 
         fn resolve_one(&self, p: &Pending) -> Result<Res, CompileError> {
@@ -1988,11 +2038,11 @@ pub(crate) mod m1 {
                 // captured, and a captured binding needs an environment this
                 // engine does not build.
                 _ if binding.func == Program::SCRIPT => Ok(Res::Global(id)),
-                _ => Err(unsupported(
-                    Boundary::FullJs,
-                    "closures that capture a variable",
-                    p.offset,
-                )),
+                // A binding of an enclosing function. This used to be
+                // `unsupported("closures that capture a variable")`; it is a
+                // capture now, and `record_captures` is the pass that turns
+                // this answer into an environment layout.
+                _ => Ok(Res::Captured(id)),
             }
         }
     }

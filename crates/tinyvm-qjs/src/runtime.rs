@@ -377,6 +377,10 @@ pub(crate) struct Ctx {
     pub(crate) prim_names: PrimNames,
     /// Where the three conversions live. See [`Conversions`].
     pub(crate) conversions: Conversions,
+    /// Whether any function in this program captures a binding of an
+    /// enclosing one. Widens `__fn_new` by one parameter and the record it
+    /// builds by one word; false leaves both exactly as they were.
+    pub(crate) captures: bool,
     /// Whether this program can hold an Array -- the same gate
     /// [`super::array`]'s set is emitted under.
     ///
@@ -461,7 +465,15 @@ fn one(ctx: &Ctx, rt: Rt) -> RtFunc {
             Vec::new(),
             obj_set(ctx),
         ),
-        Rt::FnNew => (vec![ValType::I32], vec![ValType::I32], fn_new(ctx)),
+        Rt::FnNew => (
+            if ctx.captures {
+                vec![ValType::I32, ValType::I32]
+            } else {
+                vec![ValType::I32]
+            },
+            vec![ValType::I32],
+            fn_new(ctx),
+        ),
     };
     RtFunc {
         name: rt.symbol(),
@@ -1774,8 +1786,19 @@ fn to_string(ctx: &Ctx) -> FnBuild {
 /// is the other thing an address buys that an index could not.
 pub(crate) const FN_ELEMENT: u32 = 0;
 
-/// How many bytes one function record takes.
+/// Where a function record keeps its environment pointer, when the program
+/// has closures at all.
+///
+/// Zero for a function that captures nothing, and the word is absent
+/// altogether from a program in which nothing captures -- see `emit`'s
+/// closure gate. This is the "one more word in this record when it lands"
+/// [`FN_ELEMENT`]'s own doc predicted.
+pub(crate) const FN_ENV: u32 = 4;
+
+/// How many bytes one function record takes: the element, plus the
+/// environment pointer once anything in the program captures.
 pub(crate) const FN_BYTES: i32 = 4;
+pub(crate) const FN_BYTES_WITH_ENV: i32 = 8;
 
 /// `__fn_new(element) -> i32`: one fresh function record.
 ///
@@ -1783,14 +1806,26 @@ pub(crate) const FN_BYTES: i32 = 4;
 /// instantiation of a function declaration, which is what 15.2.5 and 10.2.11
 /// respectively ask for.
 fn fn_new(ctx: &Ctx) -> FnBuild {
-    let mut f = FnBuild::new(1);
+    // Two parameters once the program has closures -- element and environment
+    // -- and one when it does not. The signature is built from the same flag
+    // in `one`, so the two cannot disagree.
+    let mut f = FnBuild::new(if ctx.captures { 2 } else { 1 });
     let p = f.local(ValType::I32);
     let b = &mut f.body;
-    b.push(Ins::I32Const(FN_BYTES));
+    b.push(Ins::I32Const(if ctx.captures {
+        FN_BYTES_WITH_ENV
+    } else {
+        FN_BYTES
+    }));
     b.push(ctx.call(Rt::Alloc));
     b.push(Ins::LocalTee(p));
     b.push(Ins::LocalGet(0));
     b.push(Ins::I32Store(ALIGN_WORD, FN_ELEMENT));
+    if ctx.captures {
+        b.push(Ins::LocalGet(p));
+        b.push(Ins::LocalGet(1));
+        b.push(Ins::I32Store(ALIGN_WORD, FN_ENV));
+    }
     b.push(Ins::LocalGet(p));
     f
 }

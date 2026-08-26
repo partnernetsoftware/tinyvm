@@ -588,14 +588,16 @@ fn a_host_name_used_at_two_arities_is_refused() {
 /// Every refusal says what the *engine* cannot do, never that the script is
 /// wrong. These are the ones the lowering itself raises.
 ///
-/// The lowering used to raise one more -- a function in a value position --
-/// and it does not any more: a function value is a table element index and a
-/// call through one is `call_indirect`. What is left here is the capture, and
-/// it is the one that matters: a captured binding needs an environment, and a
-/// silently miscompiled closure is the failure this refusal exists to prevent.
+/// The lowering has raised two of these and stopped raising both. A function
+/// in a value position went when function values landed; the capture went when
+/// closures did -- a captured binding has an environment now, boxed into a
+/// cell that the declaring function writes through too.
+///
+/// What is left is what the lowering still cannot express, and it is worth one
+/// row so the claim "the lowering names its own boundary" keeps a subject.
 #[test]
 fn the_lowering_names_its_own_boundary() {
-    let e = refuse("function o() { let a = 1; function i() { return a; } return i(); }");
+    let e = refuse("return 2 ** 3;");
     assert!(
         e.message.starts_with("this engine does not support "),
         "got {:?}",
@@ -603,23 +605,32 @@ fn the_lowering_names_its_own_boundary() {
     );
 }
 
+/// A capture is **lowered** now, and this is the assertion that used to say it
+/// was refused.
+///
+/// It read `a_capture_is_refused_rather_than_miscompiled`, and the second half
+/// of that name is the part worth keeping: the refusal existed so that a
+/// capture could never be silently compiled to the wrong thing. What replaces
+/// it is the one property that would have been silently wrong -- capture is by
+/// **binding**, so a write after the closure is created is visible through it.
+/// `tests/closures_m3.rs` holds the rest.
 #[test]
-fn a_capture_is_refused_rather_than_miscompiled() {
-    let e = refuse(
-        "function outer() { let a = 1; function inner() { return a; } return inner(); } return outer();",
-    );
+fn a_capture_is_lowered_by_binding_and_not_by_value() {
     assert_eq!(
-        e.message,
-        "this engine does not support closures that capture a variable yet"
+        run(
+            "function o() { let a = 1; function i() { return a; } a = 2; return i(); } return o();"
+        ),
+        Out::Number(2.0)
     );
-    assert_eq!(e.boundary, Boundary::FullJs);
 }
 
 #[test]
 fn every_refusal_speaks_for_the_engine() {
     for source in [
         "return 2 ** 3;",
-        "function o() { let a = 1; function i() { return a; } return i(); }",
+        // The capture row left when closures landed; a construct the lowering
+        // still cannot express takes its place.
+        "return [1, , 2];",
     ] {
         let e = refuse(source);
         assert!(
