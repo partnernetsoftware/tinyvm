@@ -7,6 +7,16 @@ description = "Pure-Rust .qjs -> .wasm compiler plus the eval_qjs skin over tiny
 license = "MIT OR Apache-2.0"
 publish = false
 
+# Research only, all default-off, all three deleted when Q1 is decided.
+# `plan/design-method-binding-experiment.md` §5: three ways of changing one
+# compiler, so they are packaged as features rather than as three prototypes.
+# Mutually exclusive -- `src/lib.rs` refuses more than one at compile time.
+[features]
+default = []
+method-this = []
+method-bound = []
+method-callsite = []
+
 [dependencies]
 tinyvm = { path = "../tinyvm" }
 

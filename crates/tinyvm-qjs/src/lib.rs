@@ -83,6 +83,20 @@
 
 use tinyvm::{HostGlobal, Val, WasmError, eval_wasm};
 
+// Q1 of the method-binding track: three ways of changing this compiler, so
+// they are features rather than three prototypes -- see
+// `plan/design-method-binding-experiment.md` §5. Exactly one at a time, or the
+// measurement is of a chimera rather than of a variant. All three are deleted
+// when Q1 is decided; the winner survives as an ordinary implementation.
+#[cfg(any(
+    all(feature = "method-this", feature = "method-bound"),
+    all(feature = "method-this", feature = "method-callsite"),
+    all(feature = "method-bound", feature = "method-callsite"),
+))]
+compile_error!(
+    "the method-binding variants are mutually exclusive: enable exactly one of      `method-this`, `method-bound`, `method-callsite` -- two at once would      measure neither"
+);
+
 mod array;
 mod ast;
 mod convert;
