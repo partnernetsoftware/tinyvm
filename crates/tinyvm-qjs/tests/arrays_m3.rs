@@ -450,19 +450,27 @@ fn two_neighbours_answer_with_a_syntax_error_rather_than_a_capability() {
 }
 
 #[test]
-fn an_array_method_is_absent_at_run_time_rather_than_refused_at_compile_time() {
-    // `[1, 2].map` is not a diagnostic, and that is correct rather than a gap:
-    // the receiver of a property access is a run-time fact, so an absent
+fn an_array_method_this_engine_lacks_is_absent_rather_than_refused() {
+    // `[1, 2].filter` is not a diagnostic, and that is correct rather than a
+    // gap: the receiver of a property access is a run-time fact, so an absent
     // property is `undefined` (10.1.8.1 with no prototype) and calling it is
-    // the trap. The same shape `objects_m3::a_property_of_a_non_object_traps`
-    // records for `"ab".length`.
+    // the trap.
     //
     // Worth a test of its own because the diagnostic a reader *expects* here
     // is "arrays have no methods yet", and they will not get one -- so the
     // trap has to be the documented answer rather than a surprise.
-    undefined("return [1, 2].map;");
-    undefined("return [1, 2].push;");
-    traps("let f = function (x) { return x; }; return [1, 2].map(f);");
+    //
+    // `map` and `push` were this test's two examples until `research/
+    // method-binding/` landed them. They are answers now
+    // (`method_conformance.rs`), so the examples moved to two the engine still
+    // does not have -- which keeps the row about the *shape* of the refusal
+    // rather than about which methods happen to exist today.
+    undefined("return [1, 2].filter;");
+    undefined("return [1, 2].join;");
+    traps("let f = function (x) { return x; }; return [1, 2].filter(f);");
+    // And the ones that landed really did: absent then, answers now.
+    number("return [1, 2].push(3);", 3.0);
+    number("let f = function (x) { return x + 1; }; return [1, 2].map(f)[0];", 2.0);
 }
 
 #[test]

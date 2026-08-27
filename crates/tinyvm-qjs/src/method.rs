@@ -1,23 +1,23 @@
-//! **Research only.** Q1 of the method-binding track, variant C: call-site
-//! specialisation. Deleted when Q1 is decided -- see
-//! `plan/design-method-binding-experiment.md` and `research/method-binding/`.
+//! Methods on built-in receivers: `trim`, `indexOf`, `push`, `pop`, `map`.
 //!
-//! The variant's claim is that `a.map(f)` can be compiled to a direct call and
-//! no function value need ever exist. This module holds the method *bodies*,
-//! which are the part all three variants share: only the binding differs, so
-//! only the binding is what the experiment compares. Keeping the bodies here
-//! and shared is what makes "one separable implementation, packaged three
-//! times" true rather than aspirational.
+//! # Why the binding works the way it does
 //!
-//! # A finding, recorded at the moment it was found
+//! A method call needs the receiver to reach the body, and there are three
+//! ways to arrange that. Which one this engine uses was **measured**, not
+//! argued: `research/method-binding/` implemented all three -- pass it through
+//! a `this` in the calling convention, capture it in a closure at the property
+//! read, or specialise at the call site -- ran every one against the same
+//! variant-independent corpus, and compared them on marginal cost. The call
+//! site won. `RESULTS.md` there has the decision trace and the numbers.
 //!
-//! Call-site specialisation **cannot skip the run-time receiver test.** The
-//! text says `x.trim()`; whether `x` is a String or an object with a `trim`
-//! property is not decidable until it runs, and
+//! The consequence worth knowing here: **the run-time receiver test cannot be
+//! skipped.** The text says `x.trim()`, and whether `x` is a String or an
+//! object carrying a `trim` property is not decidable until it runs --
 //! `method_conformance::a_plain_object_property_named_like_a_method_is_untouched`
-//! is the assertion that says so. So variant C saves the *function value*, not
-//! the *dispatch* -- the branch just moves from the callee's value into the
-//! call site's code. That belongs in criterion ⑥'s leak list.
+//! is the assertion that says the second must keep working. So what the call
+//! site removes is the *function value*, not the *dispatch*. That costs about
+//! 43-53 bytes per call site, and it is what the losing designs traded away
+//! by charging every unrelated function value instead.
 
 use super::repr::{
     self, BlockType, Ins, ValType, WIDTH, box_number, box_string, unbox_array, unbox_string,
@@ -25,8 +25,6 @@ use super::repr::{
 // `map`'s prefab is the one function that builds an array and calls back into
 // a function value; `box_function` is variant A's and B's property read.
 use super::repr::{box_array, const_undefined};
-#[cfg(any(feature = "method-bound", feature = "method-this"))]
-use super::repr::box_function;
 use super::array::{ARR_ELEMS, ARR_LEN, Ar, ELEM_BYTES, ELEM_PAYLOAD, ELEM_TAG};
 use super::runtime::{ALIGN_WORD, FN_ELEMENT, FN_ENV, FnBuild, Rt, RtFunc};
 
@@ -40,15 +38,13 @@ pub(crate) struct Ctx {
     pub(crate) runtime_base: u32,
     /// Which functions this module carries, and where.
     pub(crate) plan: Plan,
-    /// Research only -- Q1 variant B. The uniform call signature's type
-    /// index, and the arity it pads to.
+    /// The uniform call signature's type index, and the arity it pads to.
     ///
-    /// **This is the capability leak 4 said was missing**, handed to the
-    /// prefab layer. Nothing in this compiler's runtime could `call_indirect`
-    /// before; `__m_map_bound` has to, because its argument is a function
-    /// value. Variant C never needs it -- it inlines the loop where the
-    /// instruction already is -- so the whole of this field, and the plumbing
-    /// that fills it, is chargeable to B.
+    /// Nothing in this compiler's runtime could `call_indirect` before
+    /// `__m_map_bound`, which has to: its argument is a function value. The
+    /// experiment assumed that was impossible and designed around it; finding
+    /// out it was not is what let `map` become an ordinary prefab call, and
+    /// cut its cost per call site by more than three times.
     pub(crate) uniform: Option<(u32, u32)>,
     /// Index of `__arr_new`, the base [`super::array::SET`] is laid out from.
     ///
@@ -89,13 +85,6 @@ pub(crate) enum Me {
     Trim,
     IndexOf,
     Push,
-    /// Research only -- Q1 variants A and B. See [`bind`]: the property read
-    /// hands back a function value. Under B its environment holds the
-    /// receiver; under A the record is plain and the receiver arrives at call
-    /// time instead. One variant of the enum, two meanings, and that
-    /// difference is the whole of what Q1 compares.
-    #[cfg(any(feature = "method-bound", feature = "method-this"))]
-    Bind,
     /// `a.pop()` -- ECMA-262 23.1.3.22. The **fifth** method, added only to
     /// measure criterion ④: how many variant-specific lines a new method
     /// costs. The body below is shared; what each variant adds is counted in
@@ -123,15 +112,9 @@ pub(crate) const SET: &[Me] = &[
     Me::IndexOf,
     Me::Push,
     Me::Pop,
-    #[cfg(any(feature = "method-bound", feature = "method-this"))]
-    Me::Bind,
     Me::MapBound,
 ];
 
-/// Research only -- Q1 variant B. `Me::Bind`'s helper set is empty, so a
-/// surface built from [`Me::BOUND`] needs `want` to pull helpers in.
-#[cfg(any(feature = "method-bound", feature = "method-this"))]
-pub(crate) const _BOUND_SURFACE_USES_WANT: () = ();
 
 /// Which of [`SET`] a particular module carries, and where each one lands.
 ///
@@ -166,30 +149,7 @@ impl Plan {
         }
     }
 
-    /// Variant B's plan, as far as B is implemented: `trim` and what it
-    /// needs, plus the binder.
-    ///
-    /// **Not per *call site*, unlike variant C's.** B cannot gate on whether
-    /// the source names `trim`, because the element index is baked into
-    /// `obj_get`, which is emitted before anyone knows. So any program that
-    /// can read a String property carries the whole of B's exposed surface.
-    /// C pays nothing for a method it does not call; B pays for every method
-    /// it exposes. That asymmetry is a result, not an implementation detail.
-    #[cfg(any(feature = "method-bound", feature = "method-this"))]
-    pub(crate) fn bound_surface(bound: &[Me]) -> Self {
-        let mut plan = Self {
-            enabled: vec![Me::Bind],
-        };
-        for me in bound {
-            plan.want(*me);
-        }
-        plan
-    }
 
-    #[cfg_attr(
-        any(feature = "method-bound", feature = "method-this"),
-        allow(dead_code, reason = "variant C asks; variant B's surface is never empty")
-    )]
     pub(crate) fn is_empty(&self) -> bool {
         self.enabled.is_empty()
     }
@@ -221,16 +181,10 @@ impl Me {
             Me::IndexOf => "__m_index_of",
             Me::Push => "__m_push",
             Me::Pop => "__m_pop",
-            #[cfg(any(feature = "method-bound", feature = "method-this"))]
-            Me::Bind => "__m_bind",
             Me::MapBound => "__m_map_bound",
         }
     }
 
-    #[cfg_attr(
-        any(feature = "method-bound", feature = "method-this"),
-        allow(dead_code, reason = "variant C's call-site machinery")
-    )]
     /// The method a `recv.name(args)` call site denotes, or `None` when this
     /// variant does not specialise it. The arity is part of the question: a
     /// `trim` called with an argument is not this `trim`, and specialising it
@@ -246,10 +200,6 @@ impl Me {
         }
     }
 
-    #[cfg_attr(
-        any(feature = "method-bound", feature = "method-this"),
-        allow(dead_code, reason = "variant C's call-site machinery")
-    )]
     /// The tag a call site must see before it may take the fast path. Two
     /// methods, two receivers -- so the call site's type test is per method,
     /// not one shared test. Small, but it is the call site that carries it,
@@ -258,49 +208,19 @@ impl Me {
         matches!(self, Me::Push | Me::Pop | Me::MapBound)
     }
 
-    #[cfg_attr(
-        any(feature = "method-bound", feature = "method-this"),
-        allow(dead_code, reason = "variant C's call-site machinery")
-    )]
     /// Whether this method's body reaches into the array set, which the
     /// *array* gate controls. See [`Ctx::array_base`].
     pub(crate) fn needs_arrays(self) -> bool {
         matches!(self, Me::Push | Me::MapBound)
     }
 
-    /// Where this function sits, given the runtime `Ctx` that knows the plan.
-    /// A shim so `runtime.rs` does not have to carry a `Plan`.
-    /// Where this function sits in variant B's surface, given which methods
-    /// the program reads by name.
-    #[cfg(any(feature = "method-bound", feature = "method-this"))]
-    pub(crate) fn offset_in_bound(self, bound: &[Me]) -> u32 {
-        Plan::bound_surface(bound).offset(self)
-    }
 
-    /// Research only -- Q1 variant B. The bound methods, in the fixed order
-    /// their table elements are reserved in: the source name, the body to
-    /// call, how many arguments the adapter forwards, and whether the
-    /// receiver is an Array (so the arm goes in `array::prop_get`) or a
-    /// String (so it goes in `runtime::obj_get`).
-    #[cfg(any(feature = "method-bound", feature = "method-this"))]
-    pub(crate) const BOUND: &'static [(&'static str, Me, u32, bool)] = &[
-        ("trim", Me::Trim, 0, false),
-        ("indexOf", Me::IndexOf, 1, false),
-        ("push", Me::Push, 1, true),
-        ("pop", Me::Pop, 0, true),
-        // `map`'s body reads the receiver out of the environment itself,
-        // because it also has to `call_indirect`; its adapter forwards the
-        // environment rather than unpacking it.
-        ("map", Me::MapBound, 1, true),
-    ];
 
     /// What this method's body calls, so [`Plan`] can pull them in.
     fn helpers(self) -> Vec<Me> {
         match self {
             Me::Trim => vec![Me::WsWidth],
             Me::IndexOf => vec![Me::Units],
-            #[cfg(any(feature = "method-bound", feature = "method-this"))]
-            Me::Bind => Vec::new(),
             Me::WsWidth | Me::Units | Me::Push | Me::Pop | Me::MapBound => Vec::new(),
         }
     }
@@ -316,7 +236,6 @@ fn values(n: usize) -> Vec<ValType> {
 
 fn one(ctx: &Ctx, me: Me) -> RtFunc {
     let i32_ = ValType::I32;
-    let i64_ = ValType::I64;
     let (params, results, f) = match me {
         Me::WsWidth => (vec![i32_], vec![i32_], ws_width()),
         Me::Units => (vec![i32_, i32_], vec![i32_], units()),
@@ -324,19 +243,7 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
         Me::IndexOf => (values(2), values(1), index_of(ctx)),
         Me::Push => (values(2), values(1), push(ctx)),
         Me::Pop => (values(1), values(1), pop()),
-        // Unreachable: `Plan::want` never places a method that has no prefab,
-        // and `build` only walks the plan.
-        #[cfg(any(feature = "method-bound", feature = "method-this"))]
-        Me::Bind => (vec![i32_, i64_, i32_], values(1), bind(ctx)),
-        Me::MapBound => (
-            if cfg!(feature = "method-bound") {
-                vec![i32_, i32_, i64_]
-            } else {
-                values(2)
-            },
-            values(1),
-            map_bound(ctx),
-        ),
+        Me::MapBound => (values(2), values(1), map_bound(ctx)),
     };
     RtFunc {
         name: me.symbol(),
@@ -374,8 +281,8 @@ fn ws_width() -> FnBuild {
     b.push(Ins::I32Const(9));
     b.push(Ins::I32Sub);
     // `< 5` rather than `<= 4`: the IR has no `i32.le_u`, and adding one to
-    // production code for a research variant is exactly the kind of quiet
-    // widening this experiment is supposed to detect rather than commit.
+    // production code for one method would be a quiet widening of the IR for
+    // a caller's convenience.
     b.push(Ins::I32Const(5));
     b.push(Ins::I32LtU);
     b.push(Ins::LocalGet(b0));
@@ -675,8 +582,8 @@ fn trim(ctx: &Ctx) -> FnBuild {
 /// The same rule `runtime::length` uses -- a non-continuation byte starts a
 /// character, and a byte at or above `0xf0` is a surrogate pair -- applied to
 /// a prefix rather than to the whole. Duplicated rather than shared because
-/// `__len` takes a JS value and counts all of it; a research variant does not
-/// get to widen a production signature.
+/// `__len` takes a JS value and counts all of it, and widening its signature
+/// for one caller would be the wrong trade.
 fn units() -> FnBuild {
     let mut f = FnBuild::new(2);
     let i = f.local(ValType::I32);
@@ -845,68 +752,7 @@ fn index_of(ctx: &Ctx) -> FnBuild {
     f
 }
 
-/// Research only -- Q1 variant B. The environment a bound method carries.
-///
-/// Twelve bytes: the receiver, stored as the V1 pair it already is. **A second
-/// environment layout**, and that is a leak: the closure machinery's
-/// environment is a vector of *cells*, because a closure's binding can be
-/// written through. A bound receiver cannot -- 23.1.3's methods do not rebind
-/// their `this` -- so a cell would be a word of indirection per call for a
-/// mutation that cannot happen. Cheaper, and one more shape in the engine.
-#[cfg(any(feature = "method-bound", feature = "method-this"))]
-pub(crate) const BOUND_BYTES: i32 = 12;
 
-/// `__m_bind(recv_tag, recv_payload, element) -> (tag, payload)`, variant B's
-/// whole mechanism: a property read hands back a function value whose
-/// environment already holds the receiver.
-///
-/// Where variant C puts a type test at every call site, this puts an
-/// allocation at every property *read*. Which is cheaper is exactly what
-/// criterion ③b is for.
-#[cfg(any(feature = "method-bound", feature = "method-this"))]
-pub(crate) fn bind(ctx: &Ctx) -> FnBuild {
-    let mut f = FnBuild::new(WIDTH + 1);
-    let env = f.local(ValType::I32);
-    let b = &mut f.body;
-
-    // Research only -- Q1 variant A. The receiver does **not** travel in the
-    // value: it arrives at call time through the calling convention. So the
-    // property read allocates a plain function record and the two parameters
-    // holding the receiver are simply unread.
-    //
-    // That is the one line of difference between A and B, and it is why they
-    // share everything else: same table element, same adapter shape, same
-    // bodies. What differs is *when* the receiver is captured -- at the read
-    // (B) or at the call (A) -- which is exactly the question Q1 asks.
-    if cfg!(feature = "method-this") {
-        let mut inner = Vec::new();
-        inner.push(Ins::LocalGet(WIDTH));
-        inner.push(Ins::I32Const(0));
-        inner.push(ctx.rt(Rt::FnNew));
-        let mut out = Vec::new();
-        box_function(&inner, &mut out);
-        f.body.extend(out);
-        return f;
-    }
-
-    b.push(Ins::I32Const(BOUND_BYTES));
-    b.push(ctx.rt(Rt::Alloc));
-    b.push(Ins::LocalTee(env));
-    b.push(Ins::LocalGet(0));
-    b.push(Ins::I32Store(ALIGN_WORD, 0));
-    b.push(Ins::LocalGet(env));
-    b.push(Ins::LocalGet(1));
-    b.push(Ins::I64Store(ALIGN_WORD, 4));
-
-    let mut inner = Vec::new();
-    inner.push(Ins::LocalGet(WIDTH));
-    inner.push(Ins::LocalGet(env));
-    inner.push(ctx.rt(Rt::FnNew));
-    let mut out = Vec::new();
-    box_function(&inner, &mut out);
-    f.body.extend(out);
-    f
-}
 
 /// Push a Number literal as a V1 pair.
 fn number_const(b: &mut Vec<Ins>, v: i32) {
@@ -946,30 +792,18 @@ fn push(ctx: &Ctx) -> FnBuild {
     f
 }
 
-/// Research only -- Q1 variant B. `a.map(f)` as a prefab.
+/// `a.map(f)` -- ECMA-262 23.1.3.20.
 ///
-/// Parameters are the environment (holding the receiver), then the callback as
-/// a V1 pair -- the shape the adapter forwards. The loop is the same one
-/// variant C inlines at every call site; here it exists **once**, which is
-/// exactly the trade the two variants are being measured on.
-#[cfg(any(
-    feature = "method-bound",
-    feature = "method-this",
-    feature = "method-callsite"
-))]
+/// The receiver and the callback, both as V1 pairs. This is the one prefab
+/// that calls **back** into a guest function value, which is why the set needs
+/// the uniform signature's type index at all.
 fn map_bound(ctx: &Ctx) -> FnBuild {
     let (type_index, arity) = ctx
         .uniform
         .expect("variant B's map needs the uniform signature");
     // Under A the receiver arrives as a pair rather than as an environment
     // pointer, so the parameter list is one slot wider.
-    // The receiver is a pair everywhere except variant B, where it comes out
-    // of the environment the property read allocated.
-    let mut f = FnBuild::new(if cfg!(feature = "method-bound") {
-        1 + WIDTH
-    } else {
-        2 * WIDTH
-    });
+    let mut f = FnBuild::new(2 * WIDTH);
     let a = f.local(ValType::I32);
     let out = f.local(ValType::I32);
     let i = f.local(ValType::I32);
@@ -977,17 +811,8 @@ fn map_bound(ctx: &Ctx) -> FnBuild {
     let tag = f.local(ValType::I32);
     let payload = f.local(ValType::I64);
 
-    // The receiver: out of the environment under B, straight off the
-    // parameters under A. Same body either way, which is the point.
-    if cfg!(feature = "method-bound") {
-        f.body.push(Ins::LocalGet(0));
-        f.body.push(Ins::I32Load(ALIGN_WORD, 0));
-        f.body.push(Ins::LocalGet(0));
-        f.body.push(Ins::I64Load(ALIGN_WORD, 4));
-    } else {
-        f.body.push(Ins::LocalGet(0));
-        f.body.push(Ins::LocalGet(1));
-    }
+    f.body.push(Ins::LocalGet(0));
+    f.body.push(Ins::LocalGet(1));
     f.body.push(Ins::LocalSet(payload));
     f.body.push(Ins::LocalSet(tag));
     unbox_array_from(tag, payload, &mut f.body);
@@ -1010,16 +835,11 @@ fn map_bound(ctx: &Ctx) -> FnBuild {
 
     // The callback's own environment goes first: the uniform signature leads
     // with it, and the callback's record is what holds the answer.
-    let cb = if cfg!(feature = "method-bound") { 2 } else { 3 };
+    let cb = 3;
     b.push(Ins::LocalGet(cb));
     b.push(Ins::I32WrapI64);
     b.push(Ins::I32Load(ALIGN_WORD, FN_ENV));
 
-    // Under A the uniform signature carries a receiver, and 23.1.3.20 calls
-    // the callback with `undefined` as its `this` when no thisArg is given.
-    if cfg!(feature = "method-this") {
-        const_undefined(b);
-    }
     b.push(Ins::LocalGet(a));
     b.push(Ins::LocalGet(i));
     b.push(ctx.arr(Ar::Get));

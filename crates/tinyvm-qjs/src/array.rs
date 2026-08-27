@@ -157,14 +157,6 @@ impl Names {
 /// What this set needs to name the functions it calls.
 #[derive(Debug, Clone)]
 pub(crate) struct Ctx {
-    /// Research only -- Q1 variant B. `(method set base, `__m_map_bound`'s
-    /// table element, the interned "map")`, or `None`.
-    ///
-    /// The arm sits inside the key dispatch this function already does, next
-    /// to `length` -- the same free ride B's String methods get inside
-    /// `obj_get`.
-    #[cfg(any(feature = "method-bound", feature = "method-this"))]
-    pub(crate) bound_arrays: Option<super::runtime::BoundStrings>,
     /// Index of `__arr_new`.
     pub(crate) func_base: u32,
     /// Index of `__add` -- the base `runtime::SET` is laid out from.
@@ -643,22 +635,6 @@ fn prop_get(ctx: &Ctx) -> FnBuild {
     b.push(Ins::Return);
     b.push(Ins::End);
 
-    // Research only -- Q1 variant B, riding the key dispatch above.
-    #[cfg(any(feature = "method-bound", feature = "method-this"))]
-    if let Some(bound) = &ctx.bound_arrays {
-        for (name, element) in &bound.names {
-            b.push(Ins::LocalGet(k));
-            b.push(Ins::I32Const(*name));
-            b.push(ctx.rt(Rt::StrEq));
-            b.push(Ins::If(BlockType::Empty));
-            b.push(Ins::LocalGet(recv));
-            b.push(Ins::LocalGet(recv + 1));
-            b.push(Ins::I32Const(*element));
-            b.push(Ins::Call(bound.bind));
-            b.push(Ins::Return);
-            b.push(Ins::End);
-        }
-    }
 
     // Absent, not a fault -- for the reason `obj_get` gives.
     const_undefined(b);

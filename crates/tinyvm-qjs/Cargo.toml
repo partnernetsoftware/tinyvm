@@ -7,16 +7,6 @@ description = "Pure-Rust .qjs -> .wasm compiler plus the eval_qjs skin over tiny
 license = "MIT OR Apache-2.0"
 publish = false
 
-# Research only, all default-off, all three deleted when Q1 is decided.
-# `plan/design-method-binding-experiment.md` §5: three ways of changing one
-# compiler, so they are packaged as features rather than as three prototypes.
-# Mutually exclusive -- `src/lib.rs` refuses more than one at compile time.
-[features]
-default = []
-method-this = []
-method-bound = []
-method-callsite = []
-
 [dependencies]
 tinyvm = { path = "../tinyvm" }
 
@@ -36,10 +26,3 @@ wat = "1"
 # agreed with serde's *text* and disagreed with serde's *value*. An oracle that
 # does not round-trip cannot judge one that does.
 serde_json = { version = "1", features = ["float_roundtrip"] }
-
-# Research only -- Q1's measurement target, kept in the research track rather
-# than in `tests/` because it belongs to the experiment and not to the crate's
-# suite. Deleted with the rest of the track.
-[[test]]
-name = "method_measure"
-path = "../../research/method-binding/measure.rs"

@@ -1,19 +1,12 @@
 //! Criterion ① of the method-binding experiment: the four methods run and the
 //! answers are right.
 //!
-//! **This file is variant-independent on purpose.** It is written before any
-//! variant exists so that no variant's convenience can shape what "correct"
-//! means, and all three must pass it unchanged. A variant that needs this file
-//! edited has failed criterion ①; editing it is the finding, not the fix.
-//! See `plan/design-method-binding-experiment.md` §2 and §3.
-//!
-//! The whole file compiles to nothing unless exactly one variant feature is
-//! on, which is also how it stays out of the default build's way.
-#![cfg(any(
-    feature = "method-this",
-    feature = "method-bound",
-    feature = "method-callsite"
-))]
+//! This file was written **before any implementation existed**, as criterion
+//! ① of `plan/design-method-binding-experiment.md`: all three candidate
+//! binding mechanisms had to pass it unchanged, and all three did. The
+//! mechanism that shipped was chosen on the other criteria, not on this one --
+//! which is the reason the file is worth keeping now that the experiment is
+//! over. It says what the methods must *do*, with no reference to how.
 
 use tinyvm::{Limits, Val, WasmInstance, WasmModule};
 use tinyvm_qjs::{Value, compile_qjs_m1};

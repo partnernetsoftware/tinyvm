@@ -83,35 +83,22 @@
 
 use tinyvm::{HostGlobal, Val, WasmError, eval_wasm};
 
-// Q1 of the method-binding track: three ways of changing this compiler, so
-// they are features rather than three prototypes -- see
-// `plan/design-method-binding-experiment.md` §5. Exactly one at a time, or the
-// measurement is of a chimera rather than of a variant. All three are deleted
-// when Q1 is decided; the winner survives as an ordinary implementation.
-#[cfg(any(
-    all(feature = "method-this", feature = "method-bound"),
-    all(feature = "method-this", feature = "method-callsite"),
-    all(feature = "method-bound", feature = "method-callsite"),
-))]
-compile_error!(
-    "the method-binding variants are mutually exclusive: enable exactly one of      `method-this`, `method-bound`, `method-callsite` -- two at once would      measure neither"
-);
-
 mod array;
 mod ast;
-/// Research only -- Q1 variant C. Deleted when the track is decided.
-#[cfg(any(
-    feature = "method-callsite",
-    feature = "method-bound",
-    feature = "method-this"
-))]
-mod method;
 mod convert;
 mod diag;
 mod emit;
 mod encode;
 mod ir;
 mod lex;
+/// Methods on built-in receivers -- `trim`, `indexOf`, `push`, `pop`, `map`.
+///
+/// The binding mechanism here was chosen by a measured experiment rather than
+/// by argument: `research/method-binding/` compared three ways of getting the
+/// receiver to the body and this one -- specialise at the call site -- won on
+/// the leak list after the two slopes split. `RESULTS.md` there has the trace,
+/// the numbers, and the three readings that were overturned along the way.
+mod method;
 mod opts;
 mod parse;
 mod qjs2wasm;
