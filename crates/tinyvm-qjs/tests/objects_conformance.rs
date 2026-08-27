@@ -1153,10 +1153,16 @@ fn proto_is_an_ordinary_key_here() {
 fn a_property_of_a_primitive_faults() {
     traps("return (1).a;");
     traps("return true.a;");
-    traps("return \"abc\".length;");
-    traps("const s = \"abc\"; return s.length;");
+    // The three `.length` rows became answers when the gated `obj_get` arm
+    // landed; `heap_attack::string_length_is_an_answer_and_the_next_property_is_not`
+    // holds them. What this test is about did not change: `.trim` and
+    // `.toFixed` are exactly the members a script reaches for, and answering
+    // `undefined` for them would still be silently wrong.
+    number("return \"abc\".length;", 3.0);
+    number("const s = \"abc\"; return s.length;", 3.0);
+    number("const o = { s: \"abc\" }; return o.s.length;", 3.0);
+    traps("return \"abc\".trim;");
     traps("const n = 1; return n.toFixed;");
-    traps("const o = { s: \"abc\" }; return o.s.length;");
     // Assigning to one faults too, rather than being the silent no-op
     // ECMA-262 makes it in sloppy mode.
     traps("const s = \"abc\"; s.x = 1; return 0;");

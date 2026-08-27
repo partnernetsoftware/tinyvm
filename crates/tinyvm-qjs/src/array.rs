@@ -581,10 +581,14 @@ fn prop_get(ctx: &Ctx) -> FnBuild {
     let k = f.local(ValType::I32);
     let b = &mut f.body;
 
-    // -- Object: exactly the pre-array path.
+    // -- Everything that is not an Array is `obj_get`'s question, and one
+    // test asks it. That includes the Object receiver this used to name
+    // separately, the String receiver whose `.length` `obj_get` answers, and
+    // `undefined[k]` / `null[k]`, which are the TypeErrors `obj_get`'s own
+    // receiver test raises and stay one trap.
     b.push(Ins::LocalGet(recv));
-    b.push(Ins::I32Const(TAG_OBJECT));
-    b.push(Ins::I32Eq);
+    b.push(Ins::I32Const(TAG_ARRAY));
+    b.push(Ins::I32Ne);
     b.push(Ins::If(BlockType::Empty));
     b.push(Ins::LocalGet(recv));
     b.push(Ins::LocalGet(recv + 1));
@@ -593,15 +597,6 @@ fn prop_get(ctx: &Ctx) -> FnBuild {
     b.push(ctx.rt(Rt::ToStr));
     b.push(ctx.rt(Rt::ObjGet));
     b.push(Ins::Return);
-    b.push(Ins::End);
-
-    // -- Not an Array either: `undefined[k]` and `null[k]` are the TypeErrors
-    // `obj_get`'s receiver test raises, and they stay one trap.
-    b.push(Ins::LocalGet(recv));
-    b.push(Ins::I32Const(TAG_ARRAY));
-    b.push(Ins::I32Ne);
-    b.push(Ins::If(BlockType::Empty));
-    b.push(Ins::Unreachable);
     b.push(Ins::End);
 
     b.push(Ins::LocalGet(recv + 1));

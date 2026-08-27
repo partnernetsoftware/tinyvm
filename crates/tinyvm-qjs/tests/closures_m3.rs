@@ -237,14 +237,22 @@ fn a_program_with_no_capture_is_byte_identical_to_what_it_was() {
     // *unconditional* runtime. This one is kept by construction instead: the
     // environment parameter, the record word and the widened uniform signature
     // are each behind `Scan::captures`.
+    //
+    // The three numbers moved **down** by 19 on 2026-08-28, and once. `__len`
+    // sits in the unconditional runtime, so it was emitted in every module and
+    // called from none of them; the string-`.length` milestone gave it a real
+    // body and gated that body on the program naming the property. With the
+    // gate off it is now an `unreachable` stub, which is 19 bytes less dead
+    // weight than the byte-count body it replaced. Nothing here started paying
+    // for anything -- the opposite.
     for (source, want) in [
-        ("return 1;", 9_784),
-        ("let o = {a:1}; o.b = 2; return o.a;", 9_905),
+        ("return 1;", 9_765),
+        ("let o = {a:1}; o.b = 2; return o.a;", 9_886),
         (
             "function mk() { return function () { return 1; }; } let f = mk(); return f();",
-            9_948,
+            9_929,
         ),
-        ("return JSON.stringify({a:1});", 15_414),
+        ("return JSON.stringify({a:1});", 15_386),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(

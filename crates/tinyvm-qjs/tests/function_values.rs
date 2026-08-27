@@ -929,13 +929,19 @@ fn the_whole_fleet_library_compiles_and_its_methods_are_reachable() {
     //   array.
     //
     // A program with **no** array and no `JSON` pays neither: `return 1;` is
-    // 9 784 bytes before and after, to the byte, and so are the object-only
+    // the same size before and after, to the byte, and so are the object-only
     // and computed-key-without-array programs. That is the promise
     // `plan/design-array-milestone.md` §1.1 makes, and it is kept by emitting
     // `__typeof`'s and `__truthy`'s Array arms under the same gate -- without
     // which they cost every module 11 bytes, which is what the first
     // measurement of this milestone actually showed.
-    assert_eq!(wasm.len(), 22_457, "the whole library's emitted size moved");
+    //
+    // This number moved from 22 457 to 22 429 on 2026-08-28, and not for
+    // anything in this file: `__len` was emitted in every module and called
+    // from none, and the string-`.length` milestone gated its body. This
+    // library has no `.length` in it, so it gets the stub. `arrays_m3`'s
+    // three baselines record the same 19-byte drop and the arithmetic.
+    assert_eq!(wasm.len(), 22_429, "the whole library's emitted size moved");
 }
 
 /// The same shape, reduced to what can run with no host at all: a namespace

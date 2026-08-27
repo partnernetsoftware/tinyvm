@@ -92,6 +92,11 @@ impl Prog {
         let type_names = Some(TypeNames::intern(&mut pool));
         let prim_names = PrimNames::intern(&mut pool);
         let cv_names = convert::Names::intern(&mut pool);
+        // `__len`'s body is gated: with `string_length: None` the compiler
+        // emits an unreachable stub, because nothing in such a program can
+        // call it. These tests call it directly, so they are the case where
+        // the gate is on.
+        let length_name = Some(pool.intern("length"));
         Prog {
             pool,
             // No imports in these modules, so the runtime starts at 0, and one
@@ -105,6 +110,7 @@ impl Prog {
                 arrays: false,
                 // These build the runtime directly; no program, so nothing captures.
                 captures: false,
+                string_length: length_name,
             },
             cv: convert::Ctx {
                 func_base: CONVERT_BASE,
@@ -497,6 +503,7 @@ fn add_tests_number_before_string() {
         arrays: false,
         // These build the runtime directly; no program, so nothing captures.
         captures: false,
+        string_length: None,
     };
     let funcs = runtime::build(&ctx);
     let add = funcs
@@ -547,6 +554,7 @@ fn a_new_type_costs_nothing_at_a_site_that_never_sees_it() {
         arrays: false,
         // These build the runtime directly; no program, so nothing captures.
         captures: false,
+        string_length: None,
     };
     let arms: Vec<&'static str> = runtime::build(&ctx)
         .iter()
@@ -760,6 +768,7 @@ fn typeof_costs_nothing_in_a_program_that_never_asks() {
         arrays: false,
         // These build the runtime directly; no program, so nothing captures.
         captures: false,
+        string_length: None,
     };
     let built = runtime::build(&ctx);
     let quiet_typeof = built
@@ -824,10 +833,30 @@ fn concatenation_of_empty_strings_is_still_a_string() {
     assert_eq!(Prog::binary(Rt::Add, V::Str(""), V::Str("x")).string(), "x");
 }
 
+/// `__len` counts **UTF-16 code units**, which is what ECMA-262 6.1.4 and
+/// 22.1.3.2 make a String's length -- not the UTF-8 bytes this engine stores
+/// them in. The two agree on every ASCII string and part company on the rest,
+/// which is exactly the shape of a wrong answer that hides: `"café"` is five
+/// bytes and four units.
 #[test]
-fn length_is_a_number() {
+fn length_is_a_number_of_utf16_code_units() {
     assert_eq!(Prog::unary(Rt::Len, V::Str("hello")).number(), 5.0);
     assert_eq!(Prog::unary(Rt::Len, V::Str("")).number(), 0.0);
+    // Two bytes, one unit.
+    assert_eq!(Prog::unary(Rt::Len, V::Str("\u{e9}")).number(), 1.0);
+    assert_eq!(Prog::unary(Rt::Len, V::Str("caf\u{e9}")).number(), 4.0);
+    // Three bytes, one unit.
+    assert_eq!(Prog::unary(Rt::Len, V::Str("\u{4e2d}")).number(), 1.0);
+    assert_eq!(Prog::unary(Rt::Len, V::Str("\u{ffff}")).number(), 1.0);
+    // Four bytes, and above U+FFFF, so a surrogate *pair*: two units.
+    assert_eq!(Prog::unary(Rt::Len, V::Str("\u{10000}")).number(), 2.0);
+    assert_eq!(Prog::unary(Rt::Len, V::Str("\u{1f600}")).number(), 2.0);
+    assert_eq!(Prog::unary(Rt::Len, V::Str("a\u{1f600}b")).number(), 4.0);
+    // Every width at once, so a per-width mistake cannot cancel out.
+    assert_eq!(
+        Prog::unary(Rt::Len, V::Str("a\u{e9}\u{4e2d}\u{1f600}")).number(),
+        5.0
+    );
 }
 
 #[test]

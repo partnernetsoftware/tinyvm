@@ -126,12 +126,13 @@ fn a_template_without_substitutions_is_the_string_it_spells() {
     // can be used for, this can be used for.
     string("return `ab` + `cd`;", "abcd");
     string("const o = { a: 1 }; return typeof `x`;", "string");
-    // A property of a String traps at run time -- this engine has no String
-    // prototype (`objects_m3::a_property_of_a_non_object_traps`). A template
-    // inherits that exactly, which is one more way of saying it *is* a String
-    // and not a String-like of its own.
-    assert!(attempt("return `ab`.length;").is_err());
-    assert!(attempt("return \"ab\".length;").is_err());
+    // A template inherits a String's properties exactly, which is one more
+    // way of saying it *is* a String and not a String-like of its own: the
+    // one property this engine answers, and the ones it still traps on.
+    assert_eq!(run("return `ab`.length;"), Out::Number(2.0));
+    assert_eq!(run("return `caf\u{e9}`.length;"), Out::Number(4.0));
+    assert_eq!(run("return `a${1}b`.length;"), Out::Number(3.0));
+    assert!(attempt("return `ab`.toUpperCase;").is_err());
 }
 
 #[test]

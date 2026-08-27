@@ -615,6 +615,7 @@ pub(crate) mod m1 {
             func_base: runtime_base,
             heap_global: HEAP_GLOBAL,
             type_names: scan.type_of.then(|| runtime::TypeNames::intern(&mut pool)),
+            string_length: scan.string_length.then(|| pool.intern("length")),
             prim_names: runtime::PrimNames::intern(&mut pool),
             conversions: Conversions {
                 num_to_string: convert_base + convert::Cv::NumToString.offset(),
@@ -1302,6 +1303,16 @@ pub(crate) mod m1 {
         /// tree, read straight off `Function::captures`, not a guess about
         /// syntax.
         captures: bool,
+        /// Whether the program can read a property off a String, which is:
+        /// it writes `.length` as a static key, or it writes any computed key
+        /// at all. Gates the one arm of [`runtime::obj_get`] that answers
+        /// `"ab".length` and the four bytes that arm compares against.
+        ///
+        /// Not exact in the computed case, and it cannot be: whether a
+        /// receiver is a String is a run-time fact. Exact in the static case,
+        /// which is the one that matters -- a program with no `.length` and no
+        /// `o[k]` in it is byte-identical to what it was.
+        string_length: bool,
         /// Whether the program can produce an Array, which is exactly: it
         /// writes an ArrayLiteral, or it names `JSON`.
         ///
@@ -1605,9 +1616,23 @@ pub(crate) mod m1 {
             ast::ExprKind::Member { object, key } => {
                 host_expr(object, scan)?;
                 match key {
-                    ast::MemberKey::Static(_) => Ok(()),
+                    ast::MemberKey::Static(name) => {
+                        scan.string_length |= name == "length";
+                        Ok(())
+                    }
                     ast::MemberKey::Computed(key) => {
                         scan.computed_key = true;
+                        // A computed key *could* be the string "length", so
+                        // the flag goes on -- unless the text already settles
+                        // it. A number literal is never that string, and a
+                        // string literal is or is not, in the source. This is
+                        // what keeps `a[0]` and `o["a"]` from turning the arm
+                        // on for every program that indexes anything.
+                        scan.string_length |= match &key.kind {
+                            ast::ExprKind::Int(_) | ast::ExprKind::Num(_) => false,
+                            ast::ExprKind::Str(text) => text == "length",
+                            _ => true,
+                        };
                         host_expr(key, scan)
                     }
                 }

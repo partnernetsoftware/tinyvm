@@ -400,14 +400,27 @@ fn property_access_on_a_primitive_traps() {
     traps("var x = undefined; x.a = 1; return 0;");
 }
 
-/// `"abc".length` is 3 in ECMA-262 only because `String.prototype` exists.
-/// There is no prototype here, so a trap is the honest answer -- but the
-/// engine knows the receiver is a String at compile time, so record what it
-/// actually does.
+/// `"abc".length` is 3 in ECMA-262 because `String.prototype` exists. There
+/// is still no prototype here -- what there is, is one arm of `obj_get` that
+/// answers this one property, gated on the program mentioning it. So the
+/// answer is right and the mechanism is not the spec's; the difference shows
+/// in the *next* property, which still traps.
+///
+/// The count is UTF-16 code units and not the UTF-8 bytes the record holds --
+/// see `repr_v1::length_is_a_number_of_utf16_code_units`, where the widths are
+/// pinned. Answering the byte count would agree with the spec on every ASCII
+/// string and disagree silently on the rest.
 #[test]
-fn string_length_is_a_trap_not_an_answer() {
-    traps("var s = \"abc\"; return s.length;");
-    traps("return \"abc\".length;");
+fn string_length_is_an_answer_and_the_next_property_is_not() {
+    number("var s = \"abc\"; return s.length;", 3.0);
+    number("return \"abc\".length;", 3.0);
+    number("return \"caf\u{e9}\".length;", 4.0);
+    // Every other property of a String still traps rather than becoming
+    // `undefined`: `"abc".toUpperCase` is a real function in ECMA-262, so
+    // `undefined` there would be a wrong answer that looks like a right one.
+    traps("return \"abc\".toUpperCase;");
+    traps("return \"abc\".trim;");
+    traps("const s = \"abc\"; s.x = 1; return 0;");
 }
 
 // =========================================================================

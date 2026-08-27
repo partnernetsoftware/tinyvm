@@ -576,10 +576,24 @@ fn a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was() {
     // the milestone landed; the first measurement of it broke all three by 11
     // bytes, because `__typeof` and `__truthy` are in the *unconditional*
     // runtime and their Array arms had been appended there unguarded.
+    //
+    // The three numbers moved **down** by 19 on 2026-08-28, and once. `__len`
+    // sits in the unconditional runtime, so it was emitted in every module and
+    // called from none of them; the string-`.length` milestone gave it a real
+    // body and gated that body on the program naming the property. With the
+    // gate off it is now an `unreachable` stub, which is 19 bytes less dead
+    // weight than the byte-count body it replaced. Nothing here started paying
+    // for anything -- the opposite.
     for (source, want) in [
-        ("return 1;", 9_784),
-        ("let o = {a:1}; o.b = 2; return o.a;", 9_905),
-        ("let o = {a:1}; let k = \"a\"; return o[k];", 9_865),
+        ("return 1;", 9_765),
+        ("let o = {a:1}; o.b = 2; return o.a;", 9_886),
+        // A computed key whose *value* the text does not settle. This one
+        // moved **up** by 117, and not for arrays: a computed key could
+        // evaluate to `"length"`, so it turns on the string-`.length` arm of
+        // `obj_get`. The row below is the same program with the key written
+        // out, where the text settles it and nothing turns on.
+        ("let o = {a:1}; let k = \"a\"; return o[k];", 9_982),
+        ("let o = {a:1}; return o[\"a\"];", 9_828),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(
@@ -598,10 +612,13 @@ fn naming_json_brings_the_array_set_because_parse_can_return_one() {
         .expect("compiles")
         .len();
     assert_eq!(
-        n, 15_414,
+        n, 15_386,
         "the array set costs 1 130 bytes on top of the JSON set's 14 284 -- 753 for the \
-         type and 377 more for `JSON.parse`/`JSON.stringify` of one. If this moved, say \
-         so in `function_values::the_whole_fleet_library_compiles_and_its_methods_are_reachable`, \
+         type and 377 more for `JSON.parse`/`JSON.stringify` of one. That arithmetic is \
+         unchanged; the total went down by 28 on 2026-08-28 because `__len`'s dead body \
+         got gated, which is 19 bytes here plus 9 of shifted LEB128 widths. If this moved \
+         again, say so in \
+         `function_values::the_whole_fleet_library_compiles_and_its_methods_are_reachable`, \
          which quotes the same arithmetic"
     );
 }

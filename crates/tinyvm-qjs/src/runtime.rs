@@ -377,6 +377,19 @@ pub(crate) struct Ctx {
     pub(crate) prim_names: PrimNames,
     /// Where the three conversions live. See [`Conversions`].
     pub(crate) conversions: Conversions,
+    /// Where the string `"length"` lives, for a program that can read a
+    /// property off a String -- or `None` for one that cannot.
+    ///
+    /// `Some` widens [`obj_get`] by one arm and interns four bytes; `None`
+    /// leaves both exactly as they were. The predicate is: the program writes
+    /// `.length` as a static key, **or** it writes any computed key at all,
+    /// since a computed key can evaluate to `"length"` and the text cannot say
+    /// it does not.
+    ///
+    /// Over-approximate in the computed case and exact otherwise, which is the
+    /// most a gate on a *run-time* fact can be: unlike an ArrayLiteral, a
+    /// String receiver is not something the source announces.
+    pub(crate) string_length: Option<i32>,
     /// Whether any function in this program captures a binding of an
     /// enclosing one. Widens `__fn_new` by one parameter and the record it
     /// builds by one word; false leaves both exactly as they were.
@@ -1081,15 +1094,107 @@ fn truthy(ctx: &Ctx) -> FnBuild {
 }
 
 /// `.length` of a String, as a Number. Traps on anything else, from
-/// `unbox_string`: there is no property lookup yet, so the only way to reach
-/// this is a lowering that already decided the receiver should be a String.
-fn length(_ctx: &Ctx) -> FnBuild {
+/// `unbox_string`.
+///
+/// # This counts UTF-16 code units, not bytes
+///
+/// ECMA-262 6.1.4 makes a String a sequence of **UTF-16 code units**, and
+/// 22.1.3.2 makes `length` their count. This engine stores UTF-8, so the byte
+/// count in the record header is a different number the moment any character
+/// leaves ASCII: `"café"` is 5 bytes and 4 code units, and an emoji is 4 bytes
+/// and 2 code units.
+///
+/// Returning the byte count would be a wrong answer wearing a right answer's
+/// clothes -- it agrees with the spec on every ASCII string, which is most of
+/// them, and disagrees silently on the rest. So the count is computed:
+///
+/// * a byte that is not a continuation byte (`0b10xxxxxx`) starts a character,
+///   and every character is at least one code unit;
+/// * a byte at or above `0xf0` starts a four-byte sequence, whose code point
+///   is above U+FFFF and is therefore a **surrogate pair** -- one more unit.
+///
+/// The string is valid UTF-8 by construction (it is either a literal the
+/// compiler interned or something `__str_concat` built out of two such), so
+/// this needs no validation pass, only a count.
+fn length(ctx: &Ctx) -> FnBuild {
+    // `__len` sits in the *unconditional* set, so its index is fixed and it is
+    // emitted whether or not anything calls it. Only [`obj_get`]'s gated arm
+    // can, so with the gate off this body is unreachable and the counter above
+    // would be ninety-odd bytes of dead weight in every module -- which is the
+    // shape `plan/design-array-milestone.md` §1.1 already caught once, when
+    // two arms went into the unconditional runtime and cost every program 11
+    // bytes. The function still exists at its index; its body does not.
+    if ctx.string_length.is_none() {
+        let mut f = FnBuild::new(WIDTH);
+        f.body.push(Ins::Unreachable);
+        return f;
+    }
     let mut f = FnBuild::new(WIDTH);
+    let p = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+    let bytes = f.local(ValType::I32);
+    let n = f.local(ValType::I32);
+    let byte = f.local(ValType::I32);
+
+    unbox_string(0, &mut f.body);
+    f.body.push(Ins::LocalSet(p));
+
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(p));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalSet(bytes));
+
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(bytes));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+
+    b.push(Ins::LocalGet(p));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    // Offset 4: the byte after the length header.
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::LocalSet(byte));
+
+    // Not a continuation byte: `(byte & 0xc0) != 0x80`.
+    b.push(Ins::LocalGet(byte));
+    b.push(Ins::I32Const(0xc0));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Const(0x80));
+    b.push(Ins::I32Ne);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(n));
+    // A four-byte sequence is a surrogate pair: one unit more.
+    b.push(Ins::LocalGet(byte));
+    b.push(Ins::I32Const(0xf0));
+    b.push(Ins::I32GeU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(n));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
     let mut inner = Vec::new();
-    unbox_string(0, &mut inner);
-    inner.push(Ins::I32Load(2, 0));
+    inner.push(Ins::LocalGet(n));
     inner.push(Ins::F64ConvertI32S);
-    box_number(&inner, &mut f.body);
+    let mut out = Vec::new();
+    box_number(&inner, &mut out);
+    f.body.extend(out);
     f
 }
 
@@ -1504,6 +1609,32 @@ fn obj_get(ctx: &Ctx) -> FnBuild {
     let o = f.local(ValType::I32);
     let idx = f.local(ValType::I32);
     let e = f.local(ValType::I32);
+
+    // A String receiver, before the Object test, because `unbox_object` traps
+    // on one. `"ab".length` is the only property this engine can answer, and
+    // every other one keeps trapping rather than becoming `undefined` --
+    // `"ab".toUpperCase` is a real function in ECMA-262, so `undefined` there
+    // would be a wrong answer wearing a right answer's clothes. That is the
+    // opposite of the choice `prop_get` makes for an array index, and for a
+    // reason: an absent index really is absent, an absent String method is
+    // one this engine does not have yet.
+    if let Some(length) = ctx.string_length {
+        let mut arm = Vec::new();
+        is_string(0, &mut arm);
+        arm.push(Ins::If(BlockType::Empty));
+        arm.push(Ins::LocalGet(key));
+        arm.push(Ins::I32Const(length));
+        arm.push(ctx.call(Rt::StrEq));
+        arm.push(Ins::If(BlockType::Empty));
+        arm.push(Ins::LocalGet(0));
+        arm.push(Ins::LocalGet(1));
+        arm.push(ctx.call(Rt::Len));
+        arm.push(Ins::Return);
+        arm.push(Ins::End);
+        arm.push(Ins::Unreachable);
+        arm.push(Ins::End);
+        f.body.extend(arm);
+    }
 
     unbox_object(0, &mut f.body);
     f.body.push(Ins::LocalSet(o));

@@ -289,8 +289,14 @@ fn a_property_of_a_non_object_traps() {
     traps("return undefined.a;");
     traps("return null.a;");
     traps("return (1).a;");
-    traps("return \"abc\".length;");
     traps("return true.a;");
+    // `"abc".length` was a row here. It is an answer now -- one arm of
+    // `obj_get`, gated on the program naming the property -- and
+    // `heap_attack::string_length_is_an_answer_and_the_next_property_is_not`
+    // holds it. Its neighbour did *not* move: a String property this engine
+    // has no answer for still traps, which is the distinction the paragraph
+    // above is really about.
+    traps("return \"abc\".toUpperCase;");
     // The chained case, which is how a missing property usually turns into a
     // fault: `o.a` is `undefined`, and `undefined.b` is the TypeError.
     traps("const o = {}; return o.a.b;");
