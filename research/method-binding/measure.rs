@@ -61,6 +61,11 @@ const WITH_METHODS: &[(&str, &str)] = &[
     ("map1", "let a = [1, 2]; return a.map(x => x + 1)[0];"),
     ("map2", "let a = [1, 2]; let b = [3]; return a.map(x => x + 1)[0] + b.map(x => x + 1)[0];"),
     ("map3", "let a = [1, 2]; let b = [3]; let c = [4]; return a.map(x => x + 1)[0] + b.map(x => x + 1)[0] + c.map(x => x + 1)[0];"),
+    // Variant A widens the **shared** uniform signature, so a program that
+    // uses one method pays on every unrelated function value too. These two
+    // differ only in how many callbacks are in flight beside the method.
+    ("cb0", "let f = (x) => x + 1; let g = (x) => x + 2; return f(1) + g(2) + \"  a  \".trim().length;"),
+    ("cb4", "let f = (x) => x + 1; let g = (x) => x + 2; let h = (x) => x + 3; let i = (x) => x + 4; let j = (x) => x + 5; let k = (x) => x + 6; return f(1) + g(2) + h(3) + i(4) + j(5) + k(6) + \"  a  \".trim().length;"),
 ];
 
 #[test]

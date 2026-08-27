@@ -359,7 +359,7 @@ pub(crate) struct Conversions {
 /// What the runtime needs to know about the module it is being spliced into.
 /// Research only -- Q1 variant B. The String-receiver methods this module
 /// answers, and where `__m_bind` is.
-#[cfg(feature = "method-bound")]
+#[cfg(any(feature = "method-bound", feature = "method-this"))]
 #[derive(Debug, Clone)]
 pub(crate) struct BoundStrings {
     /// Index of `__m_bind`.
@@ -409,7 +409,7 @@ pub(crate) struct Ctx {
     /// `.length`, so B's receiver test rides a test the engine was already
     /// paying for. Variant C cannot do that -- its test is at the call site,
     /// where no branch exists yet.
-    #[cfg(feature = "method-bound")]
+    #[cfg(any(feature = "method-bound", feature = "method-this"))]
     pub(crate) bound_strings: Option<BoundStrings>,
     /// Whether any function in this program captures a binding of an
     /// enclosing one. Widens `__fn_new` by one parameter and the record it
@@ -1654,7 +1654,7 @@ fn obj_get(ctx: &Ctx) -> FnBuild {
         arm.push(Ins::End);
         // Research only -- Q1 variant B. Inside the String branch, so the
         // receiver test is one this function already made.
-        #[cfg(feature = "method-bound")]
+        #[cfg(any(feature = "method-bound", feature = "method-this"))]
         if let Some(bound) = &ctx.bound_strings {
             for (name, element) in &bound.names {
                 arm.push(Ins::LocalGet(key));

@@ -163,7 +163,7 @@ pub(crate) struct Ctx {
     /// The arm sits inside the key dispatch this function already does, next
     /// to `length` -- the same free ride B's String methods get inside
     /// `obj_get`.
-    #[cfg(feature = "method-bound")]
+    #[cfg(any(feature = "method-bound", feature = "method-this"))]
     pub(crate) bound_arrays: Option<super::runtime::BoundStrings>,
     /// Index of `__arr_new`.
     pub(crate) func_base: u32,
@@ -644,7 +644,7 @@ fn prop_get(ctx: &Ctx) -> FnBuild {
     b.push(Ins::End);
 
     // Research only -- Q1 variant B, riding the key dispatch above.
-    #[cfg(feature = "method-bound")]
+    #[cfg(any(feature = "method-bound", feature = "method-this"))]
     if let Some(bound) = &ctx.bound_arrays {
         for (name, element) in &bound.names {
             b.push(Ins::LocalGet(k));

@@ -322,7 +322,11 @@ pub(crate) mod m1 {
     use crate::convert;
     use crate::diag::{Boundary, CompileError, host_table, unsupported};
     /// Research only -- Q1 variant C. Deleted when the track is decided.
-    #[cfg(any(feature = "method-callsite", feature = "method-bound"))]
+    #[cfg(any(
+        feature = "method-callsite",
+        feature = "method-bound",
+        feature = "method-this"
+    ))]
     use crate::method;
     use crate::ir::m1 as ir;
     use crate::opts::{HostFn, HostParam, HostResult, Names, Options};
@@ -334,9 +338,7 @@ pub(crate) mod m1 {
     };
     /// Research only -- Q1 variant C. Deleted when the track is decided.
     #[cfg(feature = "method-callsite")]
-    use crate::array::ARR_LEN;
-    #[cfg(feature = "method-callsite")]
-    use crate::repr::{is_array, is_string, unbox_array};
+    use crate::repr::{is_array, is_string};
     use crate::runtime::{
         self, ALIGN_WORD, Conversions, Ctx, FN_ELEMENT, FN_ENV, FnBuild, Rt, STRING_HEADER,
         StringPool,
@@ -624,15 +626,15 @@ pub(crate) mod m1 {
         // and the element has to exist whether or not the source names it.
         // **That asymmetry is itself a result**: C can gate per method, B
         // cannot.
-        #[cfg(feature = "method-bound")]
+        #[cfg(any(feature = "method-bound", feature = "method-this"))]
         let method_base = arr_base + arr_len;
-        #[cfg(feature = "method-bound")]
+        #[cfg(any(feature = "method-bound", feature = "method-this"))]
         let method_len = if bound_wanted(&scan) {
             method::Plan::bound_surface(&scan.bound).len()
         } else {
             0
         };
-        #[cfg(feature = "method-bound")]
+        #[cfg(any(feature = "method-bound", feature = "method-this"))]
         let user_base = method_base + method_len;
         // Research only -- Q1 variant C, appended last for the same reason
         // every other gated set is: a program without it keeps the indices it
@@ -643,14 +645,14 @@ pub(crate) mod m1 {
         let method_len = scan.methods.len();
         #[cfg(feature = "method-callsite")]
         let user_base = method_base + method_len;
-        #[cfg(not(any(feature = "method-callsite", feature = "method-bound")))]
+        #[cfg(not(any(feature = "method-callsite", feature = "method-bound", feature = "method-this")))]
         let user_base = arr_base + arr_len;
         let ctx = Ctx {
             func_base: runtime_base,
             heap_global: HEAP_GLOBAL,
             type_names: scan.type_of.then(|| runtime::TypeNames::intern(&mut pool)),
             string_length: (scan.string_length
-                || (cfg!(feature = "method-bound") && bound_wanted(&scan)))
+                || ((cfg!(feature = "method-bound") || cfg!(feature = "method-this")) && bound_wanted(&scan)))
             .then(|| pool.intern("length")),
             prim_names: runtime::PrimNames::intern(&mut pool),
             conversions: Conversions {
@@ -659,7 +661,7 @@ pub(crate) mod m1 {
                 str_cmp: convert_base + convert::Cv::StrCmp.offset(),
             },
             arrays: scan.arrays,
-            #[cfg(feature = "method-bound")]
+            #[cfg(any(feature = "method-bound", feature = "method-this"))]
             bound_strings: bound_side(&scan, &mut pool, method_base, false),
             captures: scan.captures,
         };
@@ -713,7 +715,7 @@ pub(crate) mod m1 {
 
         let array_set: Vec<runtime::RtFunc> = if scan.arrays {
             array::build(&array::Ctx {
-                #[cfg(feature = "method-bound")]
+                #[cfg(any(feature = "method-bound", feature = "method-this"))]
                 bound_arrays: bound_side(&scan, &mut pool, method_base, true),
                 func_base: arr_base,
                 runtime_base,
@@ -723,24 +725,12 @@ pub(crate) mod m1 {
             Vec::new()
         };
 
+        // The same hoist variant B needs, for the same reason: `__m_map_bound`
+        // wants the uniform type index and the prefabs are interned before the
+        // uniform signature exists. **That this is now needed by C as well is
+        // itself the result of §2.6's fixability check** -- C only inlined its
+        // loop because a prefab was thought unable to call back.
         #[cfg(feature = "method-callsite")]
-        let method_set: Vec<runtime::RtFunc> = if scan.methods.is_empty() {
-            Vec::new()
-        } else {
-            method::build(&method::Ctx {
-                func_base: method_base,
-                runtime_base,
-                plan: scan.methods.clone(),
-                array_base: arr_base,
-            })
-        };
-        // Research only -- Q1 variant B, and a leak of its own: `__m_map_bound`
-        // needs the uniform type index, and the prefabs are interned **before**
-        // the uniform signature is created. So B forces the type section to be
-        // laid out in a different order than every other build. Duplicated
-        // under the feature rather than moved, so the default build's type
-        // indices do not shift for a research variant.
-        #[cfg(feature = "method-bound")]
         let uniform = scan.needs_table().then(|| {
             let mut params = values(scan.uniform_arity(program));
             if scan.captures {
@@ -751,7 +741,47 @@ pub(crate) mod m1 {
                 arity: scan.uniform_arity(program),
             }
         });
-        #[cfg(feature = "method-bound")]
+        #[cfg(feature = "method-callsite")]
+        let method_set: Vec<runtime::RtFunc> = if scan.methods.is_empty() {
+            Vec::new()
+        } else {
+            method::build(&method::Ctx {
+                func_base: method_base,
+                runtime_base,
+                plan: scan.methods.clone(),
+                uniform: uniform.map(|u| (u.type_index, u.arity)),
+                array_base: arr_base,
+            })
+        };
+        // Research only -- Q1 variant B, and a leak of its own: `__m_map_bound`
+        // needs the uniform type index, and the prefabs are interned **before**
+        // the uniform signature is created. So B forces the type section to be
+        // laid out in a different order than every other build. Duplicated
+        // under the feature rather than moved, so the default build's type
+        // indices do not shift for a research variant.
+        #[cfg(any(feature = "method-bound", feature = "method-this"))]
+        let uniform = scan.needs_table().then(|| {
+            let mut params = values(scan.uniform_arity(program));
+            // Research only -- Q1 variant A: the receiver rides the calling
+            // convention, so **every** function value in the program grows a
+            // JS value's worth of parameters, whether or not it is a method.
+            // That is A's characteristic cost, and unlike B's it is paid by
+            // callbacks that have nothing to do with methods.
+            #[cfg(feature = "method-this")]
+            if bound_wanted(&scan) {
+                for slot in repr::SLOTS.iter().rev() {
+                    params.insert(0, *slot);
+                }
+            }
+            if scan.captures {
+                params.insert(0, ValType::I32);
+            }
+            Uniform {
+                type_index: intern(&mut types, params, values(1)),
+                arity: scan.uniform_arity(program),
+            }
+        });
+        #[cfg(any(feature = "method-bound", feature = "method-this"))]
         let method_set: Vec<runtime::RtFunc> = if bound_wanted(&scan) {
             method::build(&method::Ctx {
                 func_base: method_base,
@@ -763,7 +793,7 @@ pub(crate) mod m1 {
         } else {
             Vec::new()
         };
-        #[cfg(not(any(feature = "method-callsite", feature = "method-bound")))]
+        #[cfg(not(any(feature = "method-callsite", feature = "method-bound", feature = "method-this")))]
         let method_set: Vec<runtime::RtFunc> = Vec::new();
 
         let mut funcs: Vec<ir::Func> = Vec::new();
@@ -796,7 +826,11 @@ pub(crate) mod m1 {
         // the widening is all-or-nothing -- an adapter whose target captures
         // nothing simply never reads slot 0. Gated, so a closure-free program
         // interns the type it always did.
-        #[cfg(not(feature = "method-bound"))]
+        #[cfg(not(any(
+            feature = "method-bound",
+            feature = "method-this",
+            feature = "method-callsite"
+        )))]
         let uniform = scan.needs_table().then(|| {
             let mut params = values(scan.uniform_arity(program));
             if scan.captures {
@@ -843,6 +877,8 @@ pub(crate) mod m1 {
                 scan.arrays.then_some(arr_base),
                 #[cfg(feature = "method-callsite")]
                 (!scan.methods.is_empty()).then(|| (method_base, scan.methods.clone())),
+                #[cfg(feature = "method-this")]
+                bound_wanted(&scan),
                 unwind,
                 json,
                 user_base,
@@ -888,7 +924,7 @@ pub(crate) mod m1 {
         if !fns.entries.is_empty()
             || scan.indirect
             || scan.json
-            || (cfg!(feature = "method-bound") && bound_wanted(&scan))
+            || ((cfg!(feature = "method-bound") || cfg!(feature = "method-this")) && bound_wanted(&scan))
         {
             let uniform = uniform.expect("a table means the uniform signature exists");
             let mut in_table = Vec::new();
@@ -904,22 +940,35 @@ pub(crate) mod m1 {
             // out of the environment `__m_bind` built and forwards it, except
             // `map`, whose body reads the environment itself because it also
             // has to `call_indirect`.
-            #[cfg(feature = "method-bound")]
+            #[cfg(any(feature = "method-bound", feature = "method-this"))]
             for me in &scan.bound {
                 let (name, body, argc, _) = method::Me::BOUND
                     .iter()
                     .find(|(_, m, _, _)| m == me)
                     .expect("every bound method is in the table");
                 let mut adapter: Vec<Ins> = Vec::new();
-                if *body == method::Me::MapBound {
+                // Under variant A the receiver is a parameter: slot 0 is the
+                // environment (unused by a built-in), then the receiver pair,
+                // then the arguments. Under B it is in the environment the
+                // property read allocated. The adapter is the one place the
+                // two variants' shapes diverge -- everything it calls is
+                // shared.
+                let args_at = if cfg!(feature = "method-this") {
+                    let this_at = u32::from(scan.captures);
+                    adapter.push(Ins::LocalGet(this_at));
+                    adapter.push(Ins::LocalGet(this_at + 1));
+                    this_at + WIDTH
+                } else if *body == method::Me::MapBound {
                     adapter.push(Ins::LocalGet(0));
+                    1
                 } else {
                     adapter.push(Ins::LocalGet(0));
                     adapter.push(Ins::I32Load(ALIGN_WORD, 0));
                     adapter.push(Ins::LocalGet(0));
                     adapter.push(Ins::I64Load(ALIGN_WORD, 4));
-                }
-                adapter.extend((0..argc * WIDTH).map(|i| Ins::LocalGet(1 + i)));
+                    1
+                };
+                adapter.extend((0..argc * WIDTH).map(|i| Ins::LocalGet(args_at + i)));
                 adapter.push(Ins::Call(
                     method_base + body.offset_in_bound(&scan.bound),
                 ));
@@ -939,7 +988,12 @@ pub(crate) mod m1 {
                 ] {
                     // `JSON`'s two capture nothing, so they skip slot 0 the
                     // same way a non-capturing user function's adapter does.
-                    let env_slot = u32::from(scan.captures);
+                    let env_slot = u32::from(scan.captures)
+                        + if cfg!(feature = "method-this") && bound_wanted(&scan) {
+                            WIDTH
+                        } else {
+                            0
+                        };
                     let mut body: Vec<Ins> = (0..arity * WIDTH)
                         .map(|i| Ins::LocalGet(env_slot + i))
                         .collect();
@@ -967,7 +1021,17 @@ pub(crate) mod m1 {
                 // adapter whose target captures **forwards** it; one whose
                 // target does not simply leaves it unread, exactly as it
                 // already leaves surplus arguments unread (13.3.8.1).
-                let env_slot = u32::from(scan.captures);
+                // Slot 0 is the environment when the program has closures,
+                // and under variant A the receiver pair follows it -- an
+                // adapter whose target is an ordinary function simply drops
+                // the receiver, the same way it already drops surplus
+                // arguments (13.3.8.1).
+                let env_slot = u32::from(scan.captures)
+                    + if cfg!(feature = "method-this") && bound_wanted(&scan) {
+                        WIDTH
+                    } else {
+                        0
+                    };
                 let mut body: Vec<Ins> = Vec::new();
                 if !program.func(*id).captures.is_empty() {
                     body.push(Ins::LocalGet(0));
@@ -1443,7 +1507,7 @@ pub(crate) mod m1 {
         /// it never touches, which fails the experiment's own §1.2.
         /// Research only -- Q1 variant B. Which of [`method::Me::BOUND`] the
         /// program reads by name, in that table's order.
-        #[cfg(feature = "method-bound")]
+        #[cfg(any(feature = "method-bound", feature = "method-this"))]
         bound: Vec<method::Me>,
         /// Research only -- Q1 variant C. Whether the program calls one of the
         /// four methods by name. Deleted when the track is decided.
@@ -1552,7 +1616,7 @@ pub(crate) mod m1 {
                 // parameter -- even in a program that makes no call at all.
                 // B raises a signature the whole table shares; C does not
                 // touch it.
-                .max(if cfg!(feature = "method-bound") && self.bound_flag() {
+                .max(if (cfg!(feature = "method-bound") || cfg!(feature = "method-this")) && self.bound_flag() {
                     1
                 } else {
                     0
@@ -1561,11 +1625,11 @@ pub(crate) mod m1 {
 
         /// Research only -- Q1 variant B.
         fn bound_flag(&self) -> bool {
-            #[cfg(feature = "method-bound")]
+            #[cfg(any(feature = "method-bound", feature = "method-this"))]
             {
                 !self.bound.is_empty()
             }
-            #[cfg(not(feature = "method-bound"))]
+            #[cfg(not(any(feature = "method-bound", feature = "method-this")))]
             {
                 false
             }
@@ -1577,9 +1641,9 @@ pub(crate) mod m1 {
             // value, so a program that reads one needs the table and the
             // uniform signature even if it holds no function of its own.
             // Another fixed cost C does not pay.
-            #[cfg(feature = "method-bound")]
+            #[cfg(any(feature = "method-bound", feature = "method-this"))]
             let bound = !self.bound.is_empty();
-            #[cfg(not(feature = "method-bound"))]
+            #[cfg(not(any(feature = "method-bound", feature = "method-this")))]
             let bound = false;
             self.function_values || self.indirect || self.json || bound
         }
@@ -1599,7 +1663,7 @@ pub(crate) mod m1 {
     /// Elements are handed out in `Me::BOUND` order regardless of which side
     /// answers them, so the two arm tables agree on the numbering without
     /// having to talk to each other.
-    #[cfg(feature = "method-bound")]
+    #[cfg(any(feature = "method-bound", feature = "method-this"))]
     fn bound_side(
         scan: &Scan,
         pool: &mut StringPool,
@@ -1631,22 +1695,22 @@ pub(crate) mod m1 {
 
     /// Research only -- Q1 variant B. How many table elements it reserves.
     fn bound_elements(_scan: &Scan) -> i32 {
-        #[cfg(feature = "method-bound")]
+        #[cfg(any(feature = "method-bound", feature = "method-this"))]
         {
             _scan.bound.len() as i32
         }
-        #[cfg(not(feature = "method-bound"))]
+        #[cfg(not(any(feature = "method-bound", feature = "method-this")))]
         {
             0
         }
     }
 
     fn bound_wanted(_scan: &Scan) -> bool {
-        #[cfg(feature = "method-bound")]
+        #[cfg(any(feature = "method-bound", feature = "method-this"))]
         {
             !_scan.bound.is_empty()
         }
-        #[cfg(not(feature = "method-bound"))]
+        #[cfg(not(any(feature = "method-bound", feature = "method-this")))]
         {
             false
         }
@@ -1679,7 +1743,7 @@ pub(crate) mod m1 {
         // slot when the program has closures. So B **turns the closure
         // machinery on** for a program that has no closure in it -- a fixed
         // cost that variant C does not pay, and one of B's leaks.
-        #[cfg(feature = "method-bound")]
+        #[cfg(any(feature = "method-bound", feature = "method-this"))]
         {
             out.captures |= !out.bound.is_empty();
             // Any Array-receiver bound method reaches into the array set, so
@@ -1898,7 +1962,7 @@ pub(crate) mod m1 {
                         // the branch on. **A coarser gate than C's**: C keys
                         // on the *call site*, B on any String property read
                         // that could be one of its names.
-                        #[cfg(feature = "method-bound")]
+                        #[cfg(any(feature = "method-bound", feature = "method-this"))]
                         for (bound_name, me, _, _) in method::Me::BOUND {
                             if name == bound_name && !scan.bound.contains(me) {
                                 scan.bound.push(*me);
@@ -2066,6 +2130,10 @@ pub(crate) mod m1 {
         /// for a program that calls none of the four methods.
         #[cfg(feature = "method-callsite")]
         methods: Option<(u32, method::Plan)>,
+        /// Research only -- Q1 variant A. Whether this program's calling
+        /// convention carries a receiver.
+        #[cfg(feature = "method-this")]
+        methods_on: bool,
         /// Where a throw in flight lives, or `None` for a program with no
         /// `throw` in it -- which emits no check and no global.
         unwind: Option<Unwind>,
@@ -2118,6 +2186,7 @@ pub(crate) mod m1 {
             uniform: Option<Uniform>,
             arrays: Option<u32>,
             #[cfg(feature = "method-callsite")] methods: Option<(u32, method::Plan)>,
+            #[cfg(feature = "method-this")] methods_on: bool,
             unwind: Option<Unwind>,
             json: Option<Json>,
             user_base: u32,
@@ -2172,6 +2241,8 @@ pub(crate) mod m1 {
                 arrays,
                 #[cfg(feature = "method-callsite")]
                 methods,
+                #[cfg(feature = "method-this")]
+                methods_on,
                 unwind,
                 json,
                 user_base,
@@ -3515,11 +3586,7 @@ pub(crate) mod m1 {
             } = &callee.kind
                 && let Some(me) = method::Me::at_call_site(name, args.len())
             {
-                return if me == method::Me::Map {
-                    self.specialised_map(object, name.clone(), args)
-                } else {
-                    self.specialised_method(object, name.clone(), me, args)
-                };
+                return self.specialised_method(object, name.clone(), me, args);
             }
             let target = match &callee.kind {
                 ast::ExprKind::Name(ast::Name {
@@ -3584,8 +3651,48 @@ pub(crate) mod m1 {
                 .uniform
                 .expect("the scan finds every call that is not to a known function");
             let slot = self.take();
-            self.expr(callee)?;
-            store_local(slot, &mut self.f.body);
+            // Research only -- Q1 variant A. A method call's receiver is the
+            // object the callee was read from, and it has to be evaluated
+            // **once** -- the same constraint variant C met at its call sites.
+            // So a Member callee is lowered here rather than by `self.expr`.
+            #[cfg(feature = "method-this")]
+            let receiver = if self.methods_on {
+                match &callee.kind {
+                    ast::ExprKind::Member { object, key } => {
+                        let recv = self.take();
+                        self.expr(object)?;
+                        store_local(recv, &mut self.f.body);
+                        load_local(recv, &mut self.f.body);
+                        match self.accessor(key) {
+                            Accessor::Obj => {
+                                self.key(key)?;
+                                let call = self.ctx.call(Rt::ObjGet);
+                                self.push(call);
+                            }
+                            Accessor::Prop(base) => {
+                                self.key_pair(key)?;
+                                self.push(Ins::Call(base + Ar::PropGet.offset()));
+                            }
+                        }
+                        store_local(slot, &mut self.f.body);
+                        Some(recv)
+                    }
+                    _ => {
+                        self.expr(callee)?;
+                        store_local(slot, &mut self.f.body);
+                        None
+                    }
+                }
+            } else {
+                self.expr(callee)?;
+                store_local(slot, &mut self.f.body);
+                None
+            };
+            #[cfg(not(feature = "method-this"))]
+            {
+                self.expr(callee)?;
+                store_local(slot, &mut self.f.body);
+            }
             // The environment goes first because the uniform signature leads
             // with it. It comes out of the record, which is what the callee
             // value's payload *is* -- the adapter cannot ask which funcref it
@@ -3595,6 +3702,15 @@ pub(crate) mod m1 {
                 unbox_function(slot, &mut self.f.body);
                 self.push(Ins::I32Load(ALIGN_WORD, FN_ENV));
             }
+            // Research only -- Q1 variant A: the receiver, right after the
+            // environment and before the arguments.
+            #[cfg(feature = "method-this")]
+            if self.methods_on {
+                match receiver {
+                    Some(recv) => load_local(recv, &mut self.f.body),
+                    None => const_undefined(&mut self.f.body),
+                }
+            }
             self.arguments(args, uniform.arity)?;
             unbox_function(slot, &mut self.f.body);
             self.push(Ins::I32Load(ALIGN_WORD, FN_ELEMENT));
@@ -3603,6 +3719,10 @@ pub(crate) mod m1 {
             // own: it forwards and returns, so a throw the target raised is
             // still in flight when this returns.
             self.throw_check();
+            #[cfg(feature = "method-this")]
+            if let Some(recv) = receiver {
+                self.give(recv);
+            }
             self.give(slot);
             Ok(())
         }
@@ -3703,137 +3823,6 @@ pub(crate) mod m1 {
             load_local(result, &mut self.f.body);
             self.throw_check();
             self.give(result);
-            self.give(recv);
-            Ok(())
-        }
-
-        /// Research only -- Q1 variant C. `a.map(f)`, with the loop **inlined
-        /// at the call site**.
-        ///
-        /// Every other method here is a direct call to a prefab. `map` cannot
-        /// be, and the reason is the sharpest structural fact this experiment
-        /// has turned up: a prefab would have to `call_indirect` into the
-        /// callback, and **no runtime prefab in this compiler can** -- the
-        /// only `call_indirect` in the tree is the one a few functions below.
-        /// Variant C sidesteps that by emitting the loop here, where the
-        /// instruction is in scope. Variants A and B cannot sidestep it: for
-        /// them the method *is* a value, so its body is a function, and that
-        /// function needs exactly the ability this one avoids needing.
-        ///
-        /// The price is paid in criterion ③b. Every other method costs ~43
-        /// bytes per call site; this one costs a whole loop per call site.
-        #[cfg(feature = "method-callsite")]
-        fn specialised_map(
-            &mut self,
-            object: &ast::Expr,
-            name: String,
-            args: &[ast::Expr],
-        ) -> Result<(), CompileError> {
-            let arrays = self
-                .arrays
-                .expect("a `map` call site turns the array gate on");
-            let uniform = self
-                .uniform
-                .expect("the scan finds every call that is not to a known function");
-            let recv = self.take();
-            let callback = self.take();
-            let elem = self.take();
-            let result = self.take();
-            let a = self.take_raw();
-            let out = self.take_raw();
-            let i = self.take_raw();
-            let n = self.take_raw();
-
-            self.expr(object)?;
-            store_local(recv, &mut self.f.body);
-            self.expr(&args[0])?;
-            store_local(callback, &mut self.f.body);
-
-            is_array(recv, &mut self.f.body);
-            self.push(Ins::If(BlockType::Empty));
-            unbox_array(recv, &mut self.f.body);
-            self.push(Ins::LocalSet(a));
-            self.push(Ins::LocalGet(a));
-            self.push(Ins::I32Load(ALIGN_WORD, ARR_LEN));
-            self.push(Ins::LocalSet(n));
-            self.push(Ins::LocalGet(n));
-            self.push(Ins::Call(arrays + Ar::New.offset()));
-            self.push(Ins::LocalSet(out));
-            self.push(Ins::I32Const(0));
-            self.push(Ins::LocalSet(i));
-            self.push(Ins::Block(BlockType::Empty));
-            self.push(Ins::Loop(BlockType::Empty));
-            self.push(Ins::LocalGet(i));
-            self.push(Ins::LocalGet(n));
-            self.push(Ins::I32GeU);
-            self.push(Ins::BrIf(1));
-            self.push(Ins::LocalGet(a));
-            self.push(Ins::LocalGet(i));
-            self.push(Ins::Call(arrays + Ar::Get.offset()));
-            store_local(elem, &mut self.f.body);
-            if self.captures {
-                unbox_function(callback, &mut self.f.body);
-                self.push(Ins::I32Load(ALIGN_WORD, FN_ENV));
-            }
-            load_local(elem, &mut self.f.body);
-            for _ in 1..uniform.arity {
-                const_undefined(&mut self.f.body);
-            }
-            unbox_function(callback, &mut self.f.body);
-            self.push(Ins::I32Load(ALIGN_WORD, FN_ELEMENT));
-            self.push(Ins::CallIndirect(uniform.type_index, 0));
-            store_local(elem, &mut self.f.body);
-            self.push(Ins::LocalGet(out));
-            load_local(elem, &mut self.f.body);
-            self.push(Ins::Call(arrays + Ar::Push.offset()));
-            self.push(Ins::LocalGet(i));
-            self.push(Ins::I32Const(1));
-            self.push(Ins::I32Add);
-            self.push(Ins::LocalSet(i));
-            self.push(Ins::Br(0));
-            self.push(Ins::End);
-            self.push(Ins::End);
-            let mut inner = Vec::new();
-            inner.push(Ins::LocalGet(out));
-            let mut boxed = Vec::new();
-            box_array(&inner, &mut boxed);
-            self.f.body.extend(boxed);
-            store_local(result, &mut self.f.body);
-            self.push(Ins::End);
-
-            // A receiver that is not an Array: the ordinary property read and
-            // indirect call, on the receiver already in hand.
-            is_array(recv, &mut self.f.body);
-            self.push(Ins::I32Eqz);
-            self.push(Ins::If(BlockType::Empty));
-            let value = self.take();
-            load_local(recv, &mut self.f.body);
-            let key = self.pool.intern(&name);
-            self.push(Ins::I32Const(key));
-            let get = self.ctx.call(Rt::ObjGet);
-            self.push(get);
-            store_local(value, &mut self.f.body);
-            if self.captures {
-                unbox_function(value, &mut self.f.body);
-                self.push(Ins::I32Load(ALIGN_WORD, FN_ENV));
-            }
-            self.arguments(args, uniform.arity)?;
-            unbox_function(value, &mut self.f.body);
-            self.push(Ins::I32Load(ALIGN_WORD, FN_ELEMENT));
-            self.push(Ins::CallIndirect(uniform.type_index, 0));
-            store_local(result, &mut self.f.body);
-            self.give(value);
-            self.push(Ins::End);
-
-            load_local(result, &mut self.f.body);
-            self.throw_check();
-            self.give_raw(n);
-            self.give_raw(i);
-            self.give_raw(out);
-            self.give_raw(a);
-            self.give(result);
-            self.give(elem);
-            self.give(callback);
             self.give(recv);
             Ok(())
         }
