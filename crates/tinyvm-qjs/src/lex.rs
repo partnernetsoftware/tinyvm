@@ -141,6 +141,10 @@ pub(crate) enum TokenKind {
     PlusPlus,
     MinusMinus,
     Eq,
+    /// `=>`. Only ever the head of an ArrowFunction: it is not an operator,
+    /// and the parser reaches it from exactly two places (a lone parameter
+    /// name, and a parenthesised parameter list).
+    FatArrow,
     PlusEq,
     MinusEq,
     StarEq,
@@ -202,6 +206,7 @@ impl TokenKind {
             Self::Throw => "the `throw` keyword",
             Self::LParen => "a `(`",
             Self::RParen => "a `)`",
+            Self::FatArrow => "a `=>`",
             Self::LBrace => "a `{`",
             Self::RBrace => "a `}`",
             Self::LBracket => "a `[`",
@@ -269,6 +274,9 @@ impl TokenKind {
                 (Boundary::Subset, "the increment and decrement operators")
             }
             Self::AmpAmp | Self::PipePipe => (Boundary::Subset, "logical operators"),
+            // The lexer graduated this in M3; a front end that cannot build
+            // the function still calls it what it always called it.
+            Self::FatArrow => (Boundary::FullJs, "arrow functions"),
             // The lexer graduated these in M3; a front end that cannot build
             // the concatenation still calls them what it always called them.
             Self::TemplateFull(_)
@@ -969,7 +977,7 @@ impl Lexer<'_> {
             [b'*', b'*', ..] => (2, subset("exponentiation")),
             [b'+', b'+', ..] => (2, TokenKind::PlusPlus),
             [b'-', b'-', ..] => (2, TokenKind::MinusMinus),
-            [b'=', b'>', ..] => (2, full_js("arrow functions")),
+            [b'=', b'>', ..] => (2, TokenKind::FatArrow),
             [b'=', b'=', ..] => (2, TokenKind::EqEq),
             [b'!', b'=', ..] => (2, TokenKind::BangEq),
             [b'<', b'<', ..] | [b'>', b'>', ..] => (2, subset(BITWISE)),

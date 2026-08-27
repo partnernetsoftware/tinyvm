@@ -146,6 +146,10 @@ fn refuse(source: &str) -> CompileError {
 }
 
 #[track_caller]
+// Unused since arrows landed: they were this file's last capability refusal.
+// Kept because the next construct this file has to refuse will want it, and
+// four sibling test files define the same helper.
+#[allow(dead_code, reason = "for the next construct this file has to refuse")]
 fn refuses_capability(source: &str, construct: &str, boundary: Boundary) {
     let error = refuse(source);
     assert_eq!(
@@ -496,31 +500,21 @@ fn this_and_constructors_are_still_refused() {
     }
 }
 
-/// An arrow function is refused, and the sentence names arrows -- except when
-/// the parameter list is empty, where `()` runs the parser out of operand
-/// before the `=>` is ever reached. Recorded as it is rather than as it should
-/// be: the empty-list wording is a gap in the front end and not in this
-/// milestone, and a test asserting the better sentence would be asserting
-/// something no line of the engine says.
+/// An arrow function is a function *value* like any other: stored, passed,
+/// returned, called indirectly. That is the whole of what this file asks
+/// about it, because in this engine an arrow **is** a function expression --
+/// see `tests/arrows_m3.rs`, which pins the four absences that make the two
+/// the same thing here.
+///
+/// The empty parameter list used to be a recorded wart: `()` ran the parser
+/// out of operand before the `=>` was reached. It parses now.
 #[test]
-fn an_arrow_function_is_refused() {
-    refuses_capability(
-        "let f = (a) => a; return 0;",
-        "arrow functions",
-        Boundary::FullJs,
-    );
-    refuses_capability(
-        "let f = a => a; return 0;",
-        "arrow functions",
-        Boundary::FullJs,
-    );
-    let empty = refuse("let f = () => 1; return 0;");
-    assert_eq!(empty.boundary, Boundary::Subset);
-    assert!(
-        !empty.message.contains("arrow"),
-        "if the empty parameter list now names arrows too, update this test: {:?}",
-        empty.message
-    );
+fn an_arrow_function_is_a_function_value() {
+    number("let f = (a) => a; return f(1);", 1.0);
+    number("let f = a => a; return f(2);", 2.0);
+    number("let f = () => 1; return f();", 1.0);
+    number("let f = (a) => a; let g = f; return g(3);", 3.0);
+    number("function take(g) { return g(4); } return take((a) => a);", 4.0);
 }
 
 /// `bind`, `call` and `apply` live on `Function.prototype`, and there is no

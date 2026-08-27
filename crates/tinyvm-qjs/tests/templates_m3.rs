@@ -392,12 +392,8 @@ fn tagged_templates_are_refused_by_name() {
 #[test]
 fn the_neighbouring_constructs_are_still_refused_by_name() {
     // A template milestone is the one most likely to be mistaken for having
-    // brought these; it did not.
-    refuses_capability(
-        "let f = (x) => x; return f(1);",
-        "arrow functions",
-        Boundary::FullJs,
-    );
+    // brought these; it did not. (Arrow functions were a row here and landed
+    // right after templates did; `arrows_m3.rs` has them now.)
     refuses_capability("class A {} return 1;", "the `class` keyword", Boundary::FullJs);
     refuses_capability("return [1, , 2];", "elisions in an array literal", Boundary::FullJs);
 }

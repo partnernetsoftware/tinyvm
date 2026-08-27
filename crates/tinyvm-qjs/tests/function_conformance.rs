@@ -151,6 +151,10 @@ fn refuse(source: &str) -> CompileError {
 
 /// A refusal in the fixed wording `diag::unsupported` locks.
 #[track_caller]
+// Unused since arrows landed: they were this file's last capability refusal.
+// Kept because the next construct this file has to refuse will want it, and
+// four sibling test files define the same helper.
+#[allow(dead_code, reason = "for the next construct this file has to refuse")]
 fn refuses_capability(source: &str, construct: &str, boundary: Boundary) {
     let error = refuse(source);
     assert_eq!(
@@ -892,32 +896,28 @@ fn this_is_refused_wherever_it_appears() {
     }
 }
 
-/// 15.3 ArrowFunction: a distinct definition with its own `this` binding and
-/// its own parameter grammar. Refused by name -- except for the empty
-/// parameter list, where `()` runs the parser out of operand before the `=>`
-/// is reached. That wording is recorded as it is, not as it should be.
+/// 15.3 ArrowFunction. In this engine it is exactly a FunctionExpression:
+/// every way 15.3 separates the two -- no `this`, no `arguments`, no
+/// `[[Construct]]`, no `prototype` -- reaches for something this engine does
+/// not have. `tests/arrows_m3.rs` holds the milestone and pins those four
+/// absences; what belongs *here* is the part this file is about, which is how
+/// an arrow behaves as a function.
+///
+/// The empty parameter list used to be a recorded wart: `()` ran the parser
+/// out of operand before the `=>` was reached, so `() => 1` was refused with
+/// a sentence that did not name arrows. It parses now, and the wart is gone
+/// with it.
 #[test]
-fn an_arrow_function_is_refused_by_name() {
-    refuses_capability(
-        "const o = {}; o.m = (a) => a; return 0;",
-        "arrow functions",
-        Boundary::FullJs,
-    );
-    refuses_capability(
-        "let f = a => a * 2; return f(1);",
-        "arrow functions",
-        Boundary::FullJs,
-    );
-    refuses_capability(
-        "function apply1(g) { return g(1); } return apply1(x => x);",
-        "arrow functions",
-        Boundary::FullJs,
-    );
-    let empty = refuses_somehow("const o = {}; o.m = () => 1; return 0;");
-    assert!(
-        !empty.message.contains("arrow"),
-        "if the empty parameter list now names arrows, update this test: {:?}",
-        empty.message
+fn an_arrow_function_is_a_function_expression() {
+    number("const o = {}; o.m = (a) => a; return o.m(3);", 3.0);
+    number("let f = a => a * 2; return f(4);", 8.0);
+    number("function apply1(g) { return g(1); } return apply1(x => x);", 1.0);
+    number("const o = {}; o.m = () => 1; return o.m();", 1.0);
+    // The claim that makes the paragraph above true rather than merely
+    // plausible: the two spellings are one module.
+    assert_eq!(
+        compile_qjs_m1("let f = a => a * 2; return f(4);").unwrap(),
+        compile_qjs_m1("let f = function (a) { return a * 2; }; return f(4);").unwrap(),
     );
 }
 
@@ -1756,12 +1756,15 @@ fn every_refusal_in_this_area_speaks_for_the_engine() {
     let sources = [
         "const o = {}; o.m = function () { return this; }; return 0;",
         "let f = function () { return this.x; }; return 0;",
-        "const o = {}; o.m = (a) => a; return 0;",
-        "let f = a => a; return 0;",
-        "const o = {}; o.m = () => 1; return 0;",
         // The two capture rows left this list when closures landed; they are
         // assertions about answers now, in
-        // `a_function_value_that_captures_a_binding_works`.
+        // `a_function_value_that_captures_a_binding_works`. The three arrow
+        // rows left it the same way when arrows landed --
+        // `an_arrow_function_is_a_function_expression` above, and the
+        // milestone itself in `tests/arrows_m3.rs`. What is still refused
+        // about an arrow is its *parameter* syntax, which is the same
+        // refusal a function's parameters get and is already covered by the
+        // rows below.
         "let f = function () {}; return new f();",
         "let f = function g() {}; return g();",
         "let g = f; let f = function () {}; return 0;",

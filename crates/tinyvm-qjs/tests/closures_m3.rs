@@ -309,15 +309,13 @@ fn the_neighbouring_constructs_are_still_refused_by_name() {
     // assumed uniform: `class` and `async` are `FullJs`, while an arrow
     // function is a shape this engine's own grammar could grow.
     //
-    // Template literals used to be this list's `Subset` row. They landed after
-    // closures did, so the row moved to `templates_m3.rs` -- where it now
-    // asserts the opposite.
+    // Template literals used to be this list's `Subset` row, and arrow
+    // functions its `FullJs` one. Both landed after closures did, so both
+    // rows moved -- to `templates_m3.rs` and `arrows_m3.rs`, where they now
+    // assert the opposite. An arrow is worth a word: it landed *because*
+    // closures did, since an arrow is a function expression here and the
+    // interesting arrows are the capturing ones.
     for (source, needle, boundary) in [
-        (
-            "let f = (x) => x; return f(1);",
-            "arrow functions",
-            Boundary::FullJs,
-        ),
         (
             "class A {} return 1;",
             "the `class` keyword",

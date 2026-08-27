@@ -1516,11 +1516,13 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     // where their behaviour is asserted now, and the diagnostic a `?` or a
     // `try` in a position the parser cannot use still prints is the phrase
     // the lexer keeps for them.
+    // Arrow functions left as well: in this engine an arrow *is* a function
+    // expression -- `tests/arrows_m3.rs` -- so there was nothing left to
+    // refuse once the parser could build one.
     // Template literals were a row here too, and left the same way:
     // `tests/templates_m3.rs` holds their behaviour. The lexer keeps the
     // phrase for a front end that cannot build the concatenation.
     // -- syntax whole milestones away ---------------------------------------
-    ("let f = (x) => x; return 0;", "arrow functions"),
     ("eval(\"1\");", "the `eval` function"),
     ("while (true) { break; }", "the `break` keyword"),
     ("while (true) { continue; }", "the `continue` keyword"),

@@ -376,6 +376,7 @@ pub(crate) mod m1 {
             pending: Vec::new(),
             arg_count: 0,
             frames: 0,
+            has_arrow: tokens.iter().any(|t| t.kind == TokenKind::FatArrow),
         };
         parser.script()
     }
@@ -397,6 +398,17 @@ pub(crate) mod m1 {
         /// The functions currently being parsed, innermost last.
         funcs: Vec<FuncId>,
         pending: Vec<Pending>,
+        /// Whether the source holds a `=>` anywhere.
+        ///
+        /// Deciding whether a `(` opens an arrow's parameter list costs a walk
+        /// to the matching `)`, and it would otherwise run at every `(` in
+        /// every program. One pass over the token vector at construction buys
+        /// the whole cost back for a source with no arrows in it -- which is
+        /// the same rule the runtime prefabs follow: a program that does not
+        /// use a feature pays nothing for it. Measured on
+        /// `scripts/qjs/lib/fleet.qjs`, which has no arrows: 2.2x slower to
+        /// compile without this field, unchanged with it.
+        has_arrow: bool,
         arg_count: u32,
         /// Frames of recursive descent currently on the native stack, plus the
         /// depth of the tree built so far -- see [`MAX_FRAMES`].
@@ -1260,23 +1272,7 @@ pub(crate) mod m1 {
             func: FuncId,
             self_name: Option<(String, Span)>,
         ) -> Result<(), CompileError> {
-            self.expect(&TokenKind::LParen, "needs a `(` to open the parameter list")?;
-            let mut params = Vec::new();
-            while !self.eat(&TokenKind::RParen) {
-                let token = self.peek().clone();
-                let TokenKind::Ident(name) = token.kind else {
-                    return Err(self.cannot_use("needs a parameter name here"));
-                };
-                self.advance();
-                params.push(self.declare(&name, BindingKind::Param, Span(token.offset))?);
-                if !self.eat(&TokenKind::Comma) {
-                    self.expect(
-                        &TokenKind::RParen,
-                        "needs a `,` or a `)` in the parameter list",
-                    )?;
-                    break;
-                }
-            }
+            let params = self.parameter_list()?;
             // The function expression's own name, after the parameters and
             // never before them. ECMA-262 15.2.5 puts that binding in a
             // function environment the parameter list *shadows*, so a
@@ -1301,13 +1297,173 @@ pub(crate) mod m1 {
             Ok(())
         }
 
+        /// A parenthesised parameter list, with the function's scope already
+        /// open. Shared by function declarations, function expressions and
+        /// arrow functions, because ECMA-262 gives all three the same
+        /// FormalParameters and a second copy would drift.
+        fn parameter_list(&mut self) -> Result<Vec<BindingId>, CompileError> {
+            self.expect(&TokenKind::LParen, "needs a `(` to open the parameter list")?;
+            let mut params = Vec::new();
+            while !self.eat(&TokenKind::RParen) {
+                let token = self.peek().clone();
+                let TokenKind::Ident(name) = token.kind else {
+                    return Err(self.cannot_use("needs a parameter name here"));
+                };
+                self.advance();
+                params.push(self.declare(&name, BindingKind::Param, Span(token.offset))?);
+                if !self.eat(&TokenKind::Comma) {
+                    self.expect(
+                        &TokenKind::RParen,
+                        "needs a `,` or a `)` in the parameter list",
+                    )?;
+                    break;
+                }
+            }
+            Ok(params)
+        }
+
+        /// Whether an ArrowFunction starts at the cursor.
+        ///
+        /// Asked only where an AssignmentExpression is allowed, which is
+        /// exactly where 15.3 puts an arrow. That placement is what makes
+        /// `1 + x => x` the syntax error ECMA-262 says it is: the right
+        /// operand of `+` is parsed at a higher binding power, so nothing
+        /// asks this there and the `=>` is left over.
+        fn at_arrow_head(&self) -> bool {
+            if !self.has_arrow {
+                return false;
+            }
+            match &self.kind() {
+                // `x => ...` -- ArrowParameters : BindingIdentifier.
+                TokenKind::Ident(_) => {
+                    matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::FatArrow))
+                }
+                TokenKind::LParen => self.parenthesis_opens_arrow_params(),
+                _ => false,
+            }
+        }
+
+        /// Whether the `(` under the cursor opens an arrow's parameter list
+        /// rather than a parenthesised expression.
+        ///
+        /// ECMA-262 settles this with a cover grammar: 13.2.2 parses
+        /// CoverParenthesizedExpressionAndArrowParameterList once and
+        /// *reinterprets* it after the `=>` decides. This parser holds the
+        /// whole token vector, so it can settle the question before parsing
+        /// anything -- walk to the `)` that matches this `(` and look at what
+        /// comes after. No node is ever built under one reading and reused
+        /// under the other, which is the part of the cover grammar that is
+        /// easy to get subtly wrong.
+        fn parenthesis_opens_arrow_params(&self) -> bool {
+            let mut depth = 0usize;
+            for (offset, token) in self.tokens[self.pos..].iter().enumerate() {
+                match token.kind {
+                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return matches!(
+                                self.tokens.get(self.pos + offset + 1).map(|t| &t.kind),
+                                Some(TokenKind::FatArrow)
+                            );
+                        }
+                    }
+                    // Unbalanced. Whichever reading the caller then takes will
+                    // report it; this only chooses which diagnostic appears,
+                    // and the parenthesised one is the commoner mistake.
+                    TokenKind::Eof => return false,
+                    _ => {}
+                }
+            }
+            false
+        }
+
+        /// An ArrowFunction, ECMA-262 15.3. The cursor is on the `(` or on the
+        /// lone parameter name.
+        ///
+        /// **An arrow is exactly a function expression in this engine**, and
+        /// that is why it needs no new AST node, no new lowering and no new
+        /// runtime. Every way the two differ in real JavaScript reaches for
+        /// something this engine does not have:
+        ///
+        /// | 15.3 says an arrow has no... | ...and this engine has no |
+        /// |---|---|
+        /// | `this` binding | `this` -- refused by name |
+        /// | `arguments` object | `arguments` -- an undeclared name |
+        /// | `[[Construct]]` | `new` -- refused by name |
+        /// | `prototype` property | function properties at all |
+        ///
+        /// The equivalence is therefore **conditional on those absences**, and
+        /// it expires the day any of them lands.
+        /// `arrows_m3::the_absences_the_arrow_equivalence_rests_on` pins all
+        /// four so that day is loud rather than quiet.
+        fn arrow_function(&mut self, span: Span) -> Result<ExprKind, CompileError> {
+            let func = self.reserve(None, span);
+            self.funcs.push(func);
+            self.enter(true, func);
+            let parsed = self.arrow_rest(func);
+            self.leave();
+            self.funcs.pop();
+            parsed?;
+            Ok(ExprKind::Function(func))
+        }
+
+        /// Parameters, `=>`, and body, with the arrow's scope open around all
+        /// three. No self-name: 15.3 gives an arrow no binding for itself.
+        fn arrow_rest(&mut self, func: FuncId) -> Result<(), CompileError> {
+            let params = if self.at(&TokenKind::LParen) {
+                self.parameter_list()?
+            } else {
+                let token = self.peek().clone();
+                let TokenKind::Ident(name) = token.kind else {
+                    return Err(self.cannot_use("needs a parameter name before the `=>`"));
+                };
+                self.advance();
+                vec![self.declare(&name, BindingKind::Param, Span(token.offset))?]
+            };
+            self.expect(
+                &TokenKind::FatArrow,
+                "needs a `=>` after an arrow function's parameters",
+            )?;
+            let body = if self.at(&TokenKind::LBrace) {
+                let open = self.peek().offset;
+                self.advance();
+                self.statements_until(
+                    &TokenKind::RBrace,
+                    &format!("the arrow function body opened at byte {open}"),
+                )?
+            } else {
+                // 15.3.5 step 4: a ConciseBody is an AssignmentExpression the
+                // arrow *returns*. So it is built as the `return` it means,
+                // rather than as a body kind of its own.
+                let span = Span(self.peek().offset);
+                let value = self.expression(BP_ASSIGN)?;
+                vec![Stmt {
+                    kind: StmtKind::Return(Some(value)),
+                    span,
+                }]
+            };
+            let function = &mut self.functions[func.0 as usize];
+            function.params = params;
+            function.body = body;
+            Ok(())
+        }
+
         // -- expressions -----------------------------------------------------
 
         /// One expression, consuming infix operators whose left binding power
         /// is at least `min_bp`.
         fn expression(&mut self, min_bp: u8) -> Result<Expr, CompileError> {
             self.deeper(1)?;
-            let mut lhs = self.unary()?;
+            // 15.3 makes an ArrowFunction an AssignmentExpression, so it is
+            // recognised here and only here -- at a rung where one is allowed.
+            let mut lhs = if min_bp <= BP_ASSIGN && self.at_arrow_head() {
+                let span = Span(self.peek().offset);
+                let kind = self.arrow_function(span)?;
+                Expr { kind, span }
+            } else {
+                self.unary()?
+            };
             // A left-associative chain costs no frame *here* -- it is this
             // loop and not recursion -- but it builds a tree that leans one
             // node deeper to the left per operator, and every consumer of that
