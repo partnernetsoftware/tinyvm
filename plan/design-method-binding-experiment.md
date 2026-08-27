@@ -113,19 +113,30 @@
 **时间盒**：做到 ③ 出数为止。在此之前不做性能优化、不加第五个方法之外的任何方法、
 不碰 `Math` / 全局对象。
 
-## §5 目录
+## §5 目录——**开工前就改过一次，原因记在这里**
+
+规格初稿把三个变体写成 `research/method-binding/variant-*/` 三个平行目录。
+**那是错的**，而且是一开工就会撞上的错：这三个变体不是三个程序，是**同一个编译器的
+三种改法**——它们都要动 `tinyvm-qjs` 的 `emit` / `runtime` / `repr`，
+没法作为兄弟目录并存。按 `.claude/skills/decisive-experiment` §8「若发现规格本身有
+bug，记下来并**修规格**」，改成：
 
 ```
+crates/tinyvm-qjs/Cargo.toml     三个互斥 feature，**全部 default-off**
+  method-this / method-bound / method-callsite
+
 research/method-binding/
 ├── README.md        Q 编号索引：问题一句话 / 状态 / 结论 / 规格 / 实现
-├── RESULTS.md       度量条件 → 逐判据数字 → 决策 trace → 偏差 → 复跑命令
-├── variant-a-this/
-├── variant-b-bound-closure/
-└── variant-c-callsite/
+├── measure.rs       三档体积 + 边际成本，一个 test target，读 feature 决定量哪个
+└── RESULTS.md       度量条件 → 逐判据数字 → 决策 trace → 偏差 → 复跑命令
 ```
 
-**一份可分离的实现，打包三次**——不要写三个独立原型：90% 工作重复，
-而且会引入「哪个花的时间多」这个混淆变量。
+这仍然是「**一份可分离的实现，打包三次**」——不要写三个独立原型：90% 工作重复，
+而且会引入「哪个花的时间多」这个混淆变量。只是「打包」这里的意思是
+`--features method-x`，不是三个目录。
+
+**判决做完后三个 feature 全部删掉**，只留赢家（且赢家转成无 feature 的常规实现）。
+feature 留在树上就是休眠模块，是 §4 表里第一条死法。
 
 ## §6 已排除的选项
 
