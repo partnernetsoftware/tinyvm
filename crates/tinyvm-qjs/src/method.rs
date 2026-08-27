@@ -19,7 +19,10 @@
 //! the *dispatch* -- the branch just moves from the callee's value into the
 //! call site's code. That belongs in criterion ⑥'s leak list.
 
-use super::repr::{self, BlockType, Ins, ValType, WIDTH, box_number, box_string, unbox_string};
+use super::repr::{
+    self, BlockType, Ins, ValType, WIDTH, box_number, box_string, unbox_array, unbox_string,
+};
+use super::array::{ARR_LEN, Ar};
 use super::runtime::{ALIGN_WORD, FnBuild, Rt, RtFunc};
 
 /// Where this set sits, and where the unconditional runtime sits. The same
@@ -32,6 +35,16 @@ pub(crate) struct Ctx {
     pub(crate) runtime_base: u32,
     /// Which functions this module carries, and where.
     pub(crate) plan: Plan,
+    /// Index of `__arr_new`, the base [`super::array::SET`] is laid out from.
+    ///
+    /// **A cross-gate dependency, and a leak.** `__m_push` cannot append
+    /// without `__arr_push`, which lives in the *array* set behind the *array*
+    /// gate. So a call site wanting `push` has to reach across and turn a
+    /// second, unrelated gate on. Variants A and B would have the same
+    /// dependency -- the method body is shared -- but they would not need the
+    /// *emitter* to know about it, because the body would be reached through a
+    /// value rather than through an index this module has to compute.
+    pub(crate) array_base: u32,
 }
 
 impl Ctx {
@@ -41,6 +54,10 @@ impl Ctx {
 
     fn rt(&self, rt: Rt) -> Ins {
         Ins::Call(self.runtime_base + rt.offset())
+    }
+
+    fn arr(&self, ar: Ar) -> Ins {
+        Ins::Call(self.array_base + ar.offset())
     }
 }
 
@@ -56,11 +73,22 @@ pub(crate) enum Me {
     Units,
     Trim,
     IndexOf,
+    Push,
+    /// `a.map(f)`. **Has no prefab**, and that is the finding: a prefab would
+    /// have to `call_indirect` into the callback, and no runtime prefab in
+    /// this compiler can -- the only `call_indirect` in the tree is the
+    /// emitter's. Variant C can sidestep that by inlining the loop at the call
+    /// site, where the instruction is available. Variants A and B cannot: for
+    /// them the method *is* a value, so its body is a function, and that
+    /// function would need the ability this one avoids needing.
+    ///
+    /// So `Me::Map` is in [`Me::at_call_site`] but **not** in [`SET`].
+    Map,
 }
 
 /// Every function this variant can emit, in module order. **Not** what a
 /// given module emits: see [`Plan`].
-pub(crate) const SET: &[Me] = &[Me::WsWidth, Me::Units, Me::Trim, Me::IndexOf];
+pub(crate) const SET: &[Me] = &[Me::WsWidth, Me::Units, Me::Trim, Me::IndexOf, Me::Push];
 
 /// Which of [`SET`] a particular module carries, and where each one lands.
 ///
@@ -87,7 +115,9 @@ impl Plan {
     /// is the whole point.
     pub(crate) fn want(&mut self, me: Me) {
         for needed in [me].into_iter().chain(me.helpers()) {
-            if !self.enabled.contains(&needed) {
+            // A method with no prefab -- `map` -- asks for nothing here. It is
+            // emitted at the call site, so there is no function to place.
+            if SET.contains(&needed) && !self.enabled.contains(&needed) {
                 self.enabled.push(needed);
             }
         }
@@ -122,6 +152,8 @@ impl Me {
             Me::Units => "__m_units",
             Me::Trim => "__m_trim",
             Me::IndexOf => "__m_index_of",
+            Me::Push => "__m_push",
+            Me::Map => "__m_map(inlined, no prefab)",
         }
     }
 
@@ -133,8 +165,24 @@ impl Me {
         match (name, argc) {
             ("trim", 0) => Some(Me::Trim),
             ("indexOf", 1) => Some(Me::IndexOf),
+            ("push", 1) => Some(Me::Push),
+            ("map", 1) => Some(Me::Map),
             _ => None,
         }
+    }
+
+    /// The tag a call site must see before it may take the fast path. Two
+    /// methods, two receivers -- so the call site's type test is per method,
+    /// not one shared test. Small, but it is the call site that carries it,
+    /// which is the shape criterion ⑥ is collecting.
+    pub(crate) fn receiver_is_array(self) -> bool {
+        matches!(self, Me::Push | Me::Map)
+    }
+
+    /// Whether this method's body reaches into the array set, which the
+    /// *array* gate controls. See [`Ctx::array_base`].
+    pub(crate) fn needs_arrays(self) -> bool {
+        matches!(self, Me::Push | Me::Map)
     }
 
     /// What this method's body calls, so [`Plan`] can pull them in.
@@ -142,7 +190,7 @@ impl Me {
         match self {
             Me::Trim => vec![Me::WsWidth],
             Me::IndexOf => vec![Me::Units],
-            Me::WsWidth | Me::Units => Vec::new(),
+            Me::WsWidth | Me::Units | Me::Push | Me::Map => Vec::new(),
         }
     }
 }
@@ -162,6 +210,10 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
         Me::Units => (vec![i32_, i32_], vec![i32_], units()),
         Me::Trim => (values(1), values(1), trim(ctx)),
         Me::IndexOf => (values(2), values(1), index_of(ctx)),
+        Me::Push => (values(2), values(1), push(ctx)),
+        // Unreachable: `Plan::want` never places a method that has no prefab,
+        // and `build` only walks the plan.
+        Me::Map => unreachable!("`map` is inlined at the call site, not placed"),
     };
     RtFunc {
         name: me.symbol(),
@@ -603,4 +655,33 @@ fn number_const(b: &mut Vec<Ins>, v: i32) {
     let mut out = Vec::new();
     box_number(&inner, &mut out);
     b.extend(out);
+}
+
+/// `[1, 2].push(3)` -- ECMA-262 23.1.3.23, without the rest parameter.
+///
+/// Traps on a non-Array receiver, from `unbox_array`. The append itself is
+/// `__arr_push`, which already exists and already grows the vector; this adds
+/// only the unboxing and the return value, which 23.1.3.23 step 5 makes the
+/// **new length**.
+fn push(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH);
+    let a = f.local(ValType::I32);
+
+    unbox_array(0, &mut f.body);
+    f.body.push(Ins::LocalSet(a));
+
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(a));
+    b.push(Ins::LocalGet(WIDTH));
+    b.push(Ins::LocalGet(WIDTH + 1));
+    b.push(ctx.arr(Ar::Push));
+
+    let mut inner = Vec::new();
+    inner.push(Ins::LocalGet(a));
+    inner.push(Ins::I32Load(ALIGN_WORD, ARR_LEN));
+    inner.push(Ins::F64ConvertI32S);
+    let mut out = Vec::new();
+    box_number(&inner, &mut out);
+    f.body.extend(out);
+    f
 }

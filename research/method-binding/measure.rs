@@ -54,6 +54,12 @@ const WITH_METHODS: &[(&str, &str)] = &[
     ("idx1", "return \"abc\".indexOf(\"b\");"),
     ("idx2", "return \"abc\".indexOf(\"b\") + \"de\".indexOf(\"e\");"),
     ("both", "return \"  a  \".trim().length + \"abc\".indexOf(\"b\");"),
+    ("push1", "let a = [1]; return a.push(2);"),
+    ("push2", "let a = [1]; let b = [1]; return a.push(2) + b.push(3);"),
+    // `map` is the one method with no prefab -- variant C inlines the loop at
+    // every call site -- so its ③b slope is the one that says what that costs.
+    ("map1", "let a = [1, 2]; return a.map(x => x + 1)[0];"),
+    ("map2", "let a = [1, 2]; let b = [3]; return a.map(x => x + 1)[0] + b.map(x => x + 1)[0];"),
 ];
 
 #[test]

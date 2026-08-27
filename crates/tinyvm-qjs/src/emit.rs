@@ -334,7 +334,9 @@ pub(crate) mod m1 {
     };
     /// Research only -- Q1 variant C. Deleted when the track is decided.
     #[cfg(feature = "method-callsite")]
-    use crate::repr::is_string;
+    use crate::array::ARR_LEN;
+    #[cfg(feature = "method-callsite")]
+    use crate::repr::{is_array, is_string, unbox_array};
     use crate::runtime::{
         self, ALIGN_WORD, Conversions, Ctx, FN_ELEMENT, FN_ENV, FnBuild, Rt, STRING_HEADER,
         StringPool,
@@ -707,6 +709,7 @@ pub(crate) mod m1 {
                 func_base: method_base,
                 runtime_base,
                 plan: scan.methods.clone(),
+                array_base: arr_base,
             })
         };
         #[cfg(not(feature = "method-callsite"))]
@@ -1630,6 +1633,13 @@ pub(crate) mod m1 {
                     && let Some(me) = method::Me::at_call_site(name, args.len())
                 {
                     scan.methods.want(me);
+                    // A cross-gate dependency, and a leak worth naming where
+                    // it happens: `__m_push` appends with `__arr_push`, which
+                    // lives behind the *array* gate. So a `push` call site has
+                    // to reach across and turn a second, unrelated gate on.
+                    if me.needs_arrays() {
+                        scan.arrays = true;
+                    }
                 }
                 // The callee of a host call, of a direct call, and of an
                 // immediately-invoked function expression is the *call* and
@@ -3278,7 +3288,11 @@ pub(crate) mod m1 {
             } = &callee.kind
                 && let Some(me) = method::Me::at_call_site(name, args.len())
             {
-                return self.specialised_method(object, name.clone(), me, args);
+                return if me == method::Me::Map {
+                    self.specialised_map(object, name.clone(), args)
+                } else {
+                    self.specialised_method(object, name.clone(), me, args)
+                };
             }
             let target = match &callee.kind {
                 ast::ExprKind::Name(ast::Name {
@@ -3410,8 +3424,15 @@ pub(crate) mod m1 {
             self.expr(object)?;
             store_local(recv, &mut self.f.body);
 
-            // The String path: the prefab, called directly, with no value.
-            is_string(recv, &mut self.f.body);
+            // The typed path: the prefab, called directly, with no value.
+            // Which tag is right depends on the method -- `trim` wants a
+            // String, `push` an Array -- so the test lives at the call site
+            // per method rather than being one shared check.
+            if me.receiver_is_array() {
+                is_array(recv, &mut self.f.body);
+            } else {
+                is_string(recv, &mut self.f.body);
+            }
             self.push(Ins::If(BlockType::Empty));
             load_local(recv, &mut self.f.body);
             for arg in args {
@@ -3423,7 +3444,11 @@ pub(crate) mod m1 {
 
             // Everything else: the ordinary property read and indirect call,
             // on the receiver already in hand.
-            is_string(recv, &mut self.f.body);
+            if me.receiver_is_array() {
+                is_array(recv, &mut self.f.body);
+            } else {
+                is_string(recv, &mut self.f.body);
+            }
             self.push(Ins::I32Eqz);
             self.push(Ins::If(BlockType::Empty));
             let uniform = self
@@ -3451,6 +3476,137 @@ pub(crate) mod m1 {
             load_local(result, &mut self.f.body);
             self.throw_check();
             self.give(result);
+            self.give(recv);
+            Ok(())
+        }
+
+        /// Research only -- Q1 variant C. `a.map(f)`, with the loop **inlined
+        /// at the call site**.
+        ///
+        /// Every other method here is a direct call to a prefab. `map` cannot
+        /// be, and the reason is the sharpest structural fact this experiment
+        /// has turned up: a prefab would have to `call_indirect` into the
+        /// callback, and **no runtime prefab in this compiler can** -- the
+        /// only `call_indirect` in the tree is the one a few functions below.
+        /// Variant C sidesteps that by emitting the loop here, where the
+        /// instruction is in scope. Variants A and B cannot sidestep it: for
+        /// them the method *is* a value, so its body is a function, and that
+        /// function needs exactly the ability this one avoids needing.
+        ///
+        /// The price is paid in criterion ③b. Every other method costs ~43
+        /// bytes per call site; this one costs a whole loop per call site.
+        #[cfg(feature = "method-callsite")]
+        fn specialised_map(
+            &mut self,
+            object: &ast::Expr,
+            name: String,
+            args: &[ast::Expr],
+        ) -> Result<(), CompileError> {
+            let arrays = self
+                .arrays
+                .expect("a `map` call site turns the array gate on");
+            let uniform = self
+                .uniform
+                .expect("the scan finds every call that is not to a known function");
+            let recv = self.take();
+            let callback = self.take();
+            let elem = self.take();
+            let result = self.take();
+            let a = self.take_raw();
+            let out = self.take_raw();
+            let i = self.take_raw();
+            let n = self.take_raw();
+
+            self.expr(object)?;
+            store_local(recv, &mut self.f.body);
+            self.expr(&args[0])?;
+            store_local(callback, &mut self.f.body);
+
+            is_array(recv, &mut self.f.body);
+            self.push(Ins::If(BlockType::Empty));
+            unbox_array(recv, &mut self.f.body);
+            self.push(Ins::LocalSet(a));
+            self.push(Ins::LocalGet(a));
+            self.push(Ins::I32Load(ALIGN_WORD, ARR_LEN));
+            self.push(Ins::LocalSet(n));
+            self.push(Ins::LocalGet(n));
+            self.push(Ins::Call(arrays + Ar::New.offset()));
+            self.push(Ins::LocalSet(out));
+            self.push(Ins::I32Const(0));
+            self.push(Ins::LocalSet(i));
+            self.push(Ins::Block(BlockType::Empty));
+            self.push(Ins::Loop(BlockType::Empty));
+            self.push(Ins::LocalGet(i));
+            self.push(Ins::LocalGet(n));
+            self.push(Ins::I32GeU);
+            self.push(Ins::BrIf(1));
+            self.push(Ins::LocalGet(a));
+            self.push(Ins::LocalGet(i));
+            self.push(Ins::Call(arrays + Ar::Get.offset()));
+            store_local(elem, &mut self.f.body);
+            if self.captures {
+                unbox_function(callback, &mut self.f.body);
+                self.push(Ins::I32Load(ALIGN_WORD, FN_ENV));
+            }
+            load_local(elem, &mut self.f.body);
+            for _ in 1..uniform.arity {
+                const_undefined(&mut self.f.body);
+            }
+            unbox_function(callback, &mut self.f.body);
+            self.push(Ins::I32Load(ALIGN_WORD, FN_ELEMENT));
+            self.push(Ins::CallIndirect(uniform.type_index, 0));
+            store_local(elem, &mut self.f.body);
+            self.push(Ins::LocalGet(out));
+            load_local(elem, &mut self.f.body);
+            self.push(Ins::Call(arrays + Ar::Push.offset()));
+            self.push(Ins::LocalGet(i));
+            self.push(Ins::I32Const(1));
+            self.push(Ins::I32Add);
+            self.push(Ins::LocalSet(i));
+            self.push(Ins::Br(0));
+            self.push(Ins::End);
+            self.push(Ins::End);
+            let mut inner = Vec::new();
+            inner.push(Ins::LocalGet(out));
+            let mut boxed = Vec::new();
+            box_array(&inner, &mut boxed);
+            self.f.body.extend(boxed);
+            store_local(result, &mut self.f.body);
+            self.push(Ins::End);
+
+            // A receiver that is not an Array: the ordinary property read and
+            // indirect call, on the receiver already in hand.
+            is_array(recv, &mut self.f.body);
+            self.push(Ins::I32Eqz);
+            self.push(Ins::If(BlockType::Empty));
+            let value = self.take();
+            load_local(recv, &mut self.f.body);
+            let key = self.pool.intern(&name);
+            self.push(Ins::I32Const(key));
+            let get = self.ctx.call(Rt::ObjGet);
+            self.push(get);
+            store_local(value, &mut self.f.body);
+            if self.captures {
+                unbox_function(value, &mut self.f.body);
+                self.push(Ins::I32Load(ALIGN_WORD, FN_ENV));
+            }
+            self.arguments(args, uniform.arity)?;
+            unbox_function(value, &mut self.f.body);
+            self.push(Ins::I32Load(ALIGN_WORD, FN_ELEMENT));
+            self.push(Ins::CallIndirect(uniform.type_index, 0));
+            store_local(result, &mut self.f.body);
+            self.give(value);
+            self.push(Ins::End);
+
+            load_local(result, &mut self.f.body);
+            self.throw_check();
+            self.give_raw(n);
+            self.give_raw(i);
+            self.give_raw(out);
+            self.give_raw(a);
+            self.give(result);
+            self.give(elem);
+            self.give(callback);
             self.give(recv);
             Ok(())
         }
