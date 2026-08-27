@@ -399,7 +399,7 @@ pub(crate) struct Ctx {
     /// paying for. Variant C cannot do that -- its test is at the call site,
     /// where no branch exists yet.
     #[cfg(feature = "method-bound")]
-    pub(crate) bound_trim: Option<(u32, i32, i32)>,
+    pub(crate) bound_trim: Option<(u32, i32, i32, bool)>,
     /// Whether any function in this program captures a binding of an
     /// enclosing one. Widens `__fn_new` by one parameter and the record it
     /// builds by one word; false leaves both exactly as they were.
@@ -1644,7 +1644,7 @@ fn obj_get(ctx: &Ctx) -> FnBuild {
         // Research only -- Q1 variant B. Inside the String branch, so the
         // receiver test is one this function already made.
         #[cfg(feature = "method-bound")]
-        if let Some((base, element, trim)) = ctx.bound_trim {
+        if let Some((base, element, trim, map)) = ctx.bound_trim {
             arm.push(Ins::LocalGet(key));
             arm.push(Ins::I32Const(trim));
             arm.push(ctx.call(Rt::StrEq));
@@ -1652,7 +1652,9 @@ fn obj_get(ctx: &Ctx) -> FnBuild {
             arm.push(Ins::LocalGet(0));
             arm.push(Ins::LocalGet(1));
             arm.push(Ins::I32Const(element));
-            arm.push(Ins::Call(base + super::method::Me::Bind.offset_in(ctx)));
+            arm.push(Ins::Call(
+                base + super::method::Me::Bind.offset_in_bound(true, map),
+            ));
             arm.push(Ins::Return);
             arm.push(Ins::End);
         }

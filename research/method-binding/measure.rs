@@ -60,6 +60,7 @@ const WITH_METHODS: &[(&str, &str)] = &[
     // every call site -- so its ③b slope is the one that says what that costs.
     ("map1", "let a = [1, 2]; return a.map(x => x + 1)[0];"),
     ("map2", "let a = [1, 2]; let b = [3]; return a.map(x => x + 1)[0] + b.map(x => x + 1)[0];"),
+    ("map3", "let a = [1, 2]; let b = [3]; let c = [4]; return a.map(x => x + 1)[0] + b.map(x => x + 1)[0] + c.map(x => x + 1)[0];"),
 ];
 
 #[test]

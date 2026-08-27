@@ -20,11 +20,11 @@
 //! call site's code. That belongs in criterion ⑥'s leak list.
 
 use super::repr::{
-    self, BlockType, Ins, ValType, WIDTH, box_function, box_number, box_string, unbox_array,
-    unbox_string,
+    self, BlockType, Ins, ValType, WIDTH, box_array, box_function, box_number, box_string,
+    const_undefined, unbox_array, unbox_string,
 };
 use super::array::{ARR_LEN, Ar};
-use super::runtime::{ALIGN_WORD, FnBuild, Rt, RtFunc};
+use super::runtime::{ALIGN_WORD, FN_ELEMENT, FN_ENV, FnBuild, Rt, RtFunc};
 
 /// Where this set sits, and where the unconditional runtime sits. The same
 /// shape [`super::array::Ctx`] has, for the same reason: a gated set's own
@@ -36,6 +36,17 @@ pub(crate) struct Ctx {
     pub(crate) runtime_base: u32,
     /// Which functions this module carries, and where.
     pub(crate) plan: Plan,
+    /// Research only -- Q1 variant B. The uniform call signature's type
+    /// index, and the arity it pads to.
+    ///
+    /// **This is the capability leak 4 said was missing**, handed to the
+    /// prefab layer. Nothing in this compiler's runtime could `call_indirect`
+    /// before; `__m_map_bound` has to, because its argument is a function
+    /// value. Variant C never needs it -- it inlines the loop where the
+    /// instruction already is -- so the whole of this field, and the plumbing
+    /// that fills it, is chargeable to B.
+    #[cfg(feature = "method-bound")]
+    pub(crate) uniform: Option<(u32, u32)>,
     /// Index of `__arr_new`, the base [`super::array::SET`] is laid out from.
     ///
     /// **A cross-gate dependency, and a leak.** `__m_push` cannot append
@@ -88,6 +99,13 @@ pub(crate) enum Me {
     /// Research only -- Q1 variant B. See [`bind`].
     #[cfg(feature = "method-bound")]
     Bind,
+    /// Research only -- Q1 variant B. `a.map(f)` as a **prefab**, which is
+    /// the thing leak 4 said could not exist: it has to `call_indirect` into
+    /// the callback. It can exist, but only once the prefab layer is handed
+    /// the uniform type index -- see [`Ctx::uniform_type`]. That plumbing is
+    /// B's entry fee, and C never pays it.
+    #[cfg(feature = "method-bound")]
+    MapBound,
 }
 
 /// Every function this variant can emit, in module order. **Not** what a
@@ -100,6 +118,8 @@ pub(crate) const SET: &[Me] = &[
     Me::Push,
     #[cfg(feature = "method-bound")]
     Me::Bind,
+    #[cfg(feature = "method-bound")]
+    Me::MapBound,
 ];
 
 /// Which of [`SET`] a particular module carries, and where each one lands.
@@ -145,10 +165,16 @@ impl Plan {
     /// C pays nothing for a method it does not call; B pays for every method
     /// it exposes. That asymmetry is a result, not an implementation detail.
     #[cfg(feature = "method-bound")]
-    pub(crate) fn bound_surface() -> Self {
-        Self {
-            enabled: vec![Me::WsWidth, Me::Trim, Me::Bind],
+    pub(crate) fn bound_surface(trim: bool, map: bool) -> Self {
+        let mut enabled = vec![Me::Bind];
+        if trim {
+            enabled.push(Me::WsWidth);
+            enabled.push(Me::Trim);
         }
+        if map {
+            enabled.push(Me::MapBound);
+        }
+        Self { enabled }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -184,6 +210,8 @@ impl Me {
             Me::Map => "__m_map(inlined, no prefab)",
             #[cfg(feature = "method-bound")]
             Me::Bind => "__m_bind",
+            #[cfg(feature = "method-bound")]
+            Me::MapBound => "__m_map_bound",
         }
     }
 
@@ -217,9 +245,11 @@ impl Me {
 
     /// Where this function sits, given the runtime `Ctx` that knows the plan.
     /// A shim so `runtime.rs` does not have to carry a `Plan`.
+    /// Where this function sits in variant B's surface, given which names the
+    /// program reads.
     #[cfg(feature = "method-bound")]
-    pub(crate) fn offset_in(self, _ctx: &super::runtime::Ctx) -> u32 {
-        Plan::bound_surface().offset(self)
+    pub(crate) fn offset_in_bound(self, trim: bool, map: bool) -> u32 {
+        Plan::bound_surface(trim, map).offset(self)
     }
 
     /// What this method's body calls, so [`Plan`] can pull them in.
@@ -228,7 +258,7 @@ impl Me {
             Me::Trim => vec![Me::WsWidth],
             Me::IndexOf => vec![Me::Units],
             #[cfg(feature = "method-bound")]
-            Me::Bind => Vec::new(),
+            Me::Bind | Me::MapBound => Vec::new(),
             Me::WsWidth | Me::Units | Me::Push | Me::Map => Vec::new(),
         }
     }
@@ -257,6 +287,8 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
         Me::Map => unreachable!("`map` is inlined at the call site, not placed"),
         #[cfg(feature = "method-bound")]
         Me::Bind => (vec![i32_, i64_, i32_], values(1), bind(ctx)),
+        #[cfg(feature = "method-bound")]
+        Me::MapBound => (vec![i32_, i32_, i64_], values(1), map_bound(ctx)),
     };
     RtFunc {
         name: me.symbol(),
@@ -768,4 +800,101 @@ fn push(ctx: &Ctx) -> FnBuild {
     box_number(&inner, &mut out);
     f.body.extend(out);
     f
+}
+
+/// Research only -- Q1 variant B. `a.map(f)` as a prefab.
+///
+/// Parameters are the environment (holding the receiver), then the callback as
+/// a V1 pair -- the shape the adapter forwards. The loop is the same one
+/// variant C inlines at every call site; here it exists **once**, which is
+/// exactly the trade the two variants are being measured on.
+#[cfg(feature = "method-bound")]
+fn map_bound(ctx: &Ctx) -> FnBuild {
+    let (type_index, arity) = ctx
+        .uniform
+        .expect("variant B's map needs the uniform signature");
+    let mut f = FnBuild::new(1 + WIDTH);
+    let a = f.local(ValType::I32);
+    let out = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+    let n = f.local(ValType::I32);
+    let tag = f.local(ValType::I32);
+    let payload = f.local(ValType::I64);
+
+    // The receiver, out of the environment `__m_bind` built.
+    f.body.push(Ins::LocalGet(0));
+    f.body.push(Ins::I32Load(ALIGN_WORD, 0));
+    f.body.push(Ins::LocalGet(0));
+    f.body.push(Ins::I64Load(ALIGN_WORD, 4));
+    f.body.push(Ins::LocalSet(payload));
+    f.body.push(Ins::LocalSet(tag));
+    unbox_array_from(tag, payload, &mut f.body);
+    f.body.push(Ins::LocalSet(a));
+
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(a));
+    b.push(Ins::I32Load(ALIGN_WORD, ARR_LEN));
+    b.push(Ins::LocalSet(n));
+    b.push(Ins::LocalGet(n));
+    b.push(ctx.arr(Ar::New));
+    b.push(Ins::LocalSet(out));
+
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+
+    // The callback's own environment goes first: the uniform signature leads
+    // with it, and the callback's record is what holds the answer.
+    b.push(Ins::LocalGet(2));
+    b.push(Ins::I32WrapI64);
+    b.push(Ins::I32Load(ALIGN_WORD, FN_ENV));
+
+    b.push(Ins::LocalGet(a));
+    b.push(Ins::LocalGet(i));
+    b.push(ctx.arr(Ar::Get));
+    for _ in 1..arity {
+        const_undefined(b);
+    }
+    b.push(Ins::LocalGet(2));
+    b.push(Ins::I32WrapI64);
+    b.push(Ins::I32Load(ALIGN_WORD, FN_ELEMENT));
+    b.push(Ins::CallIndirect(type_index, 0));
+    b.push(Ins::LocalSet(payload));
+    b.push(Ins::LocalSet(tag));
+
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(tag));
+    b.push(Ins::LocalGet(payload));
+    b.push(ctx.arr(Ar::Push));
+
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    let mut inner = Vec::new();
+    inner.push(Ins::LocalGet(out));
+    let mut boxed = Vec::new();
+    box_array(&inner, &mut boxed);
+    f.body.extend(boxed);
+    f
+}
+
+/// `unbox_array`, but from two locals rather than from a parameter pair.
+#[cfg(feature = "method-bound")]
+fn unbox_array_from(tag: u32, payload: u32, out: &mut Vec<Ins>) {
+    out.push(Ins::LocalGet(tag));
+    out.push(Ins::I32Const(repr::TAG_ARRAY));
+    out.push(Ins::I32Ne);
+    out.push(Ins::If(BlockType::Empty));
+    out.push(Ins::Unreachable);
+    out.push(Ins::End);
+    out.push(Ins::LocalGet(payload));
+    out.push(Ins::I32WrapI64);
 }

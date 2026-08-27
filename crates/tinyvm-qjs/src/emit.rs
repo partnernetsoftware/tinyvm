@@ -627,8 +627,8 @@ pub(crate) mod m1 {
         #[cfg(feature = "method-bound")]
         let method_base = arr_base + arr_len;
         #[cfg(feature = "method-bound")]
-        let method_len = if scan.bound {
-            method::Plan::bound_surface().len()
+        let method_len = if bound_wanted(&scan) {
+            method::Plan::bound_surface(scan.bound_trim, scan.bound_map).len()
         } else {
             0
         };
@@ -660,13 +660,14 @@ pub(crate) mod m1 {
             },
             arrays: scan.arrays,
             #[cfg(feature = "method-bound")]
-            bound_trim: bound_wanted(&scan).then(|| {
+            bound_trim: scan.bound_trim.then(|| {
                 (
                     method_base,
                     // Element 1: the first reserved slot after the null one.
                     // `JSON` takes two when present, so this follows them.
                     1 + if scan.json { 2 } else { 0 },
                     pool.intern("trim"),
+                    scan.bound_map,
                 )
             }),
             captures: scan.captures,
@@ -721,6 +722,16 @@ pub(crate) mod m1 {
 
         let array_set: Vec<runtime::RtFunc> = if scan.arrays {
             array::build(&array::Ctx {
+                #[cfg(feature = "method-bound")]
+                bound_map: scan.bound_map.then(|| {
+                    (
+                        method_base,
+                        // After `__m_trim`'s, when that one is present.
+                        1 + i32::from(scan.bound_trim) + if scan.json { 2 } else { 0 },
+                        pool.intern("map"),
+                        scan.bound_trim,
+                    )
+                }),
                 func_base: arr_base,
                 runtime_base,
                 names: array::Names::intern(&mut pool),
@@ -740,12 +751,30 @@ pub(crate) mod m1 {
                 array_base: arr_base,
             })
         };
+        // Research only -- Q1 variant B, and a leak of its own: `__m_map_bound`
+        // needs the uniform type index, and the prefabs are interned **before**
+        // the uniform signature is created. So B forces the type section to be
+        // laid out in a different order than every other build. Duplicated
+        // under the feature rather than moved, so the default build's type
+        // indices do not shift for a research variant.
         #[cfg(feature = "method-bound")]
-        let method_set: Vec<runtime::RtFunc> = if scan.bound {
+        let uniform = scan.needs_table().then(|| {
+            let mut params = values(scan.uniform_arity(program));
+            if scan.captures {
+                params.insert(0, ValType::I32);
+            }
+            Uniform {
+                type_index: intern(&mut types, params, values(1)),
+                arity: scan.uniform_arity(program),
+            }
+        });
+        #[cfg(feature = "method-bound")]
+        let method_set: Vec<runtime::RtFunc> = if bound_wanted(&scan) {
             method::build(&method::Ctx {
                 func_base: method_base,
                 runtime_base,
-                plan: method::Plan::bound_surface(),
+                plan: method::Plan::bound_surface(scan.bound_trim, scan.bound_map),
+                uniform: uniform.map(|u| (u.type_index, u.arity)),
                 array_base: arr_base,
             })
         } else {
@@ -784,6 +813,7 @@ pub(crate) mod m1 {
         // the widening is all-or-nothing -- an adapter whose target captures
         // nothing simply never reads slot 0. Gated, so a closure-free program
         // interns the type it always did.
+        #[cfg(not(feature = "method-bound"))]
         let uniform = scan.needs_table().then(|| {
             let mut params = values(scan.uniform_arity(program));
             if scan.captures {
@@ -814,8 +844,8 @@ pub(crate) mod m1 {
                 // into `obj_get` -- which is emitted before anyone knows
                 // whether a `trim` appears. C pays nothing for a method it
                 // does not call; B pays for the element regardless.
-                + if cfg!(feature = "method-bound") && bound_wanted(&scan) {
-                    1
+                + if cfg!(feature = "method-bound") {
+                    i32::from(bound_flag_trim(&scan)) + i32::from(bound_flag_map(&scan))
                 } else {
                     0
                 },
@@ -891,7 +921,7 @@ pub(crate) mod m1 {
             // Research only -- Q1 variant B. After `JSON`'s two, matching the
             // element index `obj_get` was handed.
             #[cfg(feature = "method-bound")]
-            if scan.bound {
+            if scan.bound_trim {
                 let env_slot = u32::from(scan.captures);
                 let _ = env_slot;
                 let mut body: Vec<Ins> = Vec::new();
@@ -901,10 +931,31 @@ pub(crate) mod m1 {
                 body.push(Ins::I32Load(ALIGN_WORD, 0));
                 body.push(Ins::LocalGet(0));
                 body.push(Ins::I64Load(ALIGN_WORD, 4));
-                body.push(Ins::Call(method_base + method::Me::Trim.offset_in(&ctx)));
+                body.push(Ins::Call(
+                    method_base
+                        + method::Me::Trim.offset_in_bound(scan.bound_trim, scan.bound_map),
+                ));
                 let index = adapter_base + in_table.len() as u32;
                 funcs.push(func(
                     "<adapter of __m_trim>".to_string(),
+                    uniform.type_index,
+                    Vec::new(),
+                    body,
+                ));
+                in_table.push(index);
+            }
+            #[cfg(feature = "method-bound")]
+            if scan.bound_map {
+                let mut body: Vec<Ins> = Vec::new();
+                body.push(Ins::LocalGet(0));
+                body.extend((0..WIDTH).map(|i| Ins::LocalGet(1 + i)));
+                body.push(Ins::Call(
+                    method_base
+                        + method::Me::MapBound.offset_in_bound(scan.bound_trim, scan.bound_map),
+                ));
+                let index = adapter_base + in_table.len() as u32;
+                funcs.push(func(
+                    "<adapter of __m_map_bound>".to_string(),
                     uniform.type_index,
                     Vec::new(),
                     body,
@@ -1421,7 +1472,9 @@ pub(crate) mod m1 {
         /// flag made `return "ab".length;` pay 514 bytes for a bound surface
         /// it never touches, which fails the experiment's own §1.2.
         #[cfg(feature = "method-bound")]
-        bound: bool,
+        bound_trim: bool,
+        #[cfg(feature = "method-bound")]
+        bound_map: bool,
         /// Research only -- Q1 variant C. Whether the program calls one of the
         /// four methods by name. Deleted when the track is decided.
         #[cfg(feature = "method-callsite")]
@@ -1523,6 +1576,29 @@ pub(crate) mod m1 {
                 // floor for a program that names `JSON`. `fleet.js` already
                 // reaches three (`ui.input.pointer`), so it pays nothing.
                 .max(if self.json { Json::ARITY } else { 0 })
+                // Research only -- Q1 variant B, and one more leak: its
+                // `map` adapter forwards one JS value to `__m_map_bound`, so
+                // the uniform signature must have at least one value
+                // parameter -- even in a program that makes no call at all.
+                // B raises a signature the whole table shares; C does not
+                // touch it.
+                .max(if cfg!(feature = "method-bound") && self.bound_flag() {
+                    1
+                } else {
+                    0
+                })
+        }
+
+        /// Research only -- Q1 variant B.
+        fn bound_flag(&self) -> bool {
+            #[cfg(feature = "method-bound")]
+            {
+                self.bound_trim || self.bound_map
+            }
+            #[cfg(not(feature = "method-bound"))]
+            {
+                false
+            }
         }
 
         /// Whether this program needs the module's funcref table at all.
@@ -1532,7 +1608,7 @@ pub(crate) mod m1 {
             // uniform signature even if it holds no function of its own.
             // Another fixed cost C does not pay.
             #[cfg(feature = "method-bound")]
-            let bound = self.bound;
+            let bound = self.bound_trim || self.bound_map;
             #[cfg(not(feature = "method-bound"))]
             let bound = false;
             self.function_values || self.indirect || self.json || bound
@@ -1547,10 +1623,34 @@ pub(crate) mod m1 {
 
     /// Research only -- Q1 variant B. Whether this program reaches a bound
     /// method at all.
+    /// Research only -- Q1 variant B.
+    fn bound_flag_trim(_scan: &Scan) -> bool {
+        #[cfg(feature = "method-bound")]
+        {
+            _scan.bound_trim
+        }
+        #[cfg(not(feature = "method-bound"))]
+        {
+            false
+        }
+    }
+
+    /// Research only -- Q1 variant B.
+    fn bound_flag_map(_scan: &Scan) -> bool {
+        #[cfg(feature = "method-bound")]
+        {
+            _scan.bound_map
+        }
+        #[cfg(not(feature = "method-bound"))]
+        {
+            false
+        }
+    }
+
     fn bound_wanted(_scan: &Scan) -> bool {
         #[cfg(feature = "method-bound")]
         {
-            _scan.bound
+            _scan.bound_trim || _scan.bound_map
         }
         #[cfg(not(feature = "method-bound"))]
         {
@@ -1587,7 +1687,10 @@ pub(crate) mod m1 {
         // cost that variant C does not pay, and one of B's leaks.
         #[cfg(feature = "method-bound")]
         {
-            out.captures |= out.bound;
+            out.captures |= out.bound_trim || out.bound_map;
+            // `__m_map_bound` reaches into the array set, so reading `map`
+            // pulls the array gate too -- B's own cross-gate dependency.
+            out.arrays |= out.bound_map;
         }
         Ok(out)
     }
@@ -1799,7 +1902,8 @@ pub(crate) mod m1 {
                         // that could be one of its names.
                         #[cfg(feature = "method-bound")]
                         {
-                            scan.bound |= name == "trim";
+                            scan.bound_trim |= name == "trim";
+                            scan.bound_map |= name == "map";
                         }
                         Ok(())
                     }
