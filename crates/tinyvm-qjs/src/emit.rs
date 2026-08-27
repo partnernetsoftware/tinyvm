@@ -321,6 +321,9 @@ pub(crate) mod m1 {
     use crate::ast::m1 as ast;
     use crate::convert;
     use crate::diag::{Boundary, CompileError, host_table, unsupported};
+    /// Research only -- Q1 variant C. Deleted when the track is decided.
+    #[cfg(feature = "method-callsite")]
+    use crate::method;
     use crate::ir::m1 as ir;
     use crate::opts::{HostFn, HostParam, HostResult, Names, Options};
     use crate::repr::{
@@ -329,6 +332,9 @@ pub(crate) mod m1 {
         const_undefined, drop_value, load_local, store_local, unbox_function, unbox_number,
         unbox_string,
     };
+    /// Research only -- Q1 variant C. Deleted when the track is decided.
+    #[cfg(feature = "method-callsite")]
+    use crate::repr::is_string;
     use crate::runtime::{
         self, ALIGN_WORD, Conversions, Ctx, FN_ELEMENT, FN_ENV, FnBuild, Rt, STRING_HEADER,
         StringPool,
@@ -610,6 +616,20 @@ pub(crate) mod m1 {
         } else {
             0
         };
+        // Research only -- Q1 variant C, appended last for the same reason
+        // every other gated set is: a program without it keeps the indices it
+        // always had. Deleted when the track is decided.
+        #[cfg(feature = "method-callsite")]
+        let method_base = arr_base + arr_len;
+        #[cfg(feature = "method-callsite")]
+        let method_len = if scan.methods {
+            method::SET.len() as u32
+        } else {
+            0
+        };
+        #[cfg(feature = "method-callsite")]
+        let user_base = method_base + method_len;
+        #[cfg(not(feature = "method-callsite"))]
         let user_base = arr_base + arr_len;
         let ctx = Ctx {
             func_base: runtime_base,
@@ -683,12 +703,25 @@ pub(crate) mod m1 {
             Vec::new()
         };
 
+        #[cfg(feature = "method-callsite")]
+        let method_set: Vec<runtime::RtFunc> = if scan.methods {
+            method::build(&method::Ctx {
+                func_base: method_base,
+                runtime_base,
+            })
+        } else {
+            Vec::new()
+        };
+        #[cfg(not(feature = "method-callsite"))]
+        let method_set: Vec<runtime::RtFunc> = Vec::new();
+
         let mut funcs: Vec<ir::Func> = Vec::new();
         for built in runtime::build(&ctx)
             .into_iter()
             .chain(convert::build(&cv))
             .chain(json_set)
             .chain(array_set)
+            .chain(method_set)
         {
             let type_index = intern(&mut types, built.params.clone(), built.results.clone());
             funcs.push(func(
@@ -749,6 +782,8 @@ pub(crate) mod m1 {
                 &mut fns,
                 uniform,
                 scan.arrays.then_some(arr_base),
+                #[cfg(feature = "method-callsite")]
+                scan.methods.then_some(method_base),
                 unwind,
                 json,
                 user_base,
@@ -1303,6 +1338,10 @@ pub(crate) mod m1 {
         /// tree, read straight off `Function::captures`, not a guess about
         /// syntax.
         captures: bool,
+        /// Research only -- Q1 variant C. Whether the program calls one of the
+        /// four methods by name. Deleted when the track is decided.
+        #[cfg(feature = "method-callsite")]
+        methods: bool,
         /// Whether the program can read a property off a String, which is:
         /// it writes `.length` as a static key, or it writes any computed key
         /// at all. Gates the one arm of [`runtime::obj_get`] that answers
@@ -1582,6 +1621,19 @@ pub(crate) mod m1 {
                 _ => Ok(()),
             },
             ast::ExprKind::Call { callee, args } => {
+                // Research only -- Q1 variant C. The gate: the program calls
+                // one of the four by name. Not exact -- `o.trim()` on a plain
+                // object turns the set on and never reaches the prefab -- and
+                // it cannot be, for the reason `specialised_method` gives.
+                #[cfg(feature = "method-callsite")]
+                if let ast::ExprKind::Member {
+                    key: ast::MemberKey::Static(name),
+                    ..
+                } = &callee.kind
+                    && name == "trim"
+                {
+                    scan.methods = true;
+                }
                 // The callee of a host call, of a direct call, and of an
                 // immediately-invoked function expression is the *call* and
                 // not a value, so none of the three is walked as one. Every
@@ -1776,6 +1828,10 @@ pub(crate) mod m1 {
         /// refused -- which emits none of that set and keeps the pre-array
         /// lowering of a computed access, exactly as it was.
         arrays: Option<u32>,
+        /// Research only -- Q1 variant C. Index of `__m_ws_width`, or `None`
+        /// for a program that calls none of the four methods.
+        #[cfg(feature = "method-callsite")]
+        methods: Option<u32>,
         /// Where a throw in flight lives, or `None` for a program with no
         /// `throw` in it -- which emits no check and no global.
         unwind: Option<Unwind>,
@@ -1827,6 +1883,7 @@ pub(crate) mod m1 {
             fns: &'a mut FnTable,
             uniform: Option<Uniform>,
             arrays: Option<u32>,
+            #[cfg(feature = "method-callsite")] methods: Option<u32>,
             unwind: Option<Unwind>,
             json: Option<Json>,
             user_base: u32,
@@ -1879,6 +1936,8 @@ pub(crate) mod m1 {
                 fns,
                 uniform,
                 arrays,
+                #[cfg(feature = "method-callsite")]
+                methods,
                 unwind,
                 json,
                 user_base,
@@ -3214,6 +3273,17 @@ pub(crate) mod m1 {
         /// callee declares. Everything else -- a property, a call's result, a
         /// name holding a value -- goes through the table.
         fn call(&mut self, callee: &ast::Expr, args: &[ast::Expr]) -> Result<(), CompileError> {
+            // Research only -- Q1 variant C. Deleted when the track is decided.
+            #[cfg(feature = "method-callsite")]
+            if let ast::ExprKind::Member {
+                object,
+                key: ast::MemberKey::Static(name),
+            } = &callee.kind
+                && name == "trim"
+                && args.is_empty()
+            {
+                return self.specialised_method(object, name.clone(), args);
+            }
             let target = match &callee.kind {
                 ast::ExprKind::Name(ast::Name {
                     res: ast::Res::Host(text),
@@ -3297,6 +3367,90 @@ pub(crate) mod m1 {
             // still in flight when this returns.
             self.throw_check();
             self.give(slot);
+            Ok(())
+        }
+
+        /// Research only -- Q1 variant C, the call-site specialisation itself.
+        ///
+        /// ```text
+        /// <evaluate the receiver once, into a scratch pair>
+        /// if the receiver is a String:  call the method's prefab directly
+        /// if it is not:                 read the property and call the value
+        /// ```
+        ///
+        /// **The run-time test cannot be skipped**, and that is the variant's
+        /// first leak. The source says `x.trim()`; whether `x` is a String or
+        /// an object carrying a `trim` property is not knowable until it runs,
+        /// and `method_conformance::a_plain_object_property_named_like_a_method_is_untouched`
+        /// is the assertion that says the second case must keep working. So
+        /// variant C removes the *function value*, not the *dispatch* -- the
+        /// branch moves out of the callee and into every call site.
+        ///
+        /// **The receiver is evaluated once**, which is why this cannot simply
+        /// fall through to [`Lower::indirect_call`] on the non-String path:
+        /// that re-lowers the callee, and `f().trim()` would call `f` twice.
+        /// A second leak, and a more expensive one -- it is what forces the
+        /// scratch pair and the two-`If` shape below.
+        ///
+        /// Two `If`s over a result slot rather than an if/else: this IR has no
+        /// `Else` and `BlockType` has only `Empty`, so a branch that produces
+        /// a value has to route it through a local. Recorded as a third leak
+        /// -- it is a property of the IR, not of the variant, but the variant
+        /// is what pays for it.
+        #[cfg(feature = "method-callsite")]
+        fn specialised_method(
+            &mut self,
+            object: &ast::Expr,
+            name: String,
+            args: &[ast::Expr],
+        ) -> Result<(), CompileError> {
+            let base = self
+                .methods
+                .expect("the scan turns the set on for every specialised call");
+            let recv = self.take();
+            let result = self.take();
+            self.expr(object)?;
+            store_local(recv, &mut self.f.body);
+
+            // The String path: the prefab, called directly, with no value.
+            is_string(recv, &mut self.f.body);
+            self.push(Ins::If(BlockType::Empty));
+            load_local(recv, &mut self.f.body);
+            self.push(Ins::Call(base + method::Me::Trim.offset()));
+            store_local(result, &mut self.f.body);
+            self.push(Ins::End);
+
+            // Everything else: the ordinary property read and indirect call,
+            // on the receiver already in hand.
+            is_string(recv, &mut self.f.body);
+            self.push(Ins::I32Eqz);
+            self.push(Ins::If(BlockType::Empty));
+            let uniform = self
+                .uniform
+                .expect("the scan finds every call that is not to a known function");
+            let value = self.take();
+            load_local(recv, &mut self.f.body);
+            let key = self.pool.intern(&name);
+            self.push(Ins::I32Const(key));
+            let get = self.ctx.call(Rt::ObjGet);
+            self.push(get);
+            store_local(value, &mut self.f.body);
+            if self.captures {
+                unbox_function(value, &mut self.f.body);
+                self.push(Ins::I32Load(ALIGN_WORD, FN_ENV));
+            }
+            self.arguments(args, uniform.arity)?;
+            unbox_function(value, &mut self.f.body);
+            self.push(Ins::I32Load(ALIGN_WORD, FN_ELEMENT));
+            self.push(Ins::CallIndirect(uniform.type_index, 0));
+            store_local(result, &mut self.f.body);
+            self.give(value);
+            self.push(Ins::End);
+
+            load_local(result, &mut self.f.body);
+            self.throw_check();
+            self.give(result);
+            self.give(recv);
             Ok(())
         }
 

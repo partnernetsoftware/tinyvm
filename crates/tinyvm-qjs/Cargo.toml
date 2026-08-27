@@ -36,3 +36,10 @@ wat = "1"
 # agreed with serde's *text* and disagreed with serde's *value*. An oracle that
 # does not round-trip cannot judge one that does.
 serde_json = { version = "1", features = ["float_roundtrip"] }
+
+# Research only -- Q1's measurement target, kept in the research track rather
+# than in `tests/` because it belongs to the experiment and not to the crate's
+# suite. Deleted with the rest of the track.
+[[test]]
+name = "method_measure"
+path = "../../research/method-binding/measure.rs"

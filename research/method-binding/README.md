@@ -10,7 +10,7 @@
 
 | Q | 问题（一句话） | 状态 | 结论 | 规格 | 实现 |
 |---|---|---|---|---|---|
-| Q1 | `"a".trim()` 里的 `trim` 怎么拿到 `"a"`？三种绑定机制哪种边际成本不随方法数增长？ | **已立项未开工** | — | [`plan/design-method-binding-experiment.md`](../../plan/design-method-binding-experiment.md) | `crates/tinyvm-qjs` 的三个 default-off feature（尚未添加） |
+| Q1 | `"a".trim()` 里的 `trim` 怎么拿到 `"a"`？三种绑定机制哪种边际成本不随方法数增长？ | **进行中** | 未判决 | [`plan/design-method-binding-experiment.md`](../../plan/design-method-binding-experiment.md) | `crates/tinyvm-qjs` 的三个 default-off feature；变体 C 已实现 4 个方法里的 1 个 |
 
 ## Q1 一句话背景
 
@@ -25,6 +25,13 @@
 主判据是**斜率**（加第五个方法的边际字节 / 行数），不是截距。
 主产出可能是判据 ⑥ 那张**泄漏清单**。
 
-## 还没有 RESULTS.md
+## 进度
 
-按上面第 1 条资格，Q1 **不是**「已判决」，本目录也**没有任何数字**可供引用。
+- **变体 C**：`trim` 已实现并通过 `method_conformance.rs`（**语料未改一个字**）。
+  判据 ② 布尔门**过**（七个无方法程序 Δ 全 0）。
+  已量出规格里没有的第四条斜率：**每调用点 43 字节**。
+- **变体 A、B**：未开工。
+- `indexOf` / `push` / `map`：未实现。
+
+按上面第 1 条资格，Q1 有 [`RESULTS.md`](RESULTS.md) 了，但状态是**进行中**——
+所以按第 2 条，**它的数字仍然不得被别处当作已决结论引用**。
