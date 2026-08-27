@@ -205,6 +205,36 @@ fn an_arrow_composes_with_what_landed_before_it() {
 }
 
 #[test]
+fn an_arrow_appears_wherever_an_assignment_expression_may() {
+    // 15.3 puts an arrow at the AssignmentExpression rung, and these are the
+    // positions that rung reaches. Each is a place where recognising the
+    // arrow one rung too high or too low would show up as a wrong parse
+    // rather than as a diagnostic, so each is asserted rather than assumed.
+    number("let c = 1; let f = c ? (x) => x : (x) => 0; return f(5);", 5.0);
+    number("const o = { m: (x) => x * 2 }; return o.m(4);", 8.0);
+    number("let a = [(x) => x + 1]; return a[0](1);", 2.0);
+    number("function take(g) { return g(2); } return take((a) => a * 5);", 10.0);
+    number("let f = (x) => x, g = (y) => y * 2; return f(1) + g(2);", 5.0);
+    number("let o = {}; o.a = (x) => x; return o.a(1);", 1.0);
+    number("return (() => 1)() + (() => 2)();", 3.0);
+    // A parenthesised concise body: two `(` in a row, meaning different
+    // things, which is the shape the cover grammar most easily gets wrong.
+    number("let f = (x) => (x + 1); return f(1);", 2.0);
+}
+
+#[test]
+fn an_arrow_body_is_an_ordinary_body_in_every_respect() {
+    // Writing through a captured binding, `try`, and the statement forms --
+    // none of which an arrow does differently, which is the point.
+    number("let n = 0; let f = (x) => { n = n + x; return n; }; f(1); return f(2);", 3.0);
+    number(
+        "let f = (x) => { try { return x; } catch (e) { return 0; } }; return f(7);",
+        7.0,
+    );
+    string("let f = (x) => x; return typeof f;", "function");
+}
+
+#[test]
 fn arrows_work_under_the_declared_names_mode_too() {
     // The downstream product compiles with `Names::Declared`, so a feature
     // that only worked under the default would not be reachable from
