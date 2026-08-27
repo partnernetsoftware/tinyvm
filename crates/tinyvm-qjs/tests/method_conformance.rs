@@ -114,6 +114,23 @@ fn trim_removes_whitespace_from_both_ends() {
     string("return \"\\t\\n\\r ab \\t\\n\\r\".trim();", "ab");
     string("return \"\\u{a0}ab\\u{a0}\".trim();", "ab");
     string("return \"\\u{feff}ab\\u{feff}\".trim();", "ab");
+    // The whole of ECMA-262 12.2's WhiteSpace, which is the Unicode `Zs`
+    // category plus TAB/VT/FF/ZWNBSP, together with 12.3's LineTerminators.
+    // The `Zs` members past the named ones are the ones an implementation
+    // quietly skips, and skipping them is a **wrong answer** rather than a
+    // missing feature: the space stays and nothing says so.
+    for space in [
+        "\u{1680}", "\u{2000}", "\u{2003}", "\u{200a}", "\u{2028}", "\u{2029}",
+        "\u{202f}", "\u{205f}", "\u{3000}",
+    ] {
+        string(&format!("return \"{space}ab{space}\".trim();"), "ab");
+    }
+    // And the characters that *look* like whitespace and are not: U+200B ZERO
+    // WIDTH SPACE and U+2060 WORD JOINER are `Cf`, not `Zs`, so `trim` must
+    // leave them exactly where they are.
+    string("return \"\u{200b}ab\u{200b}\".trim();", "\u{200b}ab\u{200b}");
+    string("return \"\u{2060}ab\u{2060}\".trim();", "\u{2060}ab\u{2060}");
+
     // Non-ASCII content survives, and the result is a real String: its
     // `.length` is UTF-16 code units, as `string_length_m3.rs` pins.
     string("return \"  caf\u{e9}  \".trim();", "caf\u{e9}");

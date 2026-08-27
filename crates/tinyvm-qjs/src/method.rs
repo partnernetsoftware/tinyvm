@@ -353,13 +353,12 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
 /// LineTerminator, which is 12.2's table plus 12.3's: TAB, LF, VT, FF, CR,
 /// SP, NBSP, ZWNBSP, LS, PS, and the Unicode `Zs` category.
 ///
-/// **What is here and what is not.** The named ten are here. The rest of `Zs`
-/// -- U+1680, U+2000..U+200A, U+202F, U+205F, U+3000 -- is **not**, and that
-/// is a known gap rather than an oversight: covering it means a range table,
-/// and this is a research variant whose job is to price a *binding mechanism*.
-/// The gap costs every variant the same number of bytes, so it cannot move the
-/// comparison; it is recorded in `research/method-binding/README.md` so it
-/// cannot be forgotten if this body is ever promoted.
+/// **The whole set is here**, including the `Zs` members beyond the named ten
+/// (U+1680, U+2000..U+200A, U+202F, U+205F, U+3000). They were left out while
+/// this was research code -- the gap cost every variant the same, so it could
+/// not move the comparison -- and closing it was the precondition recorded for
+/// promoting this body, because the alternative is a **wrong answer**:
+/// `"\u{2003}a".trim()` would keep the space and nothing would say so.
 fn ws_width() -> FnBuild {
     let mut f = FnBuild::new(1);
     let b0 = f.local(ValType::I32);
@@ -403,8 +402,16 @@ fn ws_width() -> FnBuild {
     b.push(Ins::End);
     b.push(Ins::End);
 
-    // The three-byte ones: LS U+2028 (E2 80 A8), PS U+2029 (E2 80 A9),
-    // ZWNBSP U+FEFF (EF BB BF).
+    // The three-byte ones. `E2 80 xx` covers U+2000..U+200A (the bulk of
+    // `Zs`), LS U+2028, PS U+2029, and NNBSP U+202F; `E2 81 9F` is MMSP
+    // U+205F; `E1 9A 80` is OGHAM SPACE MARK U+1680; `E3 80 80` is
+    // IDEOGRAPHIC SPACE U+3000; `EF BB BF` is ZWNBSP U+FEFF.
+    //
+    // These are the rest of the `Zs` category, and they are here rather than
+    // deferred because the alternative is a **wrong answer**: `"\u{2003}a".trim()`
+    // would keep the space and no diagnostic would say so. ECMA-262 12.2's
+    // WhiteSpace is `Zs` plus TAB/VT/FF/ZWNBSP, and 22.1.3.32.1 trims that
+    // set plus 12.3's LineTerminators. This is that set, exactly.
     b.push(Ins::LocalGet(b0));
     b.push(Ins::I32Const(0xe2));
     b.push(Ins::I32Eq);
@@ -413,17 +420,84 @@ fn ws_width() -> FnBuild {
     b.push(Ins::I32Load8U(0, 1));
     b.push(Ins::I32Const(0x80));
     b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    // U+2000..U+200A
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Load8U(0, 2));
+    b.push(Ins::I32Const(0x80));
+    b.push(Ins::I32Sub);
+    b.push(Ins::I32Const(11));
+    b.push(Ins::I32LtU);
+    // U+2028, U+2029
     b.push(Ins::LocalGet(0));
     b.push(Ins::I32Load8U(0, 2));
     b.push(Ins::I32Const(0xa8));
     b.push(Ins::I32Sub);
     b.push(Ins::I32Const(2));
     b.push(Ins::I32LtU);
+    b.push(Ins::I32Or);
+    // U+202F
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Load8U(0, 2));
+    b.push(Ins::I32Const(0xaf));
+    b.push(Ins::I32Eq);
+    b.push(Ins::I32Or);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(3));
+    b.push(Ins::Return);
+    b.push(Ins::End);
+    b.push(Ins::End);
+    // U+205F
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Load8U(0, 1));
+    b.push(Ins::I32Const(0x81));
+    b.push(Ins::I32Eq);
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Load8U(0, 2));
+    b.push(Ins::I32Const(0x9f));
+    b.push(Ins::I32Eq);
     b.push(Ins::I32And);
     b.push(Ins::If(BlockType::Empty));
     b.push(Ins::I32Const(3));
     b.push(Ins::Return);
     b.push(Ins::End);
+    b.push(Ins::End);
+
+    // U+1680 (E1 9A 80) and U+3000 (E3 80 80).
+    b.push(Ins::LocalGet(b0));
+    b.push(Ins::I32Const(0xe1));
+    b.push(Ins::I32Eq);
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Load8U(0, 1));
+    b.push(Ins::I32Const(0x9a));
+    b.push(Ins::I32Eq);
+    b.push(Ins::I32And);
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Load8U(0, 2));
+    b.push(Ins::I32Const(0x80));
+    b.push(Ins::I32Eq);
+    b.push(Ins::I32And);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(3));
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(b0));
+    b.push(Ins::I32Const(0xe3));
+    b.push(Ins::I32Eq);
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Load8U(0, 1));
+    b.push(Ins::I32Const(0x80));
+    b.push(Ins::I32Eq);
+    b.push(Ins::I32And);
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Load8U(0, 2));
+    b.push(Ins::I32Const(0x80));
+    b.push(Ins::I32Eq);
+    b.push(Ins::I32And);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(3));
+    b.push(Ins::Return);
     b.push(Ins::End);
 
     b.push(Ins::LocalGet(b0));
