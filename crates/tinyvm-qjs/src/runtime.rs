@@ -390,6 +390,16 @@ pub(crate) struct Ctx {
     /// most a gate on a *run-time* fact can be: unlike an ArrayLiteral, a
     /// String receiver is not something the source announces.
     pub(crate) string_length: Option<i32>,
+    /// Research only -- Q1 variant B. `(method set base, `__m_trim`'s table
+    /// element, the interned "trim")`, or `None`.
+    ///
+    /// The arm lives **inside** [`obj_get`]'s String branch, which is the
+    /// variant's whole structural claim: that branch already exists for
+    /// `.length`, so B's receiver test rides a test the engine was already
+    /// paying for. Variant C cannot do that -- its test is at the call site,
+    /// where no branch exists yet.
+    #[cfg(feature = "method-bound")]
+    pub(crate) bound_trim: Option<(u32, i32, i32)>,
     /// Whether any function in this program captures a binding of an
     /// enclosing one. Widens `__fn_new` by one parameter and the record it
     /// builds by one word; false leaves both exactly as they were.
@@ -1631,6 +1641,21 @@ fn obj_get(ctx: &Ctx) -> FnBuild {
         arm.push(ctx.call(Rt::Len));
         arm.push(Ins::Return);
         arm.push(Ins::End);
+        // Research only -- Q1 variant B. Inside the String branch, so the
+        // receiver test is one this function already made.
+        #[cfg(feature = "method-bound")]
+        if let Some((base, element, trim)) = ctx.bound_trim {
+            arm.push(Ins::LocalGet(key));
+            arm.push(Ins::I32Const(trim));
+            arm.push(ctx.call(Rt::StrEq));
+            arm.push(Ins::If(BlockType::Empty));
+            arm.push(Ins::LocalGet(0));
+            arm.push(Ins::LocalGet(1));
+            arm.push(Ins::I32Const(element));
+            arm.push(Ins::Call(base + super::method::Me::Bind.offset_in(ctx)));
+            arm.push(Ins::Return);
+            arm.push(Ins::End);
+        }
         arm.push(Ins::Unreachable);
         arm.push(Ins::End);
         f.body.extend(arm);

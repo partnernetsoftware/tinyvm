@@ -20,7 +20,8 @@
 //! call site's code. That belongs in criterion ⑥'s leak list.
 
 use super::repr::{
-    self, BlockType, Ins, ValType, WIDTH, box_number, box_string, unbox_array, unbox_string,
+    self, BlockType, Ins, ValType, WIDTH, box_function, box_number, box_string, unbox_array,
+    unbox_string,
 };
 use super::array::{ARR_LEN, Ar};
 use super::runtime::{ALIGN_WORD, FnBuild, Rt, RtFunc};
@@ -84,11 +85,22 @@ pub(crate) enum Me {
     ///
     /// So `Me::Map` is in [`Me::at_call_site`] but **not** in [`SET`].
     Map,
+    /// Research only -- Q1 variant B. See [`bind`].
+    #[cfg(feature = "method-bound")]
+    Bind,
 }
 
 /// Every function this variant can emit, in module order. **Not** what a
 /// given module emits: see [`Plan`].
-pub(crate) const SET: &[Me] = &[Me::WsWidth, Me::Units, Me::Trim, Me::IndexOf, Me::Push];
+pub(crate) const SET: &[Me] = &[
+    Me::WsWidth,
+    Me::Units,
+    Me::Trim,
+    Me::IndexOf,
+    Me::Push,
+    #[cfg(feature = "method-bound")]
+    Me::Bind,
+];
 
 /// Which of [`SET`] a particular module carries, and where each one lands.
 ///
@@ -123,6 +135,22 @@ impl Plan {
         }
     }
 
+    /// Variant B's plan, as far as B is implemented: `trim` and what it
+    /// needs, plus the binder.
+    ///
+    /// **Not per *call site*, unlike variant C's.** B cannot gate on whether
+    /// the source names `trim`, because the element index is baked into
+    /// `obj_get`, which is emitted before anyone knows. So any program that
+    /// can read a String property carries the whole of B's exposed surface.
+    /// C pays nothing for a method it does not call; B pays for every method
+    /// it exposes. That asymmetry is a result, not an implementation detail.
+    #[cfg(feature = "method-bound")]
+    pub(crate) fn bound_surface() -> Self {
+        Self {
+            enabled: vec![Me::WsWidth, Me::Trim, Me::Bind],
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.enabled.is_empty()
     }
@@ -154,6 +182,8 @@ impl Me {
             Me::IndexOf => "__m_index_of",
             Me::Push => "__m_push",
             Me::Map => "__m_map(inlined, no prefab)",
+            #[cfg(feature = "method-bound")]
+            Me::Bind => "__m_bind",
         }
     }
 
@@ -185,11 +215,20 @@ impl Me {
         matches!(self, Me::Push | Me::Map)
     }
 
+    /// Where this function sits, given the runtime `Ctx` that knows the plan.
+    /// A shim so `runtime.rs` does not have to carry a `Plan`.
+    #[cfg(feature = "method-bound")]
+    pub(crate) fn offset_in(self, _ctx: &super::runtime::Ctx) -> u32 {
+        Plan::bound_surface().offset(self)
+    }
+
     /// What this method's body calls, so [`Plan`] can pull them in.
     fn helpers(self) -> Vec<Me> {
         match self {
             Me::Trim => vec![Me::WsWidth],
             Me::IndexOf => vec![Me::Units],
+            #[cfg(feature = "method-bound")]
+            Me::Bind => Vec::new(),
             Me::WsWidth | Me::Units | Me::Push | Me::Map => Vec::new(),
         }
     }
@@ -205,6 +244,8 @@ fn values(n: usize) -> Vec<ValType> {
 
 fn one(ctx: &Ctx, me: Me) -> RtFunc {
     let i32_ = ValType::I32;
+    #[cfg(feature = "method-bound")]
+    let i64_ = ValType::I64;
     let (params, results, f) = match me {
         Me::WsWidth => (vec![i32_], vec![i32_], ws_width()),
         Me::Units => (vec![i32_, i32_], vec![i32_], units()),
@@ -214,6 +255,8 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
         // Unreachable: `Plan::want` never places a method that has no prefab,
         // and `build` only walks the plan.
         Me::Map => unreachable!("`map` is inlined at the call site, not placed"),
+        #[cfg(feature = "method-bound")]
+        Me::Bind => (vec![i32_, i64_, i32_], values(1), bind(ctx)),
     };
     RtFunc {
         name: me.symbol(),
@@ -645,6 +688,47 @@ fn index_of(ctx: &Ctx) -> FnBuild {
     b.push(Ins::End);
 
     number_const(b, -1);
+    f
+}
+
+/// Research only -- Q1 variant B. The environment a bound method carries.
+///
+/// Twelve bytes: the receiver, stored as the V1 pair it already is. **A second
+/// environment layout**, and that is a leak: the closure machinery's
+/// environment is a vector of *cells*, because a closure's binding can be
+/// written through. A bound receiver cannot -- 23.1.3's methods do not rebind
+/// their `this` -- so a cell would be a word of indirection per call for a
+/// mutation that cannot happen. Cheaper, and one more shape in the engine.
+pub(crate) const BOUND_BYTES: i32 = 12;
+
+/// `__m_bind(recv_tag, recv_payload, element) -> (tag, payload)`, variant B's
+/// whole mechanism: a property read hands back a function value whose
+/// environment already holds the receiver.
+///
+/// Where variant C puts a type test at every call site, this puts an
+/// allocation at every property *read*. Which is cheaper is exactly what
+/// criterion ③b is for.
+pub(crate) fn bind(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(WIDTH + 1);
+    let env = f.local(ValType::I32);
+    let b = &mut f.body;
+
+    b.push(Ins::I32Const(BOUND_BYTES));
+    b.push(ctx.rt(Rt::Alloc));
+    b.push(Ins::LocalTee(env));
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Store(ALIGN_WORD, 0));
+    b.push(Ins::LocalGet(env));
+    b.push(Ins::LocalGet(1));
+    b.push(Ins::I64Store(ALIGN_WORD, 4));
+
+    let mut inner = Vec::new();
+    inner.push(Ins::LocalGet(WIDTH));
+    inner.push(Ins::LocalGet(env));
+    inner.push(ctx.rt(Rt::FnNew));
+    let mut out = Vec::new();
+    box_function(&inner, &mut out);
+    f.body.extend(out);
     f
 }
 

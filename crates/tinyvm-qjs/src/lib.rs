@@ -100,7 +100,7 @@ compile_error!(
 mod array;
 mod ast;
 /// Research only -- Q1 variant C. Deleted when the track is decided.
-#[cfg(feature = "method-callsite")]
+#[cfg(any(feature = "method-callsite", feature = "method-bound"))]
 mod method;
 mod convert;
 mod diag;
