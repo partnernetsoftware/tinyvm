@@ -192,10 +192,20 @@ fn identifiers_are_not_supported_yet() {
     assert_capability_boundary("foo()", "variable");
 }
 
+/// M0's values are `i32`, so every numeric literal outside them is **one**
+/// boundary from here.
+///
+/// This test used to demand a different phrase for each -- "fractional",
+/// "exponent" -- and that stopped being answerable when the lexer learned the
+/// whole DecimalLiteral grammar: it hands back one `Num` token for all of
+/// them, because to M1 they are all just doubles. Naming three boundaries
+/// where the front end has one would mean the lexer carrying a distinction
+/// only M0 cares about. The two forms that are still *their own grammars* keep
+/// their own sentences.
 #[test]
 fn non_integer_numbers_are_not_supported_yet() {
-    assert_capability_boundary("1.5", "fractional");
-    assert_capability_boundary("1e3", "exponent");
+    assert_capability_boundary("1.5", "32-bit");
+    assert_capability_boundary("1e3", "32-bit");
     assert_capability_boundary("0x10", "hexadecimal");
     assert_capability_boundary("1n", "BigInt");
 }

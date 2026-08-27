@@ -84,6 +84,10 @@ fn only_expr(program: &Program) -> &Expr {
 fn sexpr(e: &Expr) -> String {
     match &e.kind {
         ExprKind::Int(n) => n.to_string(),
+        // Rust's `{}` for `f64` is shortest-round-tripping, which is the same
+        // property ECMA-262 6.1.6.1.20 asks for -- close enough for a shape
+        // test, and this file is about shape.
+        ExprKind::Num(x) => format!("{x}"),
         ExprKind::Str(s) => format!("{s:?}"),
         ExprKind::Bool(b) => b.to_string(),
         ExprKind::Null => "null".to_string(),
@@ -393,9 +397,19 @@ fn unary_operators_bind_tighter_than_every_infix_level() {
 
 #[test]
 fn a_minus_on_a_literal_reaches_the_literal() {
-    // i32::MIN has no positive counterpart, so the sign has to be folded in.
+    // `i32::MIN` has no positive counterpart, so the sign has to be folded in
+    // for the boundary value to stay an `Int` rather than becoming a `Num`.
     assert_eq!(shape("-2147483648"), "-2147483648");
-    assert!(refuse("-2147483649;").contains("32-bit"));
+    // One past it is a Number, not a refusal: there is one numeric type here
+    // and `i32` is the *representation* the parser keeps small literals in,
+    // never a bound on the language. The second half of this test used to
+    // assert the refusal.
+    assert_eq!(shape("-2147483649"), "-2147483649");
+    // A fraction is **not** folded, and that is the rule holding rather than
+    // an omission: the fold exists because `i32::MIN` has no positive
+    // counterpart, not to save an instruction, so a literal with no such
+    // problem keeps the unary operator ECMA-262 says is there.
+    assert_eq!(shape("-1.5"), "(- 1.5)");
 }
 
 #[test]

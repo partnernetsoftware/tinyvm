@@ -497,17 +497,26 @@ fn guard_a_logical_operator_in_a_loop_test_does_not_shift_the_depths() {
 /// the one that only works because the sign is folded onto the magnitude.
 #[test]
 fn guard_integer_literals_at_the_range_boundary() {
+    // These used to be refusals -- the lexer stopped at `i32`, and then at
+    // `u64` for the intermediate it parsed through. Both bounds were this
+    // engine's and not the language's: ECMA-262 6.1.6.1 has no integer type to
+    // overflow, so every decimal literal denotes a double.
+    //
+    // What this test is adversarial *about* survives the change and is the
+    // reason it keeps every source: a huge literal must produce the right
+    // double or a refusal, never a wrapped or truncated small one. A silent
+    // `2147483648` -> `-2147483648` is exactly the miscompile the old refusal
+    // was standing in front of, and asserting the values is a stronger guard
+    // than asserting that the compiler declined to try.
     number("return 2147483647;", 2147483647.0);
     number("return -2147483648;", -2147483648.0);
-    for source in [
-        "return 2147483648;",
-        "return -2147483649;",
-        "return 9007199254740993;",
-        "return 18446744073709551616;",
-        "return 99999999999999999999999999999999;",
-    ] {
-        assert_eq!(refuse(source).boundary, Boundary::Subset, "{source:?}");
-    }
+    number("return 2147483648;", 2147483648.0);
+    number("return -2147483649;", -2147483649.0);
+    // Past 2^53 a literal denotes the *nearest* double, which is one less than
+    // written. ECMA-262's answer, and every engine's.
+    number("return 9007199254740993;", 9007199254740992.0);
+    number("return 18446744073709551616;", 18446744073709551616.0);
+    number("return 99999999999999999999999999999999;", 1e32);
 }
 
 /// `$N` is a wasm parameter, so an unbounded index would let a two-character

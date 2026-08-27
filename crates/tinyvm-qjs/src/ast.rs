@@ -427,6 +427,15 @@ pub(crate) mod m1 {
         /// leading minus and checked the range, so lowering cannot meet an
         /// unrepresentable one.
         Int(i32),
+        /// A numeric literal with a fraction or an exponent, as the binary64
+        /// value it denotes.
+        ///
+        /// A second variant rather than widening [`Int`](Self::Int) to `f64`,
+        /// because `Int` is also what a property key is written with and the
+        /// two are different questions -- see `lex::TokenKind::Num`. Lowering
+        /// them is the same instruction either way: this engine has one
+        /// numeric type.
+        Num(f64),
         /// A string literal, escapes already resolved by the lexer.
         Str(String),
         Bool(bool),

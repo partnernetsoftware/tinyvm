@@ -148,6 +148,16 @@ impl Parser<'_> {
                 }
                 Ok(Expr::Arg(index as u32))
             }
+            // M0 is one integer expression: its values are `i32`. Every
+            // literal the lexer hands back as a `Num` -- a fraction, an
+            // exponent, an integer past `i32` -- is the *same* boundary from
+            // here, so it gets one sentence rather than three, one of which
+            // would be wrong. M1 reads all of them and needs no arm at all.
+            TokenKind::Num(_) => Err(unsupported(
+                Boundary::Subset,
+                "numbers outside the signed 32-bit integers this expression form takes",
+                token.offset,
+            )),
             TokenKind::Ident(name) => {
                 self.advance();
                 self.name(&name, token.offset)
@@ -1593,6 +1603,10 @@ pub(crate) mod m1 {
                     self.advance();
                     int_literal(magnitude, false, token.offset)?
                 }
+                TokenKind::Num(value) => {
+                    self.advance();
+                    ExprKind::Num(value)
+                }
                 TokenKind::Str(value) => {
                     self.advance();
                     ExprKind::Str(value)
@@ -1766,6 +1780,20 @@ pub(crate) mod m1 {
                     let text = text.clone();
                     self.advance();
                     text
+                }
+                // A fractional key is refused by name rather than
+                // approximated: 13.2.5.1 makes the key the *String* of the
+                // Number, which for `1.5` means running ECMA-262 6.1.6.1.20 at
+                // compile time. That algorithm exists in this engine
+                // (`__num_to_string`, Dragon4) and it runs in the *guest*;
+                // reimplementing it in the compiler would be a second answer
+                // to one question, and the two would eventually disagree.
+                TokenKind::Num(_) => {
+                    return Err(unsupported(
+                        Boundary::Subset,
+                        "fractional property keys",
+                        token.offset,
+                    ));
                 }
                 TokenKind::Int(magnitude) => {
                     let magnitude = *magnitude;
@@ -2082,13 +2110,32 @@ pub(crate) mod m1 {
         }
     }
 
-    /// Range-check a decimal magnitude and apply the sign. `negative` widens
-    /// the accepted range by exactly one, which is the whole reason the sign
-    /// is folded here instead of lowered as an operator.
+    /// Apply the sign to a decimal magnitude. `negative` widens the `i32`
+    /// range by exactly one, which is the whole reason the sign is folded here
+    /// instead of lowered as an operator.
+    ///
+    /// # An integer past `i32` is a Number, not a refusal
+    ///
+    /// It used to be `unsupported(OUT_OF_I32_RANGE)`, and that stopped being
+    /// defensible the moment the lexer learned fractions: `1e30` would have
+    /// been a literal this engine reads while `2147483648` was not, which is
+    /// an absurdity the same change created. There is one numeric type here
+    /// and it is binary64, so every decimal integer literal denotes a double
+    /// (ECMA-262 6.1.6.1) and this hands back the double.
+    ///
+    /// `ExprKind::Int` is kept for the ones that fit, and not merged into
+    /// `Num`, because the two lower identically and the `i32` form is what a
+    /// property key is written with -- `{ 1: v }` is the key `"1"`, spelled
+    /// from the magnitude. Widening that path would mean spelling a key from a
+    /// double, which is `Num`'s own refusal one arm below.
+    ///
+    /// Precision is ECMA-262's, not a promise this makes: past 2^53 a literal
+    /// denotes the nearest double, so `9007199254740993` reads back as
+    /// `9007199254740992` here exactly as it does in any engine.
     fn int_literal(
         magnitude: u64,
         negative: bool,
-        offset: usize,
+        _offset: usize,
     ) -> Result<ExprKind, CompileError> {
         let limit = if negative {
             i32::MIN.unsigned_abs() as u64
@@ -2096,7 +2143,8 @@ pub(crate) mod m1 {
             i32::MAX as u64
         };
         if magnitude > limit {
-            return Err(unsupported(Boundary::Subset, OUT_OF_I32_RANGE, offset));
+            let value = magnitude as f64;
+            return Ok(ExprKind::Num(if negative { -value } else { value }));
         }
         let value = if negative {
             (magnitude as i64).wrapping_neg() as i32
@@ -2260,6 +2308,7 @@ pub(crate) mod m1 {
     fn fill_expr(expr: &mut Expr, res: &[Res]) {
         match &mut expr.kind {
             ExprKind::Int(_)
+            | ExprKind::Num(_)
             | ExprKind::Str(_)
             | ExprKind::Bool(_)
             | ExprKind::Null

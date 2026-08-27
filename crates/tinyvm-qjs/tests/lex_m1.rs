@@ -401,7 +401,13 @@ fn what_is_still_out_of_subset_still_names_itself() {
         ("1 ? 2 : 3", Boundary::Subset, "conditional expressions"),
         ("`t`", Boundary::Subset, "template literals"),
         ("0x10", Boundary::Subset, "hexadecimal number literals"),
-        ("1.5", Boundary::Subset, "fractional numbers"),
+        // `1.5` stood here until the lexer learned the whole DecimalLiteral
+        // grammar; a separator is the numeric form still ahead of it.
+        (
+            "1_000",
+            Boundary::Subset,
+            "numeric separators in number literals",
+        ),
         ("[1]", Boundary::ThirdBinding, "array literals"),
         ("a.b", Boundary::ThirdBinding, "property access"),
         ("() => 1", Boundary::FullJs, "arrow functions"),

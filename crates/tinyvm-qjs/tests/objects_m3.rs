@@ -436,16 +436,23 @@ fn a_number_key_this_engine_cannot_spell_traps() {
     );
     // An Object key needs 7.1.1 ToPrimitive, which needs a prototype.
     traps("const o = {}; const k = {}; o[k] = 1; return 0;");
-    // Written out, the same values never reach the run: the front end already
-    // knows the engine has no literal for them.
-    refuses_capability(
-        "const o = {}; o[1.5] = 1; return 0;",
-        "fractional numbers",
-        Boundary::Subset,
+    // Written out, these used to be refused by the lexer before the run could
+    // reach them. The lexer reads the whole DecimalLiteral grammar now, so a
+    // spelled key takes the same path a computed one does -- ToPropertyKey at
+    // run time, through the guest's own 6.1.6.1.20 -- and answers.
+    number("const o = {}; o[1.5] = 4; return o[\"1.5\"];", 4.0);
+    number(
+        "const o = {}; o[2147483648] = 4; return o[\"2147483648\"];",
+        4.0,
     );
+    // The one place a fractional key is still refused, and the distinction is
+    // the point: an **object literal's** key is spelled at compile time
+    // (13.2.5.1 makes it the String of the Number), which would mean a second
+    // implementation of 6.1.6.1.20 inside the compiler. A *computed* key runs
+    // the one that already exists, in the guest.
     refuses_capability(
-        "const o = {}; o[2147483648] = 1; return 0;",
-        "integers outside the signed 32-bit range",
+        "const o = { 1.5: 1 }; return 0;",
+        "fractional property keys",
         Boundary::Subset,
     );
 }

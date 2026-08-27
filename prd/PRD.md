@@ -116,7 +116,15 @@ tinyvm (35)                                      [~]
 │   │   │   └── methods (push / map) need a prototype     [ ]
 │   │   ├── an array-free program pays nothing for arrays [x] 9 784 -> 9 784 bytes
 │   │   ├── an indexed read is 36.6x the object spelling  [x] 526 vs 19 235 steps
-│   │   ├── closures that capture an outer local          [ ] the largest gap left
+│   │   ├── closures that capture an outer local          [x] by binding, gated
+│   │   │   ├── a write after the closure exists is seen   [x] not by value
+│   │   │   ├── parameters count; any nesting depth        [x] flat closures
+│   │   │   ├── two instances, two environments            [x] identity, observable
+│   │   │   └── a no-capture program pays nothing          [x] 21 fixed / 99 each
+│   │   ├── the whole DecimalLiteral grammar (12.9.3)      [x]
+│   │   │   ├── 1.5 · .5 · 1. · 1e3 · 2E2 · 1.5e-3         [x]
+│   │   │   ├── integers past i32 and past 2^53            [x] nearest double
+│   │   │   └── hex / octal / binary / separators          [ ] own grammars
 │   │   ├── host calls with declared raw signatures       [x]
 │   │   │   └── a host length answer must be a length    [x]
 │   │   ├── nesting bounded by a diagnostic, not an abort [x]

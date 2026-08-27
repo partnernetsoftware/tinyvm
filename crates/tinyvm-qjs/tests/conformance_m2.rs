@@ -254,30 +254,53 @@ fn negative_zero_exists_and_is_not_positive_zero() {
     number("-(-0)", 0.0);
 }
 
-/// The literal grammar this engine reads is a strict subset of 12.9.3: plain
-/// decimal integers that fit an `i32`. Everything else names itself.
+/// The literal grammar this engine reads is 12.9.3's DecimalLiteral, whole.
 ///
-/// DIVERGENCE: JavaScript has one numeric literal grammar and it covers
-/// `1.5`, `1e3`, `0x10` and every integer up to 2^53. Retire the whole of this
-/// test's second half when the lexer produces `f64` literals.
+/// The doc that stood here said: *"plain decimal integers that fit an `i32`.
+/// Everything else names itself"*, and told its own successor to **"retire the
+/// whole of this test's second half when the lexer produces `f64` literals"**.
+/// It does now, so this is that retirement, and what is left in the refusal
+/// list is the three other radices and BigInt -- forms with their own
+/// grammars, not a decimal this engine could not spell.
+///
+/// The `i32` bound went with it. It had to: a lexer that reads `1e30` and
+/// refuses `2147483648` is absurd in a way the old one was not, because the
+/// old one refused both. There is one numeric type here and every decimal
+/// literal denotes a double.
 #[test]
-fn the_integer_literal_range_is_the_signed_32_bit_one() {
+fn the_decimal_literal_grammar_is_read_whole() {
+    // Integers, including past `i32` and past 2^53.
     number("2147483647", 2147483647.0);
     number("-2147483648", -2147483648.0);
     number("0", 0.0);
+    number("2147483648", 2147483648.0);
+    number("-2147483649", -2147483649.0);
+    number("99999999999999999999999999", 1e26);
+    // Precision is ECMA-262's: past 2^53 a literal denotes the nearest double,
+    // so this reads back one less than it was written, here and everywhere.
+    number("9007199254740993", 9007199254740992.0);
+
+    // Fractions and exponents, in every production 12.9.3 gives them.
+    number("1.5", 1.5);
+    number(".5", 0.5);
+    number("1.", 1.0);
+    number("1e3", 1000.0);
+    number("2E2", 200.0);
+    number("1.5e-3", 0.0015);
+    number("-1.5", -1.5);
+    // Real binary64 and not a decimal pretending: the classic sum.
+    number("0.1 + 0.2", 0.30000000000000004);
+
+    // The forms that are still their own grammars.
     for (source, phrase) in [
-        ("2147483648", "integers outside the signed 32-bit range"),
-        ("-2147483649", "integers outside the signed 32-bit range"),
-        (
-            "99999999999999999999999999",
-            "integers outside the signed 32-bit range",
-        ),
-        ("1.5", "fractional numbers"),
-        ("1e3", "numbers with an exponent"),
         ("1n", "BigInt literals"),
         ("0x10", "hexadecimal number literals"),
         ("0o17", "octal number literals"),
         ("0b101", "binary number literals"),
+        ("1_000", "numeric separators in number literals"),
+        // A fractional *key* needs 6.1.6.1.20 at compile time, and that
+        // algorithm lives in the guest. See `parse`'s own note.
+        ("({1.5: 1});", "fractional property keys"),
     ] {
         assert_eq!(
             refuse(source).message,
@@ -285,6 +308,18 @@ fn the_integer_literal_range_is_the_signed_32_bit_one() {
             "{source:?}"
         );
     }
+
+    // Not a capability boundary but a syntax error, and it says so: ECMA-262
+    // 12.9.3 ends a numeric literal before any identifier character. This
+    // became worth its own sentence when exponents landed -- `1einvalid` used
+    // to be refused as "numbers with an exponent", which is now a lie.
+    let e = refuse("1einvalid");
+    assert!(
+        e.message
+            .contains("separator between this number and the name"),
+        "got {}",
+        e.message
+    );
 }
 
 /// 6.1.6.1.6, Number::remainder. The result takes the sign of the *dividend*,
@@ -1433,13 +1468,16 @@ fn every_unsupported_construct_names_its_own_capability() {
 /// `(source, the noun phrase the diagnostic must use)`.
 const UNSUPPORTED: &[(&str, &str)] = &[
     // -- numeric literal forms ----------------------------------------------
-    ("1.5", "fractional numbers"),
-    ("1e3", "numbers with an exponent"),
+    ("1_000", "numeric separators in number literals"),
+    ("0b101", "binary number literals"),
     ("1n", "BigInt literals"),
     ("0x10", "hexadecimal number literals"),
     ("0o17", "octal number literals"),
     ("0b101", "binary number literals"),
-    ("2147483648", "integers outside the signed 32-bit range"),
+    // `1e3` and `2147483648` left this table when the lexer learned the whole
+    // DecimalLiteral grammar; the other radices took their place, and they are
+    // grammars of their own rather than a decimal it could not spell.
+    ("0o17", "octal number literals"),
     // -- operators ----------------------------------------------------------
     ("2 ** 3", "exponentiation"),
     ("1 & 2", "bitwise operators"),
@@ -1559,7 +1597,7 @@ fn no_diagnostic_blames_the_script() {
 fn a_diagnostic_points_at_the_construct_it_names() {
     assert_eq!(refuse("1 + 0x10").offset, 4);
     assert_eq!(refuse("let x = 1; x ** 2;").offset, 13);
-    assert_eq!(refuse("let a = 1;\nlet b = 1.5;").offset, 19);
+    assert_eq!(refuse("let a = 1;\nlet b = 1_000;").offset, 19);
 }
 
 /// The three boundaries are a machine-readable category, and the fmt-free

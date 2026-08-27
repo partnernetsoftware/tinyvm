@@ -1543,6 +1543,7 @@ pub(crate) mod m1 {
     fn host_expr(expr: &ast::Expr, scan: &mut Scan) -> Result<(), CompileError> {
         match &expr.kind {
             ast::ExprKind::Int(_)
+            | ast::ExprKind::Num(_)
             | ast::ExprKind::Str(_)
             | ast::ExprKind::Bool(_)
             | ast::ExprKind::Null
@@ -2832,6 +2833,13 @@ pub(crate) mod m1 {
             match &expr.kind {
                 // An integer literal is a Number: ECMA-262 6.1.6.1 has one
                 // numeric type and it is the double. `1/2` is `0.5` here.
+                // One numeric type, so a fraction lowers exactly as an
+                // integer does -- the literal's only job was to say which
+                // double.
+                ast::ExprKind::Num(value) => {
+                    const_number(*value, &mut self.f.body);
+                    Ok(())
+                }
                 ast::ExprKind::Int(value) => {
                     const_number(f64::from(*value), &mut self.f.body);
                     Ok(())
@@ -3751,7 +3759,7 @@ pub(crate) mod m1 {
     /// would have run.
     fn static_type(expr: &ast::Expr) -> Option<&'static str> {
         Some(match &expr.kind {
-            ast::ExprKind::Int(_) => "a Number",
+            ast::ExprKind::Int(_) | ast::ExprKind::Num(_) => "a Number",
             ast::ExprKind::Str(_) => "a String",
             ast::ExprKind::Bool(_) => "a Boolean",
             ast::ExprKind::Object(_) => "an Object",

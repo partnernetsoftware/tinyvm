@@ -46,6 +46,17 @@ pub(crate) enum TokenKind {
     /// to the parser: `-2147483648` is a unary minus applied to a magnitude
     /// that does not fit in an `i32` on its own.
     Int(u64),
+    /// A numeric literal that is **not** a plain decimal integer: it has a
+    /// fraction, an exponent, or both.
+    ///
+    /// Separate from [`Int`](Self::Int) and not a widening of it, because the
+    /// two answer different questions downstream. An `Int` is also a property
+    /// key -- `{ 1: v }` is the key `"1"` -- and the digits it was written
+    /// with are the key; a `Num` has no such spelling without running
+    /// ECMA-262 6.1.6.1.20 at compile time, so it is refused in that position
+    /// rather than approximated. Every *value* use is the same either way:
+    /// this engine's numbers are binary64 and always were.
+    Num(f64),
     /// `$N` -- the Nth argument of this call. Held wide so an absurd index is
     /// a bounds decision in the parser rather than a silent wrap here.
     Arg(u64),
@@ -147,7 +158,7 @@ impl TokenKind {
     /// A short name for use inside a [`crate::diag::malformed`] sentence.
     pub(crate) fn name(&self) -> &'static str {
         match self {
-            Self::Int(_) => "a number",
+            Self::Int(_) | Self::Num(_) => "a number",
             Self::Arg(_) => "an argument reference",
             Self::Str(_) => "a string literal",
             Self::Ident(_) => "a name",
@@ -425,7 +436,11 @@ impl Lexer<'_> {
     fn lexeme(&mut self) -> Result<TokenKind, CompileError> {
         let byte = self.bytes[self.pos];
         match byte {
-            b'0'..=b'9' => Ok(self.number()),
+            b'0'..=b'9' => self.number(),
+            // `.5` is a NumericLiteral (ECMA-262 12.9.3 DecimalLiteral's
+            // second production), not a `.` followed by `5`. Without this the
+            // author is told a property access needs a name.
+            b'.' if matches!(self.peek_at(1), Some(b'0'..=b'9')) => self.number(),
             b'$' if matches!(self.peek_at(1), Some(b'0'..=b'9')) => Ok(self.argument()),
             b'A'..=b'Z' | b'a'..=b'z' | b'_' | b'$' => Ok(self.word()),
             b'"' | b'\'' => self.string(byte),
@@ -436,7 +451,7 @@ impl Lexer<'_> {
 
     /// A numeric literal in any JavaScript form. Only plain decimal integers
     /// that fit an `i32` survive; the rest name themselves.
-    fn number(&mut self) -> TokenKind {
+    fn number(&mut self) -> Result<TokenKind, CompileError> {
         let start = self.pos;
         if self.bytes[start] == b'0' {
             let phrase = match self.peek_at(1) {
@@ -448,7 +463,7 @@ impl Lexer<'_> {
             if let Some(phrase) = phrase {
                 self.pos += 2;
                 self.eat_while(|b| b.is_ascii_alphanumeric() || b == b'_');
-                return subset(phrase);
+                return Ok(subset(phrase));
             }
             // ECMA-262 12.9.3: a `0` followed by another digit is a
             // LegacyOctalIntegerLiteral (`0777` is 511) or, once an `8` or a
@@ -460,15 +475,45 @@ impl Lexer<'_> {
             if matches!(self.peek_at(1), Some(b'0'..=b'9')) {
                 self.pos += 1;
                 self.eat_while(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.');
-                return subset("number literals written with a leading zero");
+                return Ok(subset("number literals written with a leading zero"));
             }
         }
         self.eat_while(|b| b.is_ascii_digit());
-        // The suffixes that turn a decimal integer into something else. Each
-        // is consumed whole so the token spans the literal the author wrote.
+
+        // A fraction and an exponent are read, not refused: this engine's
+        // numbers are binary64, so `1.5` denotes a value it has always been
+        // able to compute -- `3 / 2` produced it -- and only the spelling was
+        // missing. ECMA-262 12.9.3 DecimalLiteral, minus the separators and
+        // the other radices, which still name themselves below.
+        let mut fractional = false;
+        if self.peek() == Some(b'.') {
+            fractional = true;
+            self.pos += 1;
+            self.eat_while(|b| b.is_ascii_digit());
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            // Only when it is really an exponent: `1einvalid` is not, and
+            // consuming the `e` would turn a bad literal into a worse
+            // diagnostic.
+            let after = match self.peek_at(1) {
+                Some(b'+' | b'-') => self.peek_at(2),
+                other => other,
+            };
+            if matches!(after, Some(b'0'..=b'9')) {
+                fractional = true;
+                self.pos += if matches!(self.peek_at(1), Some(b'+' | b'-')) {
+                    2
+                } else {
+                    1
+                };
+                self.eat_while(|b| b.is_ascii_digit());
+            }
+        }
+
+        // The suffixes that still turn a decimal literal into something this
+        // engine does not read. Each is consumed whole so the token spans the
+        // literal the author wrote.
         let phrase = match self.peek() {
-            Some(b'.') => Some("fractional numbers"),
-            Some(b'e' | b'E') => Some("numbers with an exponent"),
             Some(b'n') => Some("BigInt literals"),
             // ES2021 NumericLiteralSeparator. Named here because the digit run
             // ends at the `_`, so without this the rest of the literal lexes
@@ -481,13 +526,54 @@ impl Lexer<'_> {
             self.eat_while(|b| {
                 b.is_ascii_alphanumeric() || b == b'.' || b == b'+' || b == b'-' || b == b'_'
             });
-            return subset(phrase);
+            return Ok(subset(phrase));
         }
-        match self.src[start..self.pos].parse::<u64>() {
+
+        // ECMA-262 12.9.3: "The SourceCharacter immediately following a
+        // NumericLiteral must not be an IdentifierStart or DecimalDigit."
+        //
+        // This became worth saying when exponents landed. Before, `1einvalid`
+        // was consumed whole and refused as "numbers with an exponent" -- a
+        // sentence that is now a lie, since exponents work. Without a rule of
+        // its own the literal lexes as `1` and the name `einvalid`, and the
+        // author is told their statement needs a `;`: a sentence about a
+        // mistake they did not make.
+        if matches!(self.peek(), Some(b'0'..=b'9'))
+            || matches!(self.peek(), Some(b) if b.is_ascii_alphabetic() || b == b'_' || b == b'$')
+        {
+            self.eat_while(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b == b'.');
+            return Err(malformed(
+                "needs a separator between this number and the name after it; ECMA-262 12.9.3 ends a numeric literal before any identifier character",
+                start,
+            ));
+        }
+
+        let text = &self.src[start..self.pos];
+        if fractional {
+            // `parse::<f64>` is correctly rounded and accepts exactly the
+            // grammar consumed above. An out-of-range magnitude is `inf` here
+            // and in ECMA-262 alike (6.1.6.1.1), so there is nothing to refuse.
+            return Ok(match text.parse::<f64>() {
+                Ok(value) => TokenKind::Num(value),
+                Err(_) => subset("fractional numbers"),
+            });
+        }
+        Ok(match text.parse::<u64>() {
             Ok(value) => TokenKind::Int(value),
-            // Beyond `u64` there is no doubt at all which boundary was hit.
-            Err(_) => subset(OUT_OF_I32_RANGE),
-        }
+            // Past `u64` the digits still denote a double -- ECMA-262 6.1.6.1
+            // has no integer type to overflow -- so the `u64` is an artifact
+            // of *this* lexer's intermediate and not a boundary of the
+            // language. It used to refuse here with
+            // `integers outside the signed 32-bit range`, which stopped being
+            // true when a literal past `i32` became a `Num`; refusing at the
+            // next arbitrary width instead would just move the same wrong
+            // sentence.
+            //
+            // `parse::<f64>` on a run of digits is correctly rounded and
+            // cannot fail, so the `unwrap_or` arm is unreachable rather than
+            // lenient.
+            Err(_) => TokenKind::Num(text.parse::<f64>().unwrap_or(f64::INFINITY)),
+        })
     }
 
     /// `$N`, the Nth argument of this call.
