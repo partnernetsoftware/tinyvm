@@ -622,11 +622,7 @@ pub(crate) mod m1 {
         #[cfg(feature = "method-callsite")]
         let method_base = arr_base + arr_len;
         #[cfg(feature = "method-callsite")]
-        let method_len = if scan.methods {
-            method::SET.len() as u32
-        } else {
-            0
-        };
+        let method_len = scan.methods.len();
         #[cfg(feature = "method-callsite")]
         let user_base = method_base + method_len;
         #[cfg(not(feature = "method-callsite"))]
@@ -704,13 +700,14 @@ pub(crate) mod m1 {
         };
 
         #[cfg(feature = "method-callsite")]
-        let method_set: Vec<runtime::RtFunc> = if scan.methods {
+        let method_set: Vec<runtime::RtFunc> = if scan.methods.is_empty() {
+            Vec::new()
+        } else {
             method::build(&method::Ctx {
                 func_base: method_base,
                 runtime_base,
+                plan: scan.methods.clone(),
             })
-        } else {
-            Vec::new()
         };
         #[cfg(not(feature = "method-callsite"))]
         let method_set: Vec<runtime::RtFunc> = Vec::new();
@@ -783,7 +780,7 @@ pub(crate) mod m1 {
                 uniform,
                 scan.arrays.then_some(arr_base),
                 #[cfg(feature = "method-callsite")]
-                scan.methods.then_some(method_base),
+                (!scan.methods.is_empty()).then(|| (method_base, scan.methods.clone())),
                 unwind,
                 json,
                 user_base,
@@ -1341,7 +1338,7 @@ pub(crate) mod m1 {
         /// Research only -- Q1 variant C. Whether the program calls one of the
         /// four methods by name. Deleted when the track is decided.
         #[cfg(feature = "method-callsite")]
-        methods: bool,
+        methods: method::Plan,
         /// Whether the program can read a property off a String, which is:
         /// it writes `.length` as a static key, or it writes any computed key
         /// at all. Gates the one arm of [`runtime::obj_get`] that answers
@@ -1630,9 +1627,9 @@ pub(crate) mod m1 {
                     key: ast::MemberKey::Static(name),
                     ..
                 } = &callee.kind
-                    && method::Me::at_call_site(name, args.len()).is_some()
+                    && let Some(me) = method::Me::at_call_site(name, args.len())
                 {
-                    scan.methods = true;
+                    scan.methods.want(me);
                 }
                 // The callee of a host call, of a direct call, and of an
                 // immediately-invoked function expression is the *call* and
@@ -1831,7 +1828,7 @@ pub(crate) mod m1 {
         /// Research only -- Q1 variant C. Index of `__m_ws_width`, or `None`
         /// for a program that calls none of the four methods.
         #[cfg(feature = "method-callsite")]
-        methods: Option<u32>,
+        methods: Option<(u32, method::Plan)>,
         /// Where a throw in flight lives, or `None` for a program with no
         /// `throw` in it -- which emits no check and no global.
         unwind: Option<Unwind>,
@@ -1883,7 +1880,7 @@ pub(crate) mod m1 {
             fns: &'a mut FnTable,
             uniform: Option<Uniform>,
             arrays: Option<u32>,
-            #[cfg(feature = "method-callsite")] methods: Option<u32>,
+            #[cfg(feature = "method-callsite")] methods: Option<(u32, method::Plan)>,
             unwind: Option<Unwind>,
             json: Option<Json>,
             user_base: u32,
@@ -3404,8 +3401,9 @@ pub(crate) mod m1 {
             me: method::Me,
             args: &[ast::Expr],
         ) -> Result<(), CompileError> {
-            let base = self
+            let (base, plan) = self
                 .methods
+                .clone()
                 .expect("the scan turns the set on for every specialised call");
             let recv = self.take();
             let result = self.take();
@@ -3419,7 +3417,7 @@ pub(crate) mod m1 {
             for arg in args {
                 self.expr(arg)?;
             }
-            self.push(Ins::Call(base + me.offset()));
+            self.push(Ins::Call(base + plan.offset(me)));
             store_local(result, &mut self.f.body);
             self.push(Ins::End);
 

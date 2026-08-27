@@ -26,15 +26,17 @@ use super::runtime::{ALIGN_WORD, FnBuild, Rt, RtFunc};
 /// shape [`super::array::Ctx`] has, for the same reason: a gated set's own
 /// index base is not the module's.
 pub(crate) struct Ctx {
-    /// Index of `__m_ws_width`.
+    /// Index of this set's first function.
     pub(crate) func_base: u32,
     /// Index of `__add` -- the base `runtime::SET` is laid out from.
     pub(crate) runtime_base: u32,
+    /// Which functions this module carries, and where.
+    pub(crate) plan: Plan,
 }
 
 impl Ctx {
     fn me(&self, me: Me) -> Ins {
-        Ins::Call(self.func_base + me.offset())
+        Ins::Call(self.func_base + self.plan.offset(me))
     }
 
     fn rt(&self, rt: Rt) -> Ins {
@@ -56,7 +58,62 @@ pub(crate) enum Me {
     IndexOf,
 }
 
+/// Every function this variant can emit, in module order. **Not** what a
+/// given module emits: see [`Plan`].
 pub(crate) const SET: &[Me] = &[Me::WsWidth, Me::Units, Me::Trim, Me::IndexOf];
+
+/// Which of [`SET`] a particular module carries, and where each one lands.
+///
+/// Whole-set gating made a program that calls only `trim()` pay 307 bytes for
+/// `indexOf`, which is criterion ③ growing linearly in the number of methods
+/// -- the shape §4's decision tree judges negative. This is the fix, and the
+/// fix is itself a cost chargeable to variant C: A and B need nothing like it,
+/// because their methods are function values and only a referenced one has to
+/// exist.
+///
+/// The awkward part, and the reason it is a `Plan` rather than a filter: a
+/// function's index is its **position**, so dropping one moves every later
+/// one. Offsets are therefore computed against the enabled subset instead of
+/// against `SET` -- the same problem `Rt::Len` had in
+/// `plan/design-string-length-milestone.md` §3, met a second time.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Plan {
+    enabled: Vec<Me>,
+}
+
+impl Plan {
+    /// Add a method and everything it needs. `trim` pulls in `ws_width`,
+    /// `indexOf` pulls in `units`; a helper nobody needs is not emitted, which
+    /// is the whole point.
+    pub(crate) fn want(&mut self, me: Me) {
+        for needed in [me].into_iter().chain(me.helpers()) {
+            if !self.enabled.contains(&needed) {
+                self.enabled.push(needed);
+            }
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.enabled.is_empty()
+    }
+
+    pub(crate) fn len(&self) -> u32 {
+        self.enabled.len() as u32
+    }
+
+    /// In `SET` order, so the module's layout does not depend on the order
+    /// call sites happened to appear in the source.
+    fn ordered(&self) -> Vec<Me> {
+        SET.iter().copied().filter(|m| self.enabled.contains(m)).collect()
+    }
+
+    pub(crate) fn offset(&self, me: Me) -> u32 {
+        self.ordered()
+            .iter()
+            .position(|m| *m == me)
+            .expect("a call site asked for a method the plan does not carry") as u32
+    }
+}
 
 impl Me {
     pub(crate) fn symbol(self) -> &'static str {
@@ -80,15 +137,18 @@ impl Me {
         }
     }
 
-    pub(crate) fn offset(self) -> u32 {
-        SET.iter()
-            .position(|m| *m == self)
-            .expect("SET lists every Me") as u32
+    /// What this method's body calls, so [`Plan`] can pull them in.
+    fn helpers(self) -> Vec<Me> {
+        match self {
+            Me::Trim => vec![Me::WsWidth],
+            Me::IndexOf => vec![Me::Units],
+            Me::WsWidth | Me::Units => Vec::new(),
+        }
     }
 }
 
 pub(crate) fn build(ctx: &Ctx) -> Vec<RtFunc> {
-    SET.iter().map(|m| one(ctx, *m)).collect()
+    ctx.plan.ordered().iter().map(|m| one(ctx, *m)).collect()
 }
 
 fn values(n: usize) -> Vec<ValType> {
