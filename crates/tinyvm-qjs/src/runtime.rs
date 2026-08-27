@@ -357,6 +357,17 @@ pub(crate) struct Conversions {
 }
 
 /// What the runtime needs to know about the module it is being spliced into.
+/// Research only -- Q1 variant B. The String-receiver methods this module
+/// answers, and where `__m_bind` is.
+#[cfg(feature = "method-bound")]
+#[derive(Debug, Clone)]
+pub(crate) struct BoundStrings {
+    /// Index of `__m_bind`.
+    pub(crate) bind: u32,
+    /// `(interned name, table element)`, in reservation order.
+    pub(crate) names: Vec<(i32, i32)>,
+}
+
 pub(crate) struct Ctx {
     /// Function index of `__add`. Imports occupy the first indices, so this is
     /// the import count.
@@ -399,7 +410,7 @@ pub(crate) struct Ctx {
     /// paying for. Variant C cannot do that -- its test is at the call site,
     /// where no branch exists yet.
     #[cfg(feature = "method-bound")]
-    pub(crate) bound_trim: Option<(u32, i32, i32, bool)>,
+    pub(crate) bound_strings: Option<BoundStrings>,
     /// Whether any function in this program captures a binding of an
     /// enclosing one. Widens `__fn_new` by one parameter and the record it
     /// builds by one word; false leaves both exactly as they were.
@@ -1644,19 +1655,19 @@ fn obj_get(ctx: &Ctx) -> FnBuild {
         // Research only -- Q1 variant B. Inside the String branch, so the
         // receiver test is one this function already made.
         #[cfg(feature = "method-bound")]
-        if let Some((base, element, trim, map)) = ctx.bound_trim {
-            arm.push(Ins::LocalGet(key));
-            arm.push(Ins::I32Const(trim));
-            arm.push(ctx.call(Rt::StrEq));
-            arm.push(Ins::If(BlockType::Empty));
-            arm.push(Ins::LocalGet(0));
-            arm.push(Ins::LocalGet(1));
-            arm.push(Ins::I32Const(element));
-            arm.push(Ins::Call(
-                base + super::method::Me::Bind.offset_in_bound(true, map),
-            ));
-            arm.push(Ins::Return);
-            arm.push(Ins::End);
+        if let Some(bound) = &ctx.bound_strings {
+            for (name, element) in &bound.names {
+                arm.push(Ins::LocalGet(key));
+                arm.push(Ins::I32Const(*name));
+                arm.push(ctx.call(Rt::StrEq));
+                arm.push(Ins::If(BlockType::Empty));
+                arm.push(Ins::LocalGet(0));
+                arm.push(Ins::LocalGet(1));
+                arm.push(Ins::I32Const(*element));
+                arm.push(Ins::Call(bound.bind));
+                arm.push(Ins::Return);
+                arm.push(Ins::End);
+            }
         }
         arm.push(Ins::Unreachable);
         arm.push(Ins::End);
