@@ -1534,6 +1534,18 @@ pub(crate) mod m1 {
                             span,
                         };
                     }
+                    // 13.3.11: a template right after a MemberExpression is a
+                    // TaggedTemplate -- a call, not a concatenation. It has to
+                    // be named here, in the one position where the two are
+                    // told apart, or `` t`a` `` is reported as a missing `;`
+                    // and the author is sent looking for the wrong thing.
+                    TokenKind::TemplateFull(_) | TokenKind::TemplateHead(_) => {
+                        return Err(unsupported(
+                            Boundary::Subset,
+                            "tagged templates",
+                            self.peek().offset,
+                        ));
+                    }
                     TokenKind::LParen => {
                         let span = expr.span;
                         // A *name* followed by `(` asks resolution a different
@@ -1611,6 +1623,14 @@ pub(crate) mod m1 {
                     self.advance();
                     ExprKind::Str(value)
                 }
+                // A template with no substitutions denotes exactly a String,
+                // so it *is* one here; nothing downstream needs to know it was
+                // written with backticks.
+                TokenKind::TemplateFull(value) => {
+                    self.advance();
+                    ExprKind::Str(value)
+                }
+                TokenKind::TemplateHead(value) => self.template(value, span)?,
                 TokenKind::True => {
                     self.advance();
                     ExprKind::Bool(true)
@@ -1722,6 +1742,78 @@ pub(crate) mod m1 {
             }
             self.shallower(2);
             Ok(ExprKind::Array(elements))
+        }
+
+        /// The rest of a TemplateLiteral that has substitutions, ECMA-262
+        /// 13.2.8. The head's text is in hand and the cursor is on the first
+        /// substitution's first token.
+        ///
+        /// This lowers to a left-leaning chain of `+` rather than to a node of
+        /// its own, and that is the whole implementation: 13.2.8.6 says the
+        /// value is the pieces and the `ToString` of each substitution,
+        /// concatenated left to right, and `+` with a String operand is
+        /// already exactly that (13.15.3, ApplyStringOrNumericBinaryOperator).
+        /// A `Template` node would need an emit arm that did the same thing a
+        /// second way, and the two would eventually disagree. The consequence
+        /// worth knowing: a template costs a template-free program **zero**
+        /// bytes, because it adds no runtime helper to gate.
+        ///
+        /// The fold starts at the head's literal even when the head is empty,
+        /// and that empty `""` is load-bearing: `` `${1}${2}` `` must be
+        /// `"12"`, and only a String on the left of the first `+` makes it so.
+        /// Every *later* empty piece is dropped instead, which is safe for the
+        /// same reason -- once the leftmost operand is a String the running
+        /// value is a String forever, so `+ ""` is a no-op. So `` `a${b}` ``
+        /// is `"a" + b`, which is what the author would have written by hand.
+        fn template(&mut self, head: String, span: Span) -> Result<ExprKind, CompileError> {
+            self.deeper(2)?;
+            let open = self.peek().offset;
+            self.advance();
+            let mut folded = Expr {
+                kind: ExprKind::Str(head),
+                span,
+            };
+            let concat = |left: Expr, right: Expr| Expr {
+                kind: ExprKind::Binary(BinaryOp::Add, Box::new(left), Box::new(right)),
+                span,
+            };
+            loop {
+                let substitution = self.expression(BP_ASSIGN)?;
+                folded = concat(folded, substitution);
+                let token = self.peek().clone();
+                let (text, last) = match token.kind {
+                    TokenKind::TemplateMiddle(text) => (text, false),
+                    TokenKind::TemplateTail(text) => (text, true),
+                    // The lexer resumes template text at the `}` that closes
+                    // the substitution, so anything else here means the
+                    // substitution's own expression stopped early -- an
+                    // unbalanced `(`, say. Name the template, since that is
+                    // the construct the author is inside.
+                    _ => {
+                        return Err(malformed(
+                            &format!(
+                                "needs a `}}` to close the substitution in the template opened at byte {open}, and found {}",
+                                token.kind.name()
+                            ),
+                            token.offset,
+                        ));
+                    }
+                };
+                self.advance();
+                if !text.is_empty() {
+                    folded = concat(
+                        folded,
+                        Expr {
+                            kind: ExprKind::Str(text),
+                            span: Span(token.offset),
+                        },
+                    );
+                }
+                if last {
+                    self.shallower(2);
+                    return Ok(folded.kind);
+                }
+            }
         }
 
         // -- object literals -------------------------------------------------

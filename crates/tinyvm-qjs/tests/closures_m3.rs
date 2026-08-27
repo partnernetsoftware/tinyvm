@@ -306,15 +306,18 @@ fn the_neighbouring_constructs_are_still_refused_by_name() {
     // A closure milestone is the one most likely to be mistaken for having
     // brought these; it did not, and each still says so for itself.
     // The boundary differs by construct and is asserted per row rather than
-    // assumed uniform: a template literal is `Subset` -- a shape this engine's
-    // own grammar could grow -- while `class` and `async` are `FullJs`.
+    // assumed uniform: `class` and `async` are `FullJs`, while an arrow
+    // function is a shape this engine's own grammar could grow.
+    //
+    // Template literals used to be this list's `Subset` row. They landed after
+    // closures did, so the row moved to `templates_m3.rs` -- where it now
+    // asserts the opposite.
     for (source, needle, boundary) in [
         (
             "let f = (x) => x; return f(1);",
             "arrow functions",
             Boundary::FullJs,
         ),
-        ("return `x`;", "template literals", Boundary::Subset),
         (
             "class A {} return 1;",
             "the `class` keyword",

@@ -46,6 +46,22 @@ pub(crate) enum TokenKind {
     /// to the parser: `-2147483648` is a unary minus applied to a magnitude
     /// that does not fit in an `i32` on its own.
     Int(u64),
+    /// A template literal with no substitutions: `` `abc` ``. Its cooked value,
+    /// which is an ordinary String.
+    TemplateFull(String),
+    /// The text before the first `${` of a template that has substitutions.
+    ///
+    /// A template is lexed into a *sequence* -- head, the substitution's own
+    /// tokens, middle, more tokens, tail -- rather than one token carrying
+    /// nested source. This lexer runs once over the whole input and hands the
+    /// parser a flat `Vec<Token>`, so a token that contained un-lexed source
+    /// would need a second entry point into the lexer, and the two would drift.
+    /// The parser reads the sequence the same way it reads any other operands.
+    TemplateHead(String),
+    /// The text between two substitutions.
+    TemplateMiddle(String),
+    /// The text after the last substitution, up to the closing backtick.
+    TemplateTail(String),
     /// A numeric literal that is **not** a plain decimal integer: it has a
     /// fraction, an exponent, or both.
     ///
@@ -159,6 +175,10 @@ impl TokenKind {
     pub(crate) fn name(&self) -> &'static str {
         match self {
             Self::Int(_) | Self::Num(_) => "a number",
+            Self::TemplateFull(_)
+            | Self::TemplateHead(_)
+            | Self::TemplateMiddle(_)
+            | Self::TemplateTail(_) => "a template literal",
             Self::Arg(_) => "an argument reference",
             Self::Str(_) => "a string literal",
             Self::Ident(_) => "a name",
@@ -249,6 +269,12 @@ impl TokenKind {
                 (Boundary::Subset, "the increment and decrement operators")
             }
             Self::AmpAmp | Self::PipePipe => (Boundary::Subset, "logical operators"),
+            // The lexer graduated these in M3; a front end that cannot build
+            // the concatenation still calls them what it always called them.
+            Self::TemplateFull(_)
+            | Self::TemplateHead(_)
+            | Self::TemplateMiddle(_)
+            | Self::TemplateTail(_) => (Boundary::Subset, "template literals"),
             // Reached only by the **M0** front end now. `[` has graduated for
             // both things it spells -- `o[k]` and the ArrayLiteral -- so M1
             // never asks this table about one: a `[` its parser cannot use is
@@ -320,6 +346,7 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Token>, CompileError> {
         src: source,
         bytes: source.as_bytes(),
         pos: 0,
+        templates: Vec::new(),
     };
     let mut tokens = Vec::new();
     loop {
@@ -350,6 +377,11 @@ struct Lexer<'a> {
     src: &'a str,
     bytes: &'a [u8],
     pos: usize,
+    /// One frame per template literal whose `${` is open: where its backtick
+    /// is, for the diagnostic, and how many `{` the current substitution has
+    /// opened. The depth is what tells the two meanings of `}` apart -- at
+    /// depth zero it resumes template text, above zero it closes a block.
+    templates: Vec<(usize, u32)>,
 }
 
 impl Lexer<'_> {
@@ -444,7 +476,22 @@ impl Lexer<'_> {
             b'$' if matches!(self.peek_at(1), Some(b'0'..=b'9')) => Ok(self.argument()),
             b'A'..=b'Z' | b'a'..=b'z' | b'_' | b'$' => Ok(self.word()),
             b'"' | b'\'' => self.string(byte),
-            b'`' => Ok(self.template()),
+            b'`' => self.template(),
+            // Brace depth is maintained here rather than in `punctuation`
+            // because only these two bytes can change it, and only while a
+            // template is open does anyone ask.
+            b'{' if !self.templates.is_empty() => {
+                self.templates.last_mut().expect("just checked").1 += 1;
+                Ok(self.punctuation())
+            }
+            b'}' => match self.templates.last_mut() {
+                Some((_, 0)) => self.template_resume(),
+                Some((_, depth)) => {
+                    *depth -= 1;
+                    Ok(self.punctuation())
+                }
+                None => Ok(self.punctuation()),
+            },
             _ => Ok(self.punctuation()),
         }
     }
@@ -628,17 +675,88 @@ impl Lexer<'_> {
     /// A template literal, consumed whole so what follows it is not mistaken
     /// for code. The substitutions inside are not scanned: nothing downstream
     /// can use them, and the whole lexeme is one capability boundary.
-    fn template(&mut self) -> TokenKind {
+    /// A template literal, from its opening backtick.
+    fn template(&mut self) -> Result<TokenKind, CompileError> {
+        let opened = self.pos;
         self.pos += 1;
-        while let Some(byte) = self.peek() {
-            self.pos += 1;
-            match byte {
-                b'\\' if self.pos < self.bytes.len() => self.pos += 1,
-                b'`' => break,
-                _ => {}
+        self.template_piece(opened, true)
+    }
+
+    /// The `}` that ends a substitution, which resumes template text rather
+    /// than closing a block. The caller has already established that the
+    /// innermost open template is at brace depth zero, which is what makes
+    /// this `}` a resume.
+    fn template_resume(&mut self) -> Result<TokenKind, CompileError> {
+        let opened = self.templates.last().expect("the caller looked").0;
+        self.pos += 1;
+        self.template_piece(opened, false)
+    }
+
+    /// One run of template text, ending at either `${` or the closing
+    /// backtick. `head` says whether this run began at the backtick, which
+    /// together with how it ended picks one of the four kinds.
+    fn template_piece(&mut self, opened: usize, head: bool) -> Result<TokenKind, CompileError> {
+        let mut value = String::new();
+        let mut unlowered: Option<&'static str> = None;
+        let substituted = loop {
+            let Some(c) = self.current() else {
+                return Err(malformed(
+                    &format!(
+                        "needs a `` ` `` to close the template opened at byte {opened}; the source ends first"
+                    ),
+                    opened,
+                ));
+            };
+            match c {
+                '`' => {
+                    self.pos += 1;
+                    break false;
+                }
+                '$' if self.peek_at(1) == Some(b'{') => {
+                    self.pos += 2;
+                    break true;
+                }
+                '\\' => {
+                    if let Some(phrase) = self.escape(&mut value)? {
+                        unlowered = unlowered.or(Some(phrase));
+                    }
+                }
+                // ECMA-262 12.9.6: unlike a string, a template may hold a line
+                // terminator, and its TV normalises `\r\n` and a lone `\r` to
+                // one `\n`. Miss this and a template written on a CRLF file
+                // means something different from the same one on a LF file.
+                '\r' => {
+                    self.pos += 1;
+                    if self.peek() == Some(b'\n') {
+                        self.pos += 1;
+                    }
+                    value.push('\n');
+                }
+                _ => {
+                    value.push(c);
+                    self.pos += c.len_utf8();
+                }
             }
+        };
+        // The stack moves whether or not the text was lowerable, so that a
+        // refused piece still leaves the substitutions after it lexing as
+        // ordinary tokens and the refusal is the only thing reported.
+        match (head, substituted) {
+            (true, true) => self.templates.push((opened, 0)),
+            (false, false) => {
+                self.templates.pop();
+            }
+            _ => {}
         }
-        subset("template literals")
+        if let Some(phrase) = unlowered {
+            return Ok(subset(phrase));
+        }
+        Ok(match (head, substituted) {
+            (true, false) => TokenKind::TemplateFull(value),
+            (true, true) => TokenKind::TemplateHead(value),
+            (false, true) => TokenKind::TemplateMiddle(value),
+            (false, false) => TokenKind::TemplateTail(value),
+        })
     }
 
     /// A string literal and its value (ECMA-262 12.9.4).

@@ -561,9 +561,19 @@ fn guard_unterminated_lexemes_are_named_not_crashed() {
             error.message
         );
     }
-    // A template is consumed whole so what follows it is read as code, and the
-    // whole lexeme is one boundary.
-    assert!(refuse("return `abc;").message.contains("template literals"));
+    // A template is lowered now, so an unterminated one is a malformed source
+    // and not a capability boundary: it is named the same way an unterminated
+    // string is, and points at the backtick that was never closed.
+    let error = refuse("return `abc;");
+    assert!(error.message.contains("close the template"), "{}", error.message);
+    assert!(error.message.contains("byte 7"), "{}", error.message);
+    // An unterminated *substitution* is the same story one level in.
+    let error = refuse("return `a${1;");
+    assert!(
+        error.message.contains("close the substitution in the template"),
+        "{}",
+        error.message
+    );
 }
 
 /// Escape sequences, including the ones a Rust `String` cannot hold.

@@ -1426,11 +1426,10 @@ fn the_neighbouring_syntax_is_refused_by_name() {
         "the nullish coalescing operator",
         Boundary::Subset,
     );
-    refuses_capability(
-        "const o = { a: 1 }; return `${o.a}`;",
-        "template literals",
-        Boundary::Subset,
-    );
+    // A template literal used to be an entry here. It landed, and what it
+    // reaches for at this boundary -- a property read inside a substitution,
+    // then `ToString` of the number it found -- now works end to end.
+    text("const o = { a: 1 }; return `${o.a}`;", "1");
     // Array literals used to be two entries here. They landed, so what is
     // left of them at this boundary is the one shape that did *not*: an
     // elision, which is a hole and not an `undefined`, and which this engine
