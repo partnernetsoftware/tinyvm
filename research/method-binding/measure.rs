@@ -47,6 +47,13 @@ const WITH_METHODS: &[(&str, &str)] = &[
     // A receiver that is not a String: the gate turns on and the prefab is
     // never reached, so this is what the gate's inexactness costs.
     ("objtrim", "const o = { trim: function () { return 1; } }; return o.trim();"),
+    // Criterion ③: what a *second method in the set* costs a program that
+    // uses only the first. If the set is all-or-nothing, `trim1` moves when a
+    // method it never calls is added -- which is the linear growth the
+    // decision tree judges negative.
+    ("idx1", "return \"abc\".indexOf(\"b\");"),
+    ("idx2", "return \"abc\".indexOf(\"b\") + \"de\".indexOf(\"e\");"),
+    ("both", "return \"  a  \".trim().length + \"abc\".indexOf(\"b\");"),
 ];
 
 #[test]

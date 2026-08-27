@@ -1630,7 +1630,7 @@ pub(crate) mod m1 {
                     key: ast::MemberKey::Static(name),
                     ..
                 } = &callee.kind
-                    && name == "trim"
+                    && method::Me::at_call_site(name, args.len()).is_some()
                 {
                     scan.methods = true;
                 }
@@ -3279,10 +3279,9 @@ pub(crate) mod m1 {
                 object,
                 key: ast::MemberKey::Static(name),
             } = &callee.kind
-                && name == "trim"
-                && args.is_empty()
+                && let Some(me) = method::Me::at_call_site(name, args.len())
             {
-                return self.specialised_method(object, name.clone(), args);
+                return self.specialised_method(object, name.clone(), me, args);
             }
             let target = match &callee.kind {
                 ast::ExprKind::Name(ast::Name {
@@ -3402,6 +3401,7 @@ pub(crate) mod m1 {
             &mut self,
             object: &ast::Expr,
             name: String,
+            me: method::Me,
             args: &[ast::Expr],
         ) -> Result<(), CompileError> {
             let base = self
@@ -3416,7 +3416,10 @@ pub(crate) mod m1 {
             is_string(recv, &mut self.f.body);
             self.push(Ins::If(BlockType::Empty));
             load_local(recv, &mut self.f.body);
-            self.push(Ins::Call(base + method::Me::Trim.offset()));
+            for arg in args {
+                self.expr(arg)?;
+            }
+            self.push(Ins::Call(base + me.offset()));
             store_local(result, &mut self.f.body);
             self.push(Ins::End);
 

@@ -19,7 +19,7 @@
 //! the *dispatch* -- the branch just moves from the callee's value into the
 //! call site's code. That belongs in criterion ⑥'s leak list.
 
-use super::repr::{self, BlockType, Ins, ValType, WIDTH, box_string, unbox_string};
+use super::repr::{self, BlockType, Ins, ValType, WIDTH, box_number, box_string, unbox_string};
 use super::runtime::{ALIGN_WORD, FnBuild, Rt, RtFunc};
 
 /// Where this set sits, and where the unconditional runtime sits. The same
@@ -48,16 +48,35 @@ pub(crate) enum Me {
     /// LineTerminator character at `addr`, or 0 when it is neither. A helper
     /// rather than inline code because both ends of `trim` ask it.
     WsWidth,
+    /// `units(p, n) -> i32`: UTF-16 code units in the first `n` bytes of the
+    /// string body at `p`. `indexOf` reports a position, and a position has
+    /// to be in the same unit `length` counts in or the two disagree.
+    Units,
     Trim,
+    IndexOf,
 }
 
-pub(crate) const SET: &[Me] = &[Me::WsWidth, Me::Trim];
+pub(crate) const SET: &[Me] = &[Me::WsWidth, Me::Units, Me::Trim, Me::IndexOf];
 
 impl Me {
     pub(crate) fn symbol(self) -> &'static str {
         match self {
             Me::WsWidth => "__m_ws_width",
+            Me::Units => "__m_units",
             Me::Trim => "__m_trim",
+            Me::IndexOf => "__m_index_of",
+        }
+    }
+
+    /// The method a `recv.name(args)` call site denotes, or `None` when this
+    /// variant does not specialise it. The arity is part of the question: a
+    /// `trim` called with an argument is not this `trim`, and specialising it
+    /// would be inventing a signature.
+    pub(crate) fn at_call_site(name: &str, argc: usize) -> Option<Self> {
+        match (name, argc) {
+            ("trim", 0) => Some(Me::Trim),
+            ("indexOf", 1) => Some(Me::IndexOf),
+            _ => None,
         }
     }
 
@@ -80,7 +99,9 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
     let i32_ = ValType::I32;
     let (params, results, f) = match me {
         Me::WsWidth => (vec![i32_], vec![i32_], ws_width()),
+        Me::Units => (vec![i32_, i32_], vec![i32_], units()),
         Me::Trim => (values(1), values(1), trim(ctx)),
+        Me::IndexOf => (values(2), values(1), index_of(ctx)),
     };
     RtFunc {
         name: me.symbol(),
@@ -338,4 +359,188 @@ fn trim(ctx: &Ctx) -> FnBuild {
     box_string(&inner, &mut tail);
     f.body.extend(tail);
     f
+}
+
+/// UTF-16 code units in the first `n` bytes of the string body at `p`.
+///
+/// The same rule `runtime::length` uses -- a non-continuation byte starts a
+/// character, and a byte at or above `0xf0` is a surrogate pair -- applied to
+/// a prefix rather than to the whole. Duplicated rather than shared because
+/// `__len` takes a JS value and counts all of it; a research variant does not
+/// get to widen a production signature.
+fn units() -> FnBuild {
+    let mut f = FnBuild::new(2);
+    let i = f.local(ValType::I32);
+    let n = f.local(ValType::I32);
+    let byte = f.local(ValType::I32);
+    let b = &mut f.body;
+
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(1));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::LocalSet(byte));
+    b.push(Ins::LocalGet(byte));
+    b.push(Ins::I32Const(0xc0));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Const(0x80));
+    b.push(Ins::I32Ne);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(n));
+    b.push(Ins::LocalGet(byte));
+    b.push(Ins::I32Const(0xf0));
+    b.push(Ins::I32GeU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(n));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(n));
+    f
+}
+
+/// `"abc".indexOf("b")` -- ECMA-262 22.1.3.9, without the second argument.
+///
+/// **A byte search is sound here.** The needle is valid UTF-8, so its first
+/// byte is a lead byte, and a lead byte never appears as a continuation byte
+/// in valid UTF-8. A byte-offset match can therefore only land on a character
+/// boundary, and no separate boundary check is needed. The offset is then
+/// converted to code units, because a position that did not agree with
+/// `length` would be a position no script could use.
+fn index_of(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH);
+    let h = f.local(ValType::I32);
+    let nd = f.local(ValType::I32);
+    let hl = f.local(ValType::I32);
+    let nl = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+    let j = f.local(ValType::I32);
+    let ok = f.local(ValType::I32);
+
+    unbox_string(0, &mut f.body);
+    f.body.push(Ins::LocalSet(h));
+    unbox_string(WIDTH, &mut f.body);
+    f.body.push(Ins::LocalSet(nd));
+
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalSet(hl));
+    b.push(Ins::LocalGet(nd));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalSet(nl));
+
+    // 22.1.3.9 step 6: an empty needle is found at 0, whatever the haystack.
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    number_const(b, 0);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    // A needle longer than the haystack cannot be found -- and testing it
+    // first is what keeps `hl - nl` below from wrapping.
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    number_const(b, -1);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32Sub);
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32LtU);
+    b.push(Ins::BrIf(1));
+
+    b.push(Ins::I32Const(1));
+    b.push(Ins::LocalSet(ok));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(j));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::LocalGet(nd));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::I32Ne);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(ok));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(ok));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(j));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(ok));
+    b.push(Ins::If(BlockType::Empty));
+    let mut found = Vec::new();
+    found.push(Ins::LocalGet(h));
+    found.push(Ins::LocalGet(i));
+    found.push(ctx.me(Me::Units));
+    found.push(Ins::F64ConvertI32S);
+    let mut boxed = Vec::new();
+    box_number(&found, &mut boxed);
+    b.extend(boxed);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    number_const(b, -1);
+    f
+}
+
+/// Push a Number literal as a V1 pair.
+fn number_const(b: &mut Vec<Ins>, v: i32) {
+    let mut inner = Vec::new();
+    inner.push(Ins::F64Const(v as f64));
+    let mut out = Vec::new();
+    box_number(&inner, &mut out);
+    b.extend(out);
 }
