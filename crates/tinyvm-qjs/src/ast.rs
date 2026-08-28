@@ -210,6 +210,23 @@ pub(crate) mod m1 {
         /// closure-free script an allocation per local per call, which is the
         /// cost `plan/design-closure-milestone.md` §1.2 forbids.
         pub(crate) captured: bool,
+        /// Whether this declaration sits inside a loop body, so it can run
+        /// more than once.
+        ///
+        /// ECMA-262 14.3.1 makes each execution of a lexical declaration
+        /// create a **new** binding, and that is only observable when the
+        /// declaration executes twice -- which needs a loop. A declaration
+        /// that runs once has one binding whatever the storage, so this is the
+        /// flag that says whether changing the storage buys anything.
+        ///
+        /// Only the script consults it. A captured binding inside a function
+        /// is a heap cell already, so allocating it per declaration is free
+        /// and needs no test. A script binding is two module globals, and
+        /// turning one into a cell costs the whole closure apparatus at every
+        /// site that reads it -- 99 bytes, measured in `closures_m3.rs` -- so
+        /// that conversion has to be asked for rather than applied to every
+        /// script binding a nested function happens to read.
+        pub(crate) in_loop: bool,
     }
 
     /// How a name was declared. The distinction outlives scoping: `Const` says

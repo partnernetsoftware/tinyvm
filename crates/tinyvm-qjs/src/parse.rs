@@ -377,6 +377,7 @@ pub(crate) mod m1 {
             arg_count: 0,
             frames: 0,
             has_arrow: tokens.iter().any(|t| t.kind == TokenKind::FatArrow),
+            loop_depth: 0,
         };
         parser.script()
     }
@@ -413,6 +414,13 @@ pub(crate) mod m1 {
         /// Frames of recursive descent currently on the native stack, plus the
         /// depth of the tree built so far -- see [`MAX_FRAMES`].
         frames: u32,
+        /// How many loop **bodies** the cursor is inside.
+        ///
+        /// Bodies, not headers: `for (let i = …; …)` declares `i` once however
+        /// many times the loop runs, so the header is outside this count and
+        /// `i` is not `in_loop`. See [`Binding::in_loop`] for what the answer
+        /// is used for.
+        loop_depth: u32,
     }
 
     struct Scope {
@@ -721,6 +729,7 @@ pub(crate) mod m1 {
                 // it. Nothing else may set it: a binding is captured exactly
                 // when an occurrence resolves from inside another function.
                 captured: false,
+                in_loop: self.loop_depth > 0,
             });
             self.functions[func.0 as usize].bindings.push(id);
             self.scopes[target].names.push((name.to_string(), id));
@@ -1064,7 +1073,10 @@ pub(crate) mod m1 {
                 &TokenKind::RParen,
                 "needs a `)` to close the `while` condition",
             )?;
-            let body = Box::new(self.body_statement("a `while`")?);
+            self.loop_depth += 1;
+            let body = self.body_statement("a `while`");
+            self.loop_depth -= 1;
+            let body = Box::new(body?);
             self.shallower(1);
             Ok(StmtKind::While { test, body })
         }
@@ -1117,7 +1129,10 @@ pub(crate) mod m1 {
                 Some(self.expression(0)?)
             };
             self.expect(&TokenKind::RParen, "needs a `)` to close the `for` header")?;
-            let body = Box::new(self.body_statement("a `for`")?);
+            self.loop_depth += 1;
+            let body = self.body_statement("a `for`");
+            self.loop_depth -= 1;
+            let body = Box::new(body?);
             Ok(StmtKind::For {
                 init,
                 test,
@@ -2309,10 +2324,27 @@ pub(crate) mod m1 {
                     p.offset,
                 )),
                 _ if binding.func == p.func => Ok(Res::Local(id)),
+                // A script binding declared inside a loop is a **new** binding
+                // on every pass (14.3.1), and two module globals cannot be two
+                // bindings. So this one is captured like any other, which puts
+                // its cell in the reader's environment and makes the pass it
+                // was made on the pass it sees.
+                //
+                // Only this case. Every other script binding stays a global:
+                // its declaration runs once, so one binding is the right
+                // answer already, and converting it would buy nothing and cost
+                // the closure apparatus at every reader -- see
+                // `Binding::in_loop`, and §2.1 of
+                // `plan/design-per-iteration-binding-milestone.md` for the
+                // criterion that ruled out doing it wholesale.
+                _ if binding.func == Program::SCRIPT
+                    && binding.in_loop
+                    && matches!(binding.kind, BindingKind::Let | BindingKind::Const) =>
+                {
+                    Ok(Res::Captured(id))
+                }
                 // The script's bindings outlive every frame, so a function may
-                // read one. Any other enclosing function's would have to be
-                // captured, and a captured binding needs an environment this
-                // engine does not build.
+                // read one.
                 _ if binding.func == Program::SCRIPT => Ok(Res::Global(id)),
                 // A binding of an enclosing function. This used to be
                 // `unsupported("closures that capture a variable")`; it is a

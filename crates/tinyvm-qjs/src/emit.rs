@@ -1732,6 +1732,18 @@ pub(crate) mod m1 {
         /// A binding captured **from an enclosing function**: this function's
         /// environment holds the cell pointer at this index.
         Env(u32),
+        /// A **captured script binding**: the global at this index holds an
+        /// `i32` pointer to the binding's heap cell.
+        ///
+        /// The script's storage is globals because a nested function may read
+        /// it and a wasm local does not outlive the script's frame. A heap
+        /// cell also outlives it, and is the only one of the two that can be a
+        /// *different* binding on each pass of a loop -- which is why this
+        /// exists and why it exists only for the loop case. It reuses the
+        /// `i32` half of the pair of globals the binding would otherwise
+        /// occupy, so the global layout is unchanged, exactly as
+        /// [`Place::Cell`] does with locals.
+        GlobalCell(u32),
     }
 
     /// One captured binding's storage: `[tag: i32][payload: i64]`, the V1 pair
@@ -2203,7 +2215,20 @@ pub(crate) mod m1 {
         fn place(&self, id: ast::BindingId) -> Place {
             let binding = self.program.binding(id);
             if binding.func == ast::Program::SCRIPT {
-                Place::Global(BINDING_GLOBALS + binding.slot * WIDTH)
+                let base = BINDING_GLOBALS + binding.slot * WIDTH;
+                match (binding.captured, self.id == ast::Program::SCRIPT) {
+                    // The script's own access to a captured binding: the
+                    // global holds the pointer to the cell that is current
+                    // *now*, which is the one this pass declared.
+                    (true, true) => Place::GlobalCell(base),
+                    // A nested function's access: its environment, like any
+                    // other capture. This branch is the whole point -- reading
+                    // the global from in here would read whichever cell the
+                    // script most recently declared, which is precisely the
+                    // shared-binding answer the change exists to remove.
+                    (true, false) => Place::Env(self.capture_index(id)),
+                    (false, _) => Place::Global(base),
+                }
             } else if binding.func == self.id {
                 let base = self.env_param + binding.slot * WIDTH;
                 if binding.captured {
@@ -2339,14 +2364,23 @@ pub(crate) mod m1 {
             if binding.slot < params || matches!(binding.kind, ast::BindingKind::Var) {
                 return;
             }
-            let base = self.env_param + binding.slot * WIDTH;
             let cell = self.take_raw();
             self.push(Ins::I32Const(CELL_BYTES));
             let alloc = self.ctx.call(Rt::Alloc);
             self.push(alloc);
             self.push(Ins::LocalSet(cell));
             self.push(Ins::LocalGet(cell));
-            self.push(Ins::LocalSet(base));
+            // Where the pointer goes is the only thing the two levels differ
+            // on. The script keeps it in a global because it has no frame to
+            // outlive; every other function keeps it in the local the binding
+            // already owns.
+            match self.place(id) {
+                Place::GlobalCell(base) => self.push(Ins::GlobalSet(base)),
+                _ => {
+                    let base = self.env_param + binding.slot * WIDTH;
+                    self.push(Ins::LocalSet(base));
+                }
+            }
             self.give_raw(cell);
         }
 
@@ -2379,6 +2413,7 @@ pub(crate) mod m1 {
         fn cell_pointer(&mut self, place: Place) {
             match place {
                 Place::Cell(base) => self.push(Ins::LocalGet(base)),
+                Place::GlobalCell(base) => self.push(Ins::GlobalGet(base)),
                 // Environment is always wasm local 0 of a capturing function.
                 Place::Env(index) => {
                     self.push(Ins::LocalGet(0));
@@ -2398,7 +2433,7 @@ pub(crate) mod m1 {
                 }
                 // Two loads through the cell, tag then payload -- the pair as
                 // it was stored, not re-boxed.
-                Place::Cell(_) | Place::Env(_) => {
+                Place::Cell(_) | Place::Env(_) | Place::GlobalCell(_) => {
                     self.cell_pointer(place);
                     let cell = self.take_raw();
                     self.push(Ins::LocalSet(cell));
@@ -2423,7 +2458,7 @@ pub(crate) mod m1 {
                 // Through the cell, which is what makes capture by *binding*
                 // rather than by value: the declaring function writes where
                 // every closure over it reads.
-                Place::Cell(_) | Place::Env(_) => {
+                Place::Cell(_) | Place::Env(_) | Place::GlobalCell(_) => {
                     let pair = self.take();
                     store_local(pair, &mut self.f.body);
                     self.cell_pointer(place);

@@ -71,40 +71,47 @@ fn a_let_declared_in_a_loop_body_is_a_new_binding_each_pass() {
     assert_eq!(run_str(source), "012");
 }
 
-/// **The second gap, pinned.** At script level the same declaration is still
-/// one binding.
+/// The same at script level, where the storage is different and the rule is not.
 ///
-/// A script binding does not live in a frame local and is not a cell: it is
-/// two module globals, because a nested function may read it and a local does
-/// not outlive the script's frame (`emit.rs` § "Storage: why the script's
-/// bindings are globals"). The fix above allocates a fresh **cell** per
-/// declaration, and there is no cell here to allocate, so this still answers
-/// `222` where ECMA-262 14.3.1 requires `012`.
+/// A script binding is two module globals rather than a frame local, because a
+/// nested function may read it and a local does not outlive the script's
+/// frame. That reasoning is sound and its conclusion was out of date: a heap
+/// cell also outlives a frame, and it did not exist when the comment stating
+/// it was written. So a script binding a nested function reads **and** whose
+/// declaration sits in a loop is now an ordinary capture, and 14.3.1 is
+/// answered by the same code as inside a function.
 ///
-/// That reasoning about globals is sound and its conclusion is out of date: a
-/// heap cell is also storage that outlives a frame, and it did not exist when
-/// that comment was written. Step 2 of
-/// `plan/design-per-iteration-binding-milestone.md` therefore makes a script
-/// binding that some nested function reads into an ordinary capture, which
-/// **removes** a special case rather than adding one -- and this test's
-/// expectation becomes `"012"` in that commit.
-///
-/// It is written down rather than left to be noticed because the two paths
-/// look identical in source and a fix reaching only one of them leaves the
-/// other silently wrong.
+/// The two conditions are both load-bearing. Without "a nested function reads
+/// it" there is nothing to observe. Without "in a loop" the declaration runs
+/// once, one binding is already the right answer, and the conversion would buy
+/// nothing while costing the closure apparatus at every reader -- 99 bytes,
+/// measured. §2.1 of the design note records that criterion 4 ruled out the
+/// wholesale version before it was written.
 #[test]
-fn a_script_level_declaration_is_still_one_binding_and_that_is_step_two() {
+fn the_same_holds_at_script_level_where_the_storage_differs() {
     let source = "const fs = [];
     for (let n = 0; n < 3; n = n + 1) {
         let v = n;
         fs.push(function () { return v; });
     }
     return \"\" + fs[0]() + fs[1]() + fs[2]();";
-    assert_eq!(
-        run_str(source),
-        "222",
-        "ECMA-262 14.3.1 requires 012; script bindings are globals, not cells -- step 2"
-    );
+    assert_eq!(run_str(source), "012");
+}
+
+/// A script binding read by a nested function but **not** in a loop stays a
+/// global, and this is the test that says the narrowing was real.
+///
+/// It answers the same value either way -- one execution, one binding -- so
+/// the assertion below cannot distinguish the two storages. What it pins is
+/// that the program still *works* after the resolution rule grew a case; the
+/// byte gate in `closures_m3.rs` is what pins that it did not grow a cost.
+#[test]
+fn a_script_binding_read_from_a_function_outside_a_loop_still_works() {
+    let source = "let x = 41;
+    function f() { return x; }
+    x = x + 1;
+    return \"\" + f();";
+    assert_eq!(run_str(source), "42");
 }
 
 /// `const` is the same rule; the keyword decides writability, not lifetime.

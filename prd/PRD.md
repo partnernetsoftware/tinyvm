@@ -267,7 +267,8 @@ tinyvm (35)                                      [~]
 │   │   │   ├── a no-capture program pays nothing          [x] 21 fixed / 99 each
 │   │   │   └── 一个声明执行两次 = 两个绑定 (14.3.1)        [~] 见下三行
 │   │   │       ├── 函数内的 let / const（含 while / 嵌套块） [x] 012，cell 移到声明处
-│   │   │       ├── 脚本层的 let / const                     [ ] 仍 222：绑定是 global 不是 cell
+│   │   │       ├── 脚本层的 let / const                     [x] 012，循环内的改走捕获
+│   │   │       │   └── 不在循环里的脚本绑定仍是 global       [x] 判据 ④：不许为它涨字节
 │   │   │       └── `for` 头部的 let 每轮复制 (13.7.4.7)      [ ] 仍 333；`while` 的 333 是对的
 │   │   ├── the whole DecimalLiteral grammar (12.9.3)      [x]
 │   │   │   ├── 1.5 · .5 · 1. · 1e3 · 2E2 · 1.5e-3         [x]
