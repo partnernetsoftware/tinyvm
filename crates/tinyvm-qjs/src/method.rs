@@ -99,6 +99,12 @@ pub(crate) enum Me {
     StartsWith,
     /// `s.endsWith(t)` -- ECMA-262 22.1.3.7.
     EndsWith,
+    /// `substr(p, start, n) -> i32`: a fresh string of `n` bytes from `p +
+    /// start`. A helper, like [`Me::WsWidth`] and [`Me::Units`].
+    Substr,
+    /// `s.split(sep)` -- ECMA-262 22.1.3.23, third in the second survey at 34
+    /// of 82 scripts and 129 uses.
+    Split,
     Push,
     /// `a.pop()` -- ECMA-262 23.1.3.22. The **fifth** method, added only to
     /// measure criterion ④: how many variant-specific lines a new method
@@ -128,6 +134,8 @@ pub(crate) const SET: &[Me] = &[
     Me::Includes,
     Me::StartsWith,
     Me::EndsWith,
+    Me::Substr,
+    Me::Split,
     Me::Push,
     Me::Pop,
     Me::MapBound,
@@ -200,6 +208,8 @@ impl Me {
             Me::Includes => "__m_includes",
             Me::StartsWith => "__m_starts_with",
             Me::EndsWith => "__m_ends_with",
+            Me::Substr => "__m_substr",
+            Me::Split => "__m_split",
             Me::Push => "__m_push",
             Me::Pop => "__m_pop",
             Me::MapBound => "__m_map_bound",
@@ -217,6 +227,7 @@ impl Me {
             ("includes", 1) => Some(Me::Includes),
             ("startsWith", 1) => Some(Me::StartsWith),
             ("endsWith", 1) => Some(Me::EndsWith),
+            ("split", 1) => Some(Me::Split),
             ("push", 1) => Some(Me::Push),
             ("pop", 0) => Some(Me::Pop),
             ("map", 1) => Some(Me::MapBound),
@@ -235,7 +246,7 @@ impl Me {
     /// Whether this method's body reaches into the array set, which the
     /// *array* gate controls. See [`Ctx::array_base`].
     pub(crate) fn needs_arrays(self) -> bool {
-        matches!(self, Me::Push | Me::MapBound)
+        matches!(self, Me::Push | Me::MapBound | Me::Split)
     }
 
 
@@ -249,7 +260,8 @@ impl Me {
             // three needs the byte-offset-to-code-unit conversion `indexOf`
             // exists to do. This is the whole reason they are not written as
             // `indexOf(t) !== -1`.
-            Me::Includes | Me::StartsWith | Me::EndsWith => Vec::new(),
+            Me::Includes | Me::StartsWith | Me::EndsWith | Me::Substr => Vec::new(),
+            Me::Split => vec![Me::Substr],
             Me::WsWidth | Me::Units | Me::Push | Me::Pop | Me::MapBound => Vec::new(),
         }
     }
@@ -273,6 +285,12 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
         Me::Includes => (values(2), values(1), includes()),
         Me::StartsWith => (values(2), values(1), affix(Affix::Start)),
         Me::EndsWith => (values(2), values(1), affix(Affix::End)),
+        Me::Substr => (
+            vec![ValType::I32, ValType::I32, ValType::I32],
+            vec![ValType::I32],
+            substr(ctx),
+        ),
+        Me::Split => (values(2), values(1), split(ctx)),
         Me::Push => (values(2), values(1), push(ctx)),
         Me::Pop => (values(1), values(1), pop()),
         Me::MapBound => (values(2), values(1), map_bound(ctx)),
@@ -1008,6 +1026,246 @@ fn affix(which: Affix) -> FnBuild {
     b.push(Ins::End);
 
     const_bool(true, b);
+    f
+}
+
+
+/// `substr(p, start, n) -> i32`: a freshly allocated string holding `n` bytes
+/// of the string body at `p`, from byte offset `start`.
+///
+/// A helper rather than inline code because `split` emits it once per piece
+/// plus once for the tail, and because the next string method that returns a
+/// piece of its receiver -- `slice`, `replace` -- will want exactly this.
+///
+/// Byte offsets, not code-unit ones. Every caller so far has found its offsets
+/// by matching a *separator*, and a separator boundary is a character boundary
+/// in UTF-8 by construction, so no decoding is needed to know the slice is
+/// well-formed. A future caller that takes offsets from the script -- `slice`
+/// does -- cannot reuse this without converting first, and that conversion is
+/// `Me::Units` run backwards.
+fn substr(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(3);
+    let p = 0;
+    let start = 1;
+    let n = 2;
+    let out = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32Add);
+    b.push(ctx.rt(Rt::Alloc));
+    b.push(Ins::LocalSet(out));
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Store(ALIGN_WORD, 0));
+
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(p));
+    b.push(Ins::LocalGet(start));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::I32Store8(0, 4));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(out));
+    f
+}
+
+/// `s.split(sep)` -- ECMA-262 22.1.3.23, for a non-empty string separator.
+///
+/// Third in the second demand survey: `.split(` appears in 34 of 82 downstream
+/// scripts, 129 times. What they split on was counted too, and it decided the
+/// shape of this: 54 of the 129 are `"\n"`, the rest are other short literals,
+/// and **`split("")` appears zero times**.
+///
+/// # The empty separator traps, and that is forced rather than chosen
+///
+/// ECMA-262 splits on an empty separator into UTF-16 **code units**, so
+/// `"😀".split("")` is two lone surrogates. This engine's strings are UTF-8
+/// and a lone surrogate is not representable in it -- there is no byte
+/// sequence that means one. So conformance here is not deferred work, it is
+/// unreachable from this representation, and the two alternatives are both
+/// worse than a trap: splitting by *code point* instead would be a silent
+/// wrong answer for exactly the inputs that make the case interesting, and
+/// returning the whole string would be a silent wrong answer for all of them.
+///
+/// Zero uses in the corpus is what makes a trap affordable. It is not what
+/// makes it right.
+///
+/// # No separator found
+///
+/// `["whole"]`, per step 14 -- which falls out of the loop rather than being
+/// special-cased: nothing matches, so the tail push after the loop is the only
+/// push that happens.
+fn split(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH);
+    let h = f.local(ValType::I32);
+    let nd = f.local(ValType::I32);
+    let hl = f.local(ValType::I32);
+    let nl = f.local(ValType::I32);
+    let a = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+    let j = f.local(ValType::I32);
+    let start = f.local(ValType::I32);
+    let ok = f.local(ValType::I32);
+
+    unbox_string(0, &mut f.body);
+    f.body.push(Ins::LocalSet(h));
+    unbox_string(WIDTH, &mut f.body);
+    f.body.push(Ins::LocalSet(nd));
+
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalSet(hl));
+    b.push(Ins::LocalGet(nd));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalSet(nl));
+
+    // See the doc comment: unrepresentable rather than unimplemented.
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::Unreachable);
+    b.push(Ins::End);
+
+    // `Ar::New` takes a capacity. Zero, because the piece count is not known
+    // until the scan has run and guessing it would either over-allocate for
+    // the common case -- 54 of the corpus's 129 splits are on `"\n"` and most
+    // lines are short -- or under-allocate and grow anyway.
+    b.push(Ins::I32Const(0));
+    b.push(ctx.arr(Ar::New));
+    b.push(Ins::LocalSet(a));
+
+    // Skipped entirely when the separator is longer than the string, which is
+    // also what keeps `hl - nl` from wrapping.
+    // `nl <= hl`, written as `!(hl < nl)`: this instruction set has no
+    // unsigned `<=`, and inverting the one it has is cheaper than widening it.
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32LtU);
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32Sub);
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32LtU);
+    b.push(Ins::BrIf(1));
+
+    b.push(Ins::I32Const(1));
+    b.push(Ins::LocalSet(ok));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(j));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::LocalGet(nd));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::I32Ne);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(ok));
+    b.push(Ins::Br(2));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(j));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(ok));
+    b.push(Ins::If(BlockType::Empty));
+    // One piece: from `start` up to this match.
+    b.push(Ins::LocalGet(a));
+    let piece = vec![
+        Ins::LocalGet(h),
+        Ins::LocalGet(start),
+        Ins::LocalGet(i),
+        Ins::LocalGet(start),
+        Ins::I32Sub,
+        ctx.me(Me::Substr),
+    ];
+    let mut boxed = Vec::new();
+    box_string(&piece, &mut boxed);
+    b.extend(boxed);
+    b.push(ctx.arr(Ar::Push));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalSet(start));
+    b.push(Ins::End);
+    // The other arm, as a second `if` rather than an `else`: this instruction
+    // set has no `else`, and a matched separator has already moved `i` past
+    // itself, so the two arms are genuinely exclusive on `ok` alone.
+    b.push(Ins::LocalGet(ok));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::End);
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    // The tail, always: `"a,".split(",")` is `["a", ""]`, and `"x".split(",")`
+    // is `["x"]`. Both are this push and nothing else.
+    b.push(Ins::LocalGet(a));
+    let tail = vec![
+        Ins::LocalGet(h),
+        Ins::LocalGet(start),
+        Ins::LocalGet(hl),
+        Ins::LocalGet(start),
+        Ins::I32Sub,
+        ctx.me(Me::Substr),
+    ];
+    let mut boxed = Vec::new();
+    box_string(&tail, &mut boxed);
+    b.extend(boxed);
+    b.push(ctx.arr(Ar::Push));
+
+    let inner = vec![Ins::LocalGet(a)];
+    let mut out = Vec::new();
+    box_array(&inner, &mut out);
+    f.body.extend(out);
     f
 }
 

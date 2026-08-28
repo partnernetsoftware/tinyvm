@@ -182,3 +182,158 @@ fn what_the_three_cost_is_written_down() {
         assert!(n > 0 && n < 1_000, "{name} is {n} bytes, which is a surprise");
     }
 }
+
+fn text(source: &str) -> String {
+    let wasm = compile_qjs_m1(source).unwrap_or_else(|e| panic!("compiling {source:?}: {e}"));
+    let module = WasmModule::from_bytes_with(&wasm, Limits::default())
+        .unwrap_or_else(|e| panic!("load gate rejected {source:?}: {}", e.message()));
+    let mut instance = module
+        .instantiate()
+        .unwrap_or_else(|e| panic!("instantiating {source:?}: {}", e.message()));
+    let vals = instance
+        .invoke_by_name("main", &Value::args(&[]))
+        .unwrap_or_else(|e| panic!("trap in {source:?}: {}", e.message()));
+    match Value::returned(&vals).unwrap_or_else(|e| panic!("{source:?}: {e}")) {
+        Value::String(ptr) => {
+            let view = instance.memory().expect("guest memory");
+            let bytes: &[u8] = &view;
+            let at = ptr as usize;
+            let len = u32::from_le_bytes(bytes[at..at + 4].try_into().expect("4")) as usize;
+            String::from_utf8(bytes[at + 4..at + 4 + len].to_vec()).expect("utf-8")
+        }
+        Value::Number(x) => format!("{x}"),
+        other => panic!("{source:?}: unexpected {other:?}"),
+    }
+}
+
+/// The ordinary split, and the shape the corpus writes most.
+///
+/// 54 of the 129 downstream `.split(` calls split on `"\n"`, so that is the
+/// case this leads with rather than a synthetic comma. Reassembled with a
+/// `for … of` rather than `join`, which does not exist yet -- and writing it
+/// that way is a small demonstration that the pieces are ordinary strings in
+/// an ordinary array.
+#[test]
+fn split_cuts_at_every_separator() {
+    let source = "let s = \"\";
+    for (const line of \"a\\nb\\nc\".split(\"\\n\")) { s = s + line + \"|\"; }
+    return s;";
+    assert_eq!(text(source), "a|b|c|");
+}
+
+/// Without `join`, which does not exist yet: read the pieces by index.
+#[test]
+fn the_pieces_are_the_pieces() {
+    assert_eq!(text("const p = \"a,b,c\".split(\",\"); return p.length;"), "3");
+    assert_eq!(text("const p = \"a,b,c\".split(\",\"); return p[0];"), "a");
+    assert_eq!(text("const p = \"a,b,c\".split(\",\"); return p[1];"), "b");
+    assert_eq!(text("const p = \"a,b,c\".split(\",\"); return p[2];"), "c");
+}
+
+/// A separator that is not there gives one piece: the whole string.
+///
+/// ECMA-262 22.1.3.23 step 14. It is not special-cased in the implementation
+/// -- nothing matches, so the tail push after the loop is the only push that
+/// happens -- and this is the test that says the fall-through is right.
+#[test]
+fn a_separator_that_is_absent_gives_the_whole_string() {
+    assert_eq!(text("const p = \"abc\".split(\",\"); return p.length;"), "1");
+    assert_eq!(text("const p = \"abc\".split(\",\"); return p[0];"), "abc");
+    // Longer than the string: the same answer by a different path, since the
+    // scan is skipped entirely rather than running zero times.
+    assert_eq!(text("const p = \"ab\".split(\"abc\"); return p[0];"), "ab");
+}
+
+/// Empty pieces are pieces.
+///
+/// The boundary an implementation drops by accident: a leading, trailing or
+/// doubled separator each produce an empty string, and the count is what says
+/// so.
+#[test]
+fn empty_pieces_are_kept() {
+    assert_eq!(text("return \"a,\".split(\",\").length;"), "2");
+    assert_eq!(text("return \",a\".split(\",\").length;"), "2");
+    assert_eq!(text("return \"a,,b\".split(\",\").length;"), "3");
+    assert_eq!(text("return \",\".split(\",\").length;"), "2");
+    assert_eq!(text("return \"\".split(\",\").length;"), "1");
+    assert_eq!(text("const p = \"a,,b\".split(\",\"); return p[1] + \"!\";"), "!");
+}
+
+/// A multi-character separator, and a separator whose bytes are multi-byte.
+#[test]
+fn separators_may_be_longer_than_one_byte_or_one_character() {
+    assert_eq!(text("return \"a::b::c\".split(\"::\").length;"), "3");
+    assert_eq!(text("const p = \"a::b\".split(\"::\"); return p[1];"), "b");
+    assert_eq!(text("return \"x→y→z\".split(\"→\").length;"), "3");
+    assert_eq!(text("const p = \"x→y\".split(\"→\"); return p[1];"), "y");
+}
+
+/// The pieces are real strings: they survive being concatenated and compared.
+///
+/// `split` allocates each piece, and an allocator bug shows up as a piece that
+/// reads correctly once and wrongly after the next allocation. Concatenating
+/// them forces more allocation between the reads.
+#[test]
+fn the_pieces_outlive_the_allocations_that_follow_them() {
+    let source = "const p = \"one,two,three\".split(\",\");
+    let s = \"\";
+    for (const x of p) { s = s + \"[\" + x + \"]\"; }
+    return s;";
+    assert_eq!(text(source), "[one][two][three]");
+}
+
+/// A program that never splits carries neither `split` nor its helper.
+#[test]
+fn a_program_that_never_splits_pays_for_neither_split_nor_substr() {
+    for (source, want) in [
+        ("return 1;", 9_765),
+        ("return \"ab\".includes(\"a\");", 10_085),
+    ] {
+        let n = compile_qjs_m1(source).expect("compiles").len();
+        assert_eq!(n, want, "{source:?} is {n} bytes");
+    }
+}
+
+/// `split("")` traps, and the reason is the representation rather than a
+/// missing feature.
+///
+/// ECMA-262 22.1.3.23 with an empty separator splits into UTF-16 **code
+/// units**, so `"😀".split("")` is two lone surrogates. This engine's strings
+/// are UTF-8, and there is no byte sequence that means a lone surrogate: the
+/// conformant answer is not merely unimplemented here, it is unrepresentable.
+///
+/// The two alternatives are worse. Splitting by code *point* would be a silent
+/// wrong answer for exactly the inputs that make the case interesting;
+/// returning the whole string would be a silent wrong answer for all of them.
+///
+/// Zero uses in the downstream corpus is what makes a trap affordable, not
+/// what makes it right.
+#[test]
+fn an_empty_separator_traps_because_a_lone_surrogate_is_unrepresentable() {
+    let wasm = compile_qjs_m1("return \"ab\".split(\"\").length;").expect("it compiles");
+    let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("it loads");
+    let mut instance = module.instantiate().expect("it instantiates");
+    let outcome = instance.invoke_by_name("main", &Value::args(&[]));
+    assert!(
+        outcome.is_err(),
+        "an empty separator must fail loudly rather than answer something plausible"
+    );
+}
+
+/// What `split` costs, written down -- and what its helper costs separately.
+///
+/// Two numbers because `substr` is shared: the next method that returns a
+/// piece of its receiver reuses it, so `split`'s own cost and the helper's are
+/// different questions.
+#[test]
+fn what_split_costs_is_written_down() {
+    let size = |src: &str| compile_qjs_m1(src).expect("compiles").len();
+    let base = size("const a = [1]; return a.length;");
+    let with_split = size("const p = \"a,b\".split(\",\"); return p.length;");
+    let cost = with_split - base;
+    println!("split + substr + the array set: {cost} bytes over an array-using program");
+    assert!(
+        cost > 0 && cost < 3_000,
+        "split costs {cost} bytes, which is a surprise worth reading before accepting"
+    );
+}
