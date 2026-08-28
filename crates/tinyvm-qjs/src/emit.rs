@@ -2256,7 +2256,25 @@ pub(crate) mod m1 {
             let owned: Vec<(u32, bool)> = function
                 .bindings
                 .iter()
-                .filter(|id| self.program.binding(**id).captured)
+                .filter(|id| {
+                    let binding = self.program.binding(**id);
+                    // A `let` or `const` gets its cell where its **declarator
+                    // runs**, not here -- see `Lower::fresh_cell`. Opening it
+                    // at entry is what made every pass of a loop body write
+                    // the same cell, so three closures over a body-declared
+                    // binding all answered with the last value (`222` where
+                    // ECMA-262 14.3.1 requires `012`).
+                    //
+                    // A parameter still opens here: its value arrives with the
+                    // frame and there is no declarator to hang it on. A `var`
+                    // still opens here too, and for a reason that is not
+                    // convenience -- 14.3.2.1 makes it exist and read
+                    // `undefined` from the moment its scope is entered, which
+                    // is *before* its statement runs, so it cannot wait.
+                    binding.captured
+                        && (binding.slot < params
+                            || matches!(binding.kind, ast::BindingKind::Var))
+                })
                 .map(|id| {
                     let slot = self.program.binding(*id).slot;
                     (slot, slot < params)
@@ -2281,6 +2299,55 @@ pub(crate) mod m1 {
                 self.push(Ins::LocalSet(base));
                 self.give_raw(cell);
             }
+        }
+
+        /// Give a captured `let`/`const` a **new** cell, here, where its
+        /// declarator runs.
+        ///
+        /// ECMA-262 14.3.1: executing a lexical declaration creates a binding.
+        /// Executing it again creates *another* one. That is invisible until
+        /// something outlives the iteration -- and a closure is exactly that,
+        /// so `for (…) { let v = n; fs.push(() => v); }` answered `222` when
+        /// the spec requires `012`: one cell, written three times, read three
+        /// times after the loop.
+        ///
+        /// This is where the fix belongs rather than in the `for` lowering,
+        /// because the rule is about **declarations**, not loops -- a `while`
+        /// body and a nested block have the same problem and get the same fix
+        /// from this one line. (`for`'s own header binding needs something
+        /// further, 13.7.4.7's per-iteration copy, and that *is* a rule about
+        /// loops. See `plan/design-per-iteration-binding-milestone.md` for why
+        /// the two are separate.)
+        ///
+        /// # What it costs a program that does not need it
+        ///
+        /// Nothing, and not by a gate that has to be maintained: `captured` is
+        /// already per-binding, so a binding no nested function reads takes the
+        /// early return. A closure-free program never reaches the allocation,
+        /// and a program whose captured bindings are all declared once
+        /// allocates exactly as many cells as before -- the same allocations,
+        /// moved from function entry to the statement that causes them.
+        fn fresh_cell(&mut self, id: ast::BindingId) {
+            let binding = self.program.binding(id);
+            if !binding.captured || binding.func != self.id {
+                return;
+            }
+            // Params and `var` opened at entry and must not be reopened: a
+            // param's incoming value is already in its cell, and a `var` may
+            // have been read as `undefined` before this statement.
+            let params = self.program.func(self.id).params.len() as u32;
+            if binding.slot < params || matches!(binding.kind, ast::BindingKind::Var) {
+                return;
+            }
+            let base = self.env_param + binding.slot * WIDTH;
+            let cell = self.take_raw();
+            self.push(Ins::I32Const(CELL_BYTES));
+            let alloc = self.ctx.call(Rt::Alloc);
+            self.push(alloc);
+            self.push(Ins::LocalSet(cell));
+            self.push(Ins::LocalGet(cell));
+            self.push(Ins::LocalSet(base));
+            self.give_raw(cell);
         }
 
         /// Build the environment `callee` expects and leave its pointer on the
@@ -2462,6 +2529,7 @@ pub(crate) mod m1 {
                     Ok(())
                 }
                 (Some(init), _) => {
+                    self.fresh_cell(declarator.binding);
                     let place = self.place(declarator.binding);
                     self.expr(init)?;
                     self.store(place);
@@ -2473,6 +2541,7 @@ pub(crate) mod m1 {
                 // runtime no-op (ECMA-262 14.3.2.1), so it does not.
                 (None, ast::BindingKind::Var) => Ok(()),
                 (None, _) => {
+                    self.fresh_cell(declarator.binding);
                     let place = self.place(declarator.binding);
                     const_undefined(&mut self.f.body);
                     self.store(place);
