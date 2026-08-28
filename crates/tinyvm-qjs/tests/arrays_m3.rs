@@ -441,11 +441,19 @@ fn two_neighbours_answer_with_a_syntax_error_rather_than_a_capability() {
     // correctly names `of`. Recorded downstream in `agenterm-qjswasm`'s README
     // as the one diagnostic still pointing at the wrong token; this is the
     // upstream test that will notice when it is fixed.
-    let e = compile_qjs_m1("for (const x of [1]) { } return 0;").expect_err("refused");
+    // **The defect this comment used to record is fixed**, and the test that
+    // said it would notice is the reason anyone knows.
+    //
+    // `for (const x of a)` reported "needs a value for the `const` binding
+    // `x`" -- the parser read the header as a plain `const` declaration and
+    // complained about a missing initialiser, pointing at `const` when the gap
+    // was `for … of`. Written as `let` or `var`, the same loop correctly named
+    // `of`. It is gone because the construct is supported: the header is
+    // recognised by three tokens before `declaration` ever sees it.
     assert!(
-        e.message.contains("needs a value for the `const` binding"),
-        "the `for…of` diagnostic changed -- if it now names `of`, the defect is          fixed and this assertion should say so: {}",
-        e.message
+        compile_qjs_m1("for (const x of [1]) { } return 0;").is_ok(),
+        "`for (const x of …)` compiles since 2026-08-29; the misplaced diagnostic \
+         it used to produce is what this assertion was written to outlive"
     );
 }
 

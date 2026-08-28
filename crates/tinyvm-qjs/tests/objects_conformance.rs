@@ -1380,13 +1380,26 @@ fn enumeration_is_refused() {
     // naming the loop form. MISLEADING: the construct ahead of the engine is
     // `for...in`/`for...of`, and the diagnostic names neither. Asserted
     // loosely on purpose -- the refusal is the promise, this wording is not.
-    for source in [
-        "const o = {}; for (const k in o) { } return 0;",
-        "const o = {}; for (const k of o) { } return 0;",
-    ] {
-        let error = refuses_somehow(source);
-        assert!(error.offset < source.len(), "an offset inside the source");
-    }
+    let error = refuses_somehow("const o = {}; for (const k in o) { } return 0;");
+    assert!(error.offset < source_offset_bound(), "an offset inside the source");
+
+    // `for … of` left this list on 2026-08-29. It **compiles** now, and an
+    // object is refused where it belongs -- at run time, by a `throw` a
+    // `catch` can read, because "is this an array" is not a fact the compiler
+    // has. `for_of_m3.rs` owns that behaviour; the row is removed here rather
+    // than loosened, because a compile-time refusal is no longer the promise.
+    //
+    // `for … in` stays. It is a different construct and still ahead of the
+    // engine: it walks *keys*, which needs the property enumeration this whole
+    // test is about.
+    assert!(
+        compile_qjs_m1("const o = [1]; for (const k of o) { } return 0;").is_ok(),
+        "`for … of` over an array compiles since 2026-08-29"
+    );
+}
+
+fn source_offset_bound() -> usize {
+    "const o = {}; for (const k in o) { } return 0;".len()
 }
 
 /// Spread and rest, and destructuring -- the three ways a script asks the

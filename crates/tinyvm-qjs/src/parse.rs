@@ -1110,7 +1110,349 @@ pub(crate) mod m1 {
             parts
         }
 
+        /// Whether the header reads `let`/`const`/`var` NAME `of`.
+        ///
+        /// Three tokens of lookahead rather than a token test, because the
+        /// declaration keyword alone does not distinguish `for (let i = 0;`
+        /// from `for (let x of`.
+        ///
+        /// `of` reaches here as [`TokenKind::Unsupported`] and not as an
+        /// identifier. That is the lexer's contextual-keyword list, which
+        /// exists to turn an unlowerable phrase into a sentence naming it, and
+        /// it is **left alone** by this change even though this form is
+        /// lowerable now. Two reasons: `for (x of y)` with no declaration is
+        /// still not supported and still needs that sentence, and `of` is a
+        /// legal identifier in ECMA-262 that this engine refuses -- a
+        /// divergence worth removing on its own terms rather than as a side
+        /// effect here.
+        fn at_for_of_head(&self) -> bool {
+            if !matches!(
+                self.kind(),
+                TokenKind::Let | TokenKind::Const | TokenKind::Var
+            ) {
+                return false;
+            }
+            let name = matches!(
+                self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                Some(TokenKind::Ident(_))
+            );
+            let of = matches!(
+                self.tokens.get(self.pos + 2).map(|t| &t.kind),
+                Some(TokenKind::Unsupported(word)) if word.phrase.contains("`of`")
+            );
+            name && of
+        }
+
+        /// `for (LHS x of SEQ) BODY`, folded into statements this engine
+        /// already lowers.
+        ///
+        /// # Why a fold and not a node
+        ///
+        /// The same reason template literals fold to `+` and arrows fold to
+        /// function expressions: the lowering has nothing to add. Index
+        /// iteration over an array *is* what this means here, and giving it a
+        /// node would put a second loop lowering beside the one that works.
+        ///
+        /// The fold is, with the two synthetic names written as `S` and `I`:
+        ///
+        /// ```text
+        /// {
+        ///   const S = SEQ;
+        ///   if (typeof S === "string") throw ...;
+        ///   if (typeof S.length !== "number") throw ...;
+        ///   for (let I = 0; I < S.length; I = I + 1) {
+        ///     LHS x = S[I];
+        ///     BODY
+        ///   }
+        /// }
+        /// ```
+        ///
+        /// # The two guards are the point, not decoration
+        ///
+        /// Without them a `for ... of` over anything that is not an array runs
+        /// **zero passes in silence**: a non-array has no `length`, the test
+        /// compares against `undefined`, and the loop simply does not happen.
+        /// That is the failure mode
+        /// `plan/design-per-iteration-binding-milestone.md` was written about
+        /// -- a legal answer that is the wrong one, with nothing to catch it.
+        ///
+        /// A string is refused separately because it *would* pass a length
+        /// test and then trap on `s[i]`, and because iterating it by index
+        /// gives UTF-16 code units where the specification gives code points.
+        /// Both guards throw, so `try`/`catch` sees them, which is what a
+        /// non-iterable does in ECMA-262.
+        ///
+        /// # Per-iteration binding
+        ///
+        /// `x` is declared in the header scope so the body can see it, and its
+        /// declarator is emitted **inside** the loop body, so it runs once per
+        /// pass and `Lower::fresh_cell` gives it a new cell each time. A
+        /// closure made on pass N therefore sees pass N's element -- inherited
+        /// from the per-iteration milestone rather than implemented again.
+        fn for_of_parts(&mut self) -> Result<StmtKind, CompileError> {
+            const SEQ: &str = " seq";
+            const IDX: &str = " i";
+
+            let at = self.peek().offset;
+            let span = Span(at);
+            let kind = match self.kind() {
+                TokenKind::Let => BindingKind::Let,
+                TokenKind::Const => BindingKind::Const,
+                _ => BindingKind::Var,
+            };
+            self.advance();
+            let TokenKind::Ident(name) = self.peek().kind.clone() else {
+                unreachable!("`at_for_of_head` checked this token is a name");
+            };
+            let name_span = Span(self.peek().offset);
+            self.advance();
+            self.advance(); // the contextual `of`
+
+            let seq = self.expression(0)?;
+            self.expect(&TokenKind::RParen, "needs a `)` to close the `for` header")?;
+
+            // The two synthetic names hold a space, which no identifier the
+            // lexer can produce does. They are ordinary bindings in every
+            // other respect, so scope resolution, slots and capture treat them
+            // like anything else rather than needing a second path.
+            let seq_id = self.declare(SEQ, BindingKind::Const, span)?;
+            self.bindings[seq_id.0 as usize].initialised = Some(at);
+            let idx_id = self.declare(IDX, BindingKind::Let, span)?;
+            self.bindings[idx_id.0 as usize].initialised = Some(at);
+            // Declared before the body is parsed, so a reference to `x` inside
+            // it resolves outward to this binding.
+            let item_id = self.declare(&name, kind, name_span)?;
+            self.bindings[item_id.0 as usize].initialised = Some(at);
+
+            let body = self.body_statement("a `for`")?;
+
+            // Three guards, in an order the *first* attempt got wrong.
+            //
+            // Reading `.length` off a primitive **traps** -- `require_tag`
+            // reaches `unreachable` -- so a single "does it have a numeric
+            // length" test dies on `for (const x of 42)` before it can throw
+            // anything a `catch` could see. The type has to be narrowed to
+            // something that *has* properties before the length is touched.
+            //
+            // A string gets its own sentence first, because it would pass a
+            // length test and then trap on `s[i]`, and because iterating one
+            // by index yields UTF-16 code units where ECMA-262 yields code
+            // points -- wrong for exactly the inputs people reach for it with.
+            let mut guards: Vec<Stmt> = Vec::new();
+            let guard = |test: Expr, message: &str| Stmt {
+                kind: StmtKind::If {
+                    test,
+                    then: Box::new(Stmt {
+                        kind: StmtKind::Throw(Expr {
+                            kind: ExprKind::Str(message.to_owned()),
+                            span,
+                        }),
+                        span,
+                    }),
+                    alt: None,
+                },
+                span,
+            };
+            let type_of_seq = |this: &mut Self| Expr {
+                kind: ExprKind::Unary(
+                    UnaryOp::TypeOf,
+                    Box::new(Expr {
+                        kind: ExprKind::Name(this.occurrence(SEQ, at, Role::Read)),
+                        span,
+                    }),
+                ),
+                span,
+            };
+            let str_lit = |text: &str| Expr {
+                kind: ExprKind::Str(text.to_owned()),
+                span,
+            };
+
+            let is_string = Expr {
+                kind: ExprKind::Binary(
+                    BinaryOp::StrictEq,
+                    Box::new(type_of_seq(self)),
+                    Box::new(str_lit("string")),
+                ),
+                span,
+            };
+            guards.push(guard(
+                is_string,
+                "for-of over a string is not supported: indexing one gives UTF-16 code units,                  not the code points ECMA-262 iterates",
+            ));
+
+            let not_object = Expr {
+                kind: ExprKind::Binary(
+                    BinaryOp::StrictNe,
+                    Box::new(type_of_seq(self)),
+                    Box::new(str_lit("object")),
+                ),
+                span,
+            };
+            guards.push(guard(
+                not_object,
+                "for-of needs an array; only arrays are iterable in this engine",
+            ));
+
+            let is_null = Expr {
+                kind: ExprKind::Binary(
+                    BinaryOp::StrictEq,
+                    Box::new(Expr {
+                        kind: ExprKind::Name(self.occurrence(SEQ, at, Role::Read)),
+                        span,
+                    }),
+                    Box::new(Expr {
+                        kind: ExprKind::Null,
+                        span,
+                    }),
+                ),
+                span,
+            };
+            guards.push(guard(
+                is_null,
+                "for-of needs an array; `null` is not iterable",
+            ));
+
+            // Only now is it safe to read a property. A plain object answers
+            // `undefined`, which is what this catches -- without it the loop
+            // would compare against `undefined`, run **zero passes in
+            // silence**, and report success.
+            let no_length = Expr {
+                kind: ExprKind::Binary(
+                    BinaryOp::StrictNe,
+                    Box::new(Expr {
+                        kind: ExprKind::Unary(
+                            UnaryOp::TypeOf,
+                            Box::new(Expr {
+                                kind: ExprKind::Member {
+                                    object: Box::new(Expr {
+                                        kind: ExprKind::Name(self.occurrence(SEQ, at, Role::Read)),
+                                        span,
+                                    }),
+                                    key: MemberKey::Static("length".to_owned()),
+                                },
+                                span,
+                            }),
+                        ),
+                        span,
+                    }),
+                    Box::new(str_lit("number")),
+                ),
+                span,
+            };
+            guards.push(guard(
+                no_length,
+                "for-of needs an array; this object has no numeric `length`",
+            ));
+
+            let init = Stmt {
+                kind: StmtKind::Decl(vec![Declarator {
+                    binding: idx_id,
+                    init: Some(Expr {
+                        kind: ExprKind::Int(0),
+                        span,
+                    }),
+                    span,
+                }]),
+                span,
+            };
+            // Read fresh each pass rather than cached, so a body that pushes
+            // or pops is seen -- which is what iterating an array does.
+            let test = Expr {
+                kind: ExprKind::Binary(
+                    BinaryOp::Lt,
+                    Box::new(Expr {
+                        kind: ExprKind::Name(self.occurrence(IDX, at, Role::Read)),
+                        span,
+                    }),
+                    Box::new(Expr {
+                        kind: ExprKind::Member {
+                            object: Box::new(Expr {
+                                kind: ExprKind::Name(self.occurrence(SEQ, at, Role::Read)),
+                                span,
+                            }),
+                            key: MemberKey::Static("length".to_owned()),
+                        },
+                        span,
+                    }),
+                ),
+                span,
+            };
+            let update = Expr {
+                kind: ExprKind::Assign {
+                    op: None,
+                    target: Box::new(Expr {
+                        kind: ExprKind::Name(self.occurrence(IDX, at, Role::Write)),
+                        span,
+                    }),
+                    value: Box::new(Expr {
+                        kind: ExprKind::Binary(
+                            BinaryOp::Add,
+                            Box::new(Expr {
+                                kind: ExprKind::Name(self.occurrence(IDX, at, Role::Read)),
+                                span,
+                            }),
+                            Box::new(Expr {
+                                kind: ExprKind::Int(1),
+                                span,
+                            }),
+                        ),
+                        span,
+                    }),
+                },
+                span,
+            };
+            let item = Stmt {
+                kind: StmtKind::Decl(vec![Declarator {
+                    binding: item_id,
+                    init: Some(Expr {
+                        kind: ExprKind::Member {
+                            object: Box::new(Expr {
+                                kind: ExprKind::Name(self.occurrence(SEQ, at, Role::Read)),
+                                span,
+                            }),
+                            key: MemberKey::Computed(Box::new(Expr {
+                                kind: ExprKind::Name(self.occurrence(IDX, at, Role::Read)),
+                                span,
+                            })),
+                        },
+                        span,
+                    }),
+                    span,
+                }]),
+                span,
+            };
+
+            let loop_stmt = Stmt {
+                kind: StmtKind::For {
+                    init: Some(Box::new(init)),
+                    test: Some(test),
+                    update: Some(update),
+                    body: Box::new(Stmt {
+                        kind: StmtKind::Block(vec![item, body]),
+                        span,
+                    }),
+                },
+                span,
+            };
+
+            let mut out = vec![Stmt {
+                kind: StmtKind::Decl(vec![Declarator {
+                    binding: seq_id,
+                    init: Some(seq),
+                    span,
+                }]),
+                span,
+            }];
+            out.append(&mut guards);
+            out.push(loop_stmt);
+            Ok(StmtKind::Block(out))
+        }
+
         fn for_parts(&mut self) -> Result<StmtKind, CompileError> {
+            if self.at_for_of_head() {
+                return self.for_of_parts();
+            }
             let span = Span(self.peek().offset);
             let init = if self.at_written_semi() {
                 self.advance();

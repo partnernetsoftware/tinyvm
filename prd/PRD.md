@@ -138,7 +138,7 @@ flowchart TD
 | 构造 | 用它的脚本 | 占比 | 本编译器 | 实测诊断 |
 |------|-----------|------|---------|----------|
 | `x.method()` | 73 | **89%** | 只有 5 个（trim/indexOf/push/pop/map） | — |
-| `for … of` | 64 | **78%** | **没有** | ⚠️ **指错了地方**，见下 |
+| `for … of` | 64 | **78%** | ✅ 2026-08-29，折叠成索引循环 | — |
 | 对象字面量 | 61 | 74% | ✅ | — |
 | 闭包 / lambda | 58 | 71% | ✅ | — |
 | 数组字面量 | 48 | 59% | ✅ | — |
@@ -218,7 +218,7 @@ return "" + fs[0]() + fs[1]() + fs[2]();
 直觉以为它冻住了旧值；没有——闭包捕获的是**绑定**，body 的写进的是同一个绑定，
 复制发生在 body 之后。要同时满足「每轮新绑定」和「仍然按绑定而非按值捕获」才会是 `135`。
 
-### 顺带查出的一条缺陷：`for-of` 的诊断指错了地方
+### ~~顺带查出的一条缺陷：`for-of` 的诊断指错了地方~~ —— 2026-08-29 随 `for-of` 落地消失
 
 ```
 $ agenterm cli script run forof.qjs      # for (const x of [1,2,3]) { … }
@@ -229,11 +229,17 @@ a `const` can never be assigned one later (at byte 22)
 解析器把 `for (const x of …)` 当成了普通 `const` 声明，于是抱怨缺初值。
 **读者被指向 `const`，而真正的缺口是 `for-of`。** 这违反纪律行里那条
 「诚实的『尚不支持』诊断（指语法，不指用户）」——`import` 那条就是正例
-（`does not support the `import` keyword yet`）。修 `for-of` 会顺带消掉它；
-在那之前这条记在这里，不许当成 `const` 的问题去查。
+（`does not support the `import` keyword yet`）。**已消掉**：`for-of` 的头部现在由三个 token 的前瞻认出来，`declaration` 根本轮不到看它。
+`arrays_m3.rs` 里那条写着「this is the upstream test that will notice when it is fixed」
+的断言，就是通知这件事的那个哨兵——它响了，然后被翻成了「已修复」。
 
-**状态**：`for-of` 是本表排出的下一个语言里程碑（需求驱动，不是目录驱动），
-但它**排在上面那条循环绑定分歧之后**——理由见那一节的三条。
+**状态**：`for-of` 已于 2026-08-29 落地（需求驱动的第一项）。它排在循环绑定分歧之后
+才做，理由见那一节的三条——而那个顺序是对的：`for-of` 的元素绑定**一行没写**就是
+每轮新的，因为它的声明落在循环体里，前一个里程碑的 `fresh_cell` 直接接住了。
+先做 `for-of` 就要把同一件事修两遍。
+
+**下一项是 `import`（46%）**，且它**不是语法特性而是链接模型**：多文件会改变
+「`.qjs → .wasm` 是编译一次」这句话还成不成立，所以要单独立项，很可能要判决性实验。
 `import`（模块系统）是第二位，且它不是一个语法特性而是**一个链接模型**，
 须单独立项——很可能要判决性实验，因为「多文件」会改变 `.qjs → .wasm` 这一段
 是不是还叫「编译一次」。
@@ -287,6 +293,13 @@ tinyvm (35)                                      [~]
 │   │   ├── commissar demo (example commissar)            [x]
 │   │   ├── V1 values across the call boundary            [x]
 │   │   ├── declarations, functions, control flow         [x]
+│   │   ├── `for … of` over an array (13.7.5)             [x] 折成索引循环，无新节点
+│   │   │   ├── 元素每轮是新绑定                            [x] 白拿：声明在循环体里
+│   │   │   ├── length 每轮重读，body 里 pop 会被看见        [x] 与数组迭代器一致
+│   │   │   ├── 字符串 / 非数组按名拒绝，可 catch            [x] 不静默跑零轮
+│   │   │   ├── 无声明形式 `for (x of y)`                   [ ] 目标可以是任意赋值目标
+│   │   │   └── `of` 当标识符（上下文关键字）                [具名分歧] 词法器仍拒
+│   │   ├── `for … in`                                    [ ] 要属性枚举，另一回事
 │   │   ├── object literals, property access, assignment [x]
 │   │   ├── functions as values, stored/passed/called     [x]
 │   │   ├── Number<->String conversion, per ECMA-262      [x]
