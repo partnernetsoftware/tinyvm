@@ -2384,6 +2384,54 @@ pub(crate) mod m1 {
             self.give_raw(cell);
         }
 
+        /// Copy a captured binding into a **new** cell, leaving the old one to
+        /// the closures that already took it.
+        ///
+        /// [`Lower::fresh_cell`] answers "a declaration ran again"; this
+        /// answers `for`'s extra promise, ECMA-262 13.7.4.7's
+        /// `CreatePerIterationEnvironment`. The difference is the copy: a
+        /// declaration starts a binding from its initialiser, while a loop
+        /// variable carries its value forward, which is what makes the update
+        /// expression see `n` and the next pass see `n + 1`.
+        ///
+        /// `while` never calls this, and that is conformance rather than an
+        /// omission -- the specification gives the per-iteration environment to
+        /// `for` alone, so a `while` closing over an outer variable is supposed
+        /// to see the last value.
+        fn clone_cell(&mut self, id: ast::BindingId) {
+            let place = self.place(id);
+            let old = self.take_raw();
+            self.cell_pointer(place);
+            self.push(Ins::LocalSet(old));
+
+            let new = self.take_raw();
+            self.push(Ins::I32Const(CELL_BYTES));
+            let alloc = self.ctx.call(Rt::Alloc);
+            self.push(alloc);
+            self.push(Ins::LocalSet(new));
+
+            // Copy before publishing the pointer: `__alloc` may move the heap,
+            // and a read after the store would be reading through whichever
+            // pointer won.
+            self.push(Ins::LocalGet(new));
+            self.push(Ins::LocalGet(old));
+            self.push(Ins::I32Load(ALIGN_WORD, CELL_TAG));
+            self.push(Ins::I32Store(ALIGN_WORD, CELL_TAG));
+            self.push(Ins::LocalGet(new));
+            self.push(Ins::LocalGet(old));
+            self.push(Ins::I64Load(ALIGN_WORD, CELL_PAYLOAD));
+            self.push(Ins::I64Store(ALIGN_WORD, CELL_PAYLOAD));
+
+            self.push(Ins::LocalGet(new));
+            match place {
+                Place::GlobalCell(base) => self.push(Ins::GlobalSet(base)),
+                Place::Cell(base) => self.push(Ins::LocalSet(base)),
+                other => unreachable!("{other:?} cannot be a loop variable of this function"),
+            }
+            self.give_raw(new);
+            self.give_raw(old);
+        }
+
         /// Build the environment `callee` expects and leave its pointer on the
         /// stack.
         ///
@@ -2507,7 +2555,11 @@ pub(crate) mod m1 {
                 // has already turned block scoping into distinct bindings.
                 ast::StmtKind::Block(stmts) => self.stmts(stmts),
                 ast::StmtKind::If { test, then, alt } => self.if_stmt(test, then, alt.as_deref()),
-                ast::StmtKind::While { test, body } => self.loop_stmt(Some(test), None, body),
+                // `while` gets no per-iteration bindings, and that is the
+                // specification rather than a shortcut: 13.7.4.7 gives the
+                // fresh environment to `for` alone, so a `while` closing over
+                // an outer variable must see the last value.
+                ast::StmtKind::While { test, body } => self.loop_stmt(Some(test), None, body, &[]),
                 ast::StmtKind::For {
                     init,
                     test,
@@ -2517,7 +2569,27 @@ pub(crate) mod m1 {
                     if let Some(init) = init {
                         self.stmt(init)?;
                     }
-                    self.loop_stmt(test.as_ref(), update.as_ref(), body)
+                    // ECMA-262 13.7.4.7: the loop variables of a `for (let …)`
+                    // are copied into a fresh environment each pass, so the
+                    // closure made on pass N sees pass N's value and the
+                    // update runs on the next pass's binding.
+                    //
+                    // Only captured ones are listed. A loop variable nothing
+                    // closes over cannot tell one binding from three, so
+                    // copying it would be a cost with no observable answer --
+                    // the same test `Binding::in_loop` applies one level up.
+                    let per_iteration: Vec<ast::BindingId> = match init.as_deref() {
+                        Some(ast::Stmt {
+                            kind: ast::StmtKind::Decl(declarators),
+                            ..
+                        }) => declarators
+                            .iter()
+                            .map(|d| d.binding)
+                            .filter(|id| self.program.binding(*id).captured)
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    self.loop_stmt(test.as_ref(), update.as_ref(), body, &per_iteration)
                 }
                 ast::StmtKind::Return(value) => {
                     match value {
@@ -2973,6 +3045,7 @@ pub(crate) mod m1 {
             test: Option<&ast::Expr>,
             update: Option<&ast::Expr>,
             body: &ast::Stmt,
+            per_iteration: &[ast::BindingId],
         ) -> Result<(), CompileError> {
             self.reset_completion();
             self.push(Ins::Block(BlockType::Empty));
@@ -2985,6 +3058,14 @@ pub(crate) mod m1 {
                 self.push(Ins::BrIf(1));
             }
             self.stmt(body)?;
+            // Between the body and the update, which is where 13.7.4.7 puts
+            // it: the pass that just ran keeps the cell its closures captured,
+            // and the update writes to the copy the next pass will use. Doing
+            // it before the body instead would hand pass N the value pass N-1
+            // ended with -- the same answer, one iteration late.
+            for id in per_iteration {
+                self.clone_cell(*id);
+            }
             if let Some(update) = update {
                 self.expr(update)?;
                 drop_value(&mut self.f.body);

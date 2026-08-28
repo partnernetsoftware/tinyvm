@@ -172,19 +172,19 @@ fn a_fresh_binding_per_pass_is_still_captured_by_binding_not_by_value() {
     assert_eq!(run_str(source), "100101");
 }
 
-/// **The gap, pinned.** `for`'s header binding is still shared.
+/// `for`'s own header binding, ECMA-262 13.7.4.7.
 ///
-/// ECMA-262 13.7.4.7 requires `012` here; this engine answers `333`. That is a
-/// separate rule from 14.3.1 -- the specification gives `for` a per-iteration
-/// *copy* that `while` does not get -- and it is not implemented.
+/// A rule of its own, separate from 14.3.1 above: the loop variable is
+/// declared once, so "a new binding per execution of a declaration" never
+/// fires for it. The specification instead copies it into a fresh environment
+/// each pass, which is why the closure from pass N sees N and the update
+/// expression still counts up.
 ///
-/// The test asserts the wrong answer on purpose. A known divergence with a
-/// test is a recorded fact; the same divergence without one is a claim of
-/// coverage that does not exist, and the capability tree would say `[x]` over
-/// both. When 13.7.4.7 lands, this test's expectation changes to `"012"` in
-/// the same commit, and its name is what makes that impossible to forget.
+/// The copy is what distinguishes this from a declaration. A declaration
+/// starts its binding from an initialiser; a loop variable carries its value
+/// forward.
 #[test]
-fn the_for_header_binding_is_still_shared_and_that_is_recorded_not_hidden() {
+fn the_for_header_binding_is_fresh_each_pass() {
     let source = "function make() {
         const fs = [];
         for (let i = 0; i < 3; i = i + 1) {
@@ -193,11 +193,48 @@ fn the_for_header_binding_is_still_shared_and_that_is_recorded_not_hidden() {
         return \"\" + fs[0]() + fs[1]() + fs[2]();
     }
     return make();";
-    assert_eq!(
-        run_str(source),
-        "333",
-        "ECMA-262 13.7.4.7 requires 012; this is the recorded gap, not a passing case"
-    );
+    assert_eq!(run_str(source), "012");
+}
+
+/// The same at script level, where the loop variable's cell pointer lives in a
+/// global rather than a local.
+#[test]
+fn the_for_header_binding_is_fresh_each_pass_at_script_level() {
+    let source = "const fs = [];
+    for (let i = 0; i < 3; i = i + 1) {
+        fs.push(function () { return i; });
+    }
+    return \"\" + fs[0]() + fs[1]() + fs[2]();";
+    assert_eq!(run_str(source), "012");
+}
+
+/// A write to the loop variable *inside* the body reaches both the closure
+/// made before it and the update after it.
+///
+/// The property a per-iteration copy is most likely to break: if the body's
+/// binding were a detached duplicate rather than the one the loop carries
+/// forward, this loop would never terminate or would skip passes.
+///
+/// The expected string is `3:135` and was written as `3:024` first, which is
+/// worth recording because the mistake is the natural one. The closure is
+/// pushed *before* `i = i + 1`, and the intuition is that it therefore froze
+/// the earlier value. It did not: a closure captures the **binding**, the
+/// body's write goes to that same binding, and the copy into the next pass's
+/// binding happens after the body. So pass one's closure answers `1`, not `0`.
+/// Both halves of this milestone have to hold at once for that -- fresh
+/// bindings per pass, and still by binding rather than by value.
+#[test]
+fn a_write_to_the_loop_variable_in_the_body_reaches_its_closure_and_the_update() {
+    let source = "function make() {
+        const fs = [];
+        for (let i = 0; i < 6; i = i + 1) {
+            fs.push(function () { return i; });
+            i = i + 1;
+        }
+        return \"\" + fs.length + \":\" + fs[0]() + fs[1]() + fs[2]();
+    }
+    return make();";
+    assert_eq!(run_str(source), "3:135");
 }
 
 /// A `while` loop's *outer* variable is shared, and that is **correct**.
@@ -216,4 +253,43 @@ fn a_while_closing_over_an_outer_variable_still_sees_the_last_value() {
     }
     return make();";
     assert_eq!(run_str(source), "333");
+}
+
+/// What per-iteration binding costs, written down.
+///
+/// The milestone's criterion 5 owed a slope, not an intercept: "today it is
+/// small" says nothing about a design, while "each additional one costs N"
+/// does. Three programs rather than two, because the first captured binding in
+/// a loop drags in the whole closure apparatus -- a function value, an
+/// environment, a capture slot -- and only the *second* one isolates what this
+/// change added.
+///
+/// Criteria 3 and 4 are not measured here: they are the byte expectations
+/// already standing in `closures_m3.rs`, which this milestone left untouched.
+/// A program with no closure, and a program whose closures capture nothing
+/// declared in a loop, compile to the same bytes they did before.
+#[test]
+fn what_a_per_iteration_binding_costs_is_written_down() {
+    let size = |src: &str| compile_qjs_m1(src).expect("compiles").len();
+
+    let none = size(
+        "function mk() { const fs=[]; for (let i=0;i<3;i=i+1) { fs.push(1); } return fs; } \
+         return mk().length;",
+    );
+    let one = size(
+        "function mk() { const fs=[]; for (let i=0;i<3;i=i+1) { fs.push(function(){return i;}); } \
+         return fs; } return mk().length;",
+    );
+    let two = size(
+        "function mk() { const fs=[]; for (let i=0;i<3;i=i+1) { let v=i; \
+         fs.push(function(){return i+v;}); } return fs; } return mk().length;",
+    );
+
+    let marginal = two - one;
+    println!("loop capture: {} for the first, {marginal} per additional binding", one - none);
+    assert_eq!(
+        marginal, 83,
+        "one more binding captured inside a loop body: its fresh cell at the \
+         declarator, its copy before the update, and its environment slot"
+    );
 }

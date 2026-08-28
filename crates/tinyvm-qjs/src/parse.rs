@@ -414,12 +414,18 @@ pub(crate) mod m1 {
         /// Frames of recursive descent currently on the native stack, plus the
         /// depth of the tree built so far -- see [`MAX_FRAMES`].
         frames: u32,
-        /// How many loop **bodies** the cursor is inside.
+        /// How many loops the cursor is inside, counting a `for` from its
+        /// `(` rather than from its body.
         ///
-        /// Bodies, not headers: `for (let i = …; …)` declares `i` once however
-        /// many times the loop runs, so the header is outside this count and
-        /// `i` is not `in_loop`. See [`Binding::in_loop`] for what the answer
-        /// is used for.
+        /// The header counts, and it is the specification that says so rather
+        /// than convenience. `for (let i = …)` writes one declaration, but
+        /// ECMA-262 13.7.4.7 copies `i` into a fresh environment on every pass
+        /// -- so it *is* several bindings, by a different rule than 14.3.1's.
+        /// Both rules need the same answer to "can this be more than one
+        /// binding", so both read this. A `while` header declares nothing, so
+        /// there is nothing to count there either way.
+        ///
+        /// See [`Binding::in_loop`] for what the answer is used for.
         loop_depth: u32,
     }
 
@@ -1094,7 +1100,11 @@ pub(crate) mod m1 {
             self.advance();
             self.expect(&TokenKind::LParen, "needs a `(` after `for`")?;
             self.enter(false, self.func());
+            // From the `(`, not from the body: the header's own `let` is a
+            // per-iteration binding under 13.7.4.7. See `Parser::loop_depth`.
+            self.loop_depth += 1;
             let parts = self.for_parts();
+            self.loop_depth -= 1;
             self.leave();
             self.shallower(2);
             parts
@@ -1129,10 +1139,7 @@ pub(crate) mod m1 {
                 Some(self.expression(0)?)
             };
             self.expect(&TokenKind::RParen, "needs a `)` to close the `for` header")?;
-            self.loop_depth += 1;
-            let body = self.body_statement("a `for`");
-            self.loop_depth -= 1;
-            let body = Box::new(body?);
+            let body = Box::new(self.body_statement("a `for`")?);
             Ok(StmtKind::For {
                 init,
                 test,
