@@ -84,6 +84,7 @@
 use tinyvm::{HostGlobal, Val, WasmError, eval_wasm};
 
 mod array;
+mod case;
 mod ast;
 mod convert;
 mod diag;

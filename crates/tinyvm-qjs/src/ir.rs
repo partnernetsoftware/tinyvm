@@ -181,6 +181,7 @@ pub(crate) mod m1 {
         I32And,
         I32Or,
         I32Shl,
+        I32ShrU,
         // i64
         I64Eq,
         // f64
@@ -544,6 +545,7 @@ pub(crate) mod m1 {
             Ins::I32And => encode::op(out, Op::I32And),
             Ins::I32Or => encode::op(out, Op::I32Or),
             Ins::I32Shl => encode::op(out, Op::I32Shl),
+            Ins::I32ShrU => encode::op(out, Op::I32ShrU),
             Ins::I64Eq => encode::op(out, Op::I64Eq),
             Ins::F64Eq => encode::op(out, Op::F64Eq),
             Ins::F64Ne => encode::op(out, Op::F64Ne),

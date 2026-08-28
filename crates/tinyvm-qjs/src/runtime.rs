@@ -1994,8 +1994,30 @@ impl StringPool {
         at
     }
 
+    /// Place raw bytes and return their guest address, word-aligned.
+    ///
+    /// Not interned: a blob is placed by whoever needs it, once, and the
+    /// caller keeps the address. Used for the lowercase table, which is data
+    /// the guest binary-searches rather than a value the language can name.
+    pub(crate) fn blob(&mut self, bytes: &[u8]) -> i32 {
+        while !self.bytes.len().is_multiple_of(4) {
+            self.bytes.push(0);
+        }
+        let at = (DATA_ORIGIN + self.bytes.len() as u32) as i32;
+        self.bytes.extend_from_slice(bytes);
+        while !self.bytes.len().is_multiple_of(4) {
+            self.bytes.push(0);
+        }
+        at
+    }
+
+    /// Whether the pool would emit no data segment.
+    ///
+    /// Asks the **bytes**, not the interned-string list: a blob leaves the
+    /// list empty while filling the segment, and answering from the list would
+    /// drop the segment and leave every address in it pointing at nothing.
     pub(crate) fn is_empty(&self) -> bool {
-        self.at.is_empty()
+        self.bytes.is_empty()
     }
 
     /// The active data segment: its offset and its bytes.

@@ -665,6 +665,7 @@ fn ins_wat(ins: &Ins) -> String {
         Ins::I32And => "i32.and".into(),
         Ins::I32Or => "i32.or".into(),
         Ins::I32Shl => "i32.shl".into(),
+        Ins::I32ShrU => "i32.shr_u".into(),
         Ins::I64Eq => "i64.eq".into(),
         Ins::F64Eq => "f64.eq".into(),
         Ins::F64Ne => "f64.ne".into(),

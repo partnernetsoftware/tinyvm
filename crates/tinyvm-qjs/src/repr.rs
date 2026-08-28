@@ -199,6 +199,10 @@ pub(crate) enum Ins {
     I32And,
     I32Or,
     I32Shl,
+    /// Unsigned right shift. Added with `toLowerCase`, which needs it to take
+    /// UTF-8's leading bits apart -- the signed form would smear the sign bit
+    /// into a code point.
+    I32ShrU,
     // i64
     I64Eq,
     // f64

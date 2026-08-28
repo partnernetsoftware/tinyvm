@@ -56,6 +56,14 @@ pub(crate) struct Ctx {
     /// *emitter* to know about it, because the body would be reached through a
     /// value rather than through an index this module has to compute.
     pub(crate) array_base: u32,
+    /// Guest address of the lowercase run table, and how many runs it holds.
+    ///
+    /// Placed in the literal pool by the emitter only when the plan wants
+    /// [`Me::LowerCp`], so a program that never lowercases carries neither the
+    /// table nor the search. Zero when absent, which is safe because nothing
+    /// reads it then.
+    pub(crate) case_table: i32,
+    pub(crate) case_runs: u32,
 }
 
 impl Ctx {
@@ -105,6 +113,16 @@ pub(crate) enum Me {
     /// `s.split(sep)` -- ECMA-262 22.1.3.23, third in the second survey at 34
     /// of 82 scripts and 129 uses.
     Split,
+    /// `decode(p) -> (cp, width)`: one UTF-8 character.
+    Decode,
+    /// `encode(dst, cp) -> width`: one UTF-8 character.
+    Encode,
+    /// `lower_cp(cp) -> cp`: the Unicode simple lowercase mapping.
+    LowerCp,
+    /// `s.toLowerCase()` -- ECMA-262 22.1.3.29. Fourth in the second survey,
+    /// and the one whose price was measured before it was chosen: see
+    /// `plan/design-case-mapping-decision.md`.
+    ToLowerCase,
     Push,
     /// `a.pop()` -- ECMA-262 23.1.3.22. The **fifth** method, added only to
     /// measure criterion ④: how many variant-specific lines a new method
@@ -136,6 +154,10 @@ pub(crate) const SET: &[Me] = &[
     Me::EndsWith,
     Me::Substr,
     Me::Split,
+    Me::Decode,
+    Me::Encode,
+    Me::LowerCp,
+    Me::ToLowerCase,
     Me::Push,
     Me::Pop,
     Me::MapBound,
@@ -176,6 +198,17 @@ impl Plan {
     }
 
 
+    /// Whether this plan carries a particular member.
+    ///
+    /// Asked by the emitter for exactly one thing: whether to place the
+    /// lowercase table. A `Plan` is otherwise consulted only for offsets, and
+    /// this is the one question about *presence* that something outside the
+    /// module has to answer -- because the data the method reads lives in the
+    /// pool, not in this set.
+    pub(crate) fn wants(&self, me: Me) -> bool {
+        self.enabled.contains(&me)
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.enabled.is_empty()
     }
@@ -210,6 +243,10 @@ impl Me {
             Me::EndsWith => "__m_ends_with",
             Me::Substr => "__m_substr",
             Me::Split => "__m_split",
+            Me::Decode => "__m_decode",
+            Me::Encode => "__m_encode",
+            Me::LowerCp => "__m_lower_cp",
+            Me::ToLowerCase => "__m_to_lower_case",
             Me::Push => "__m_push",
             Me::Pop => "__m_pop",
             Me::MapBound => "__m_map_bound",
@@ -228,6 +265,7 @@ impl Me {
             ("startsWith", 1) => Some(Me::StartsWith),
             ("endsWith", 1) => Some(Me::EndsWith),
             ("split", 1) => Some(Me::Split),
+            ("toLowerCase", 0) => Some(Me::ToLowerCase),
             ("push", 1) => Some(Me::Push),
             ("pop", 0) => Some(Me::Pop),
             ("map", 1) => Some(Me::MapBound),
@@ -262,6 +300,8 @@ impl Me {
             // `indexOf(t) !== -1`.
             Me::Includes | Me::StartsWith | Me::EndsWith | Me::Substr => Vec::new(),
             Me::Split => vec![Me::Substr],
+            Me::ToLowerCase => vec![Me::Decode, Me::Encode, Me::LowerCp],
+            Me::Decode | Me::Encode | Me::LowerCp => Vec::new(),
             Me::WsWidth | Me::Units | Me::Push | Me::Pop | Me::MapBound => Vec::new(),
         }
     }
@@ -291,6 +331,18 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
             substr(ctx),
         ),
         Me::Split => (values(2), values(1), split(ctx)),
+        Me::Decode => (
+            vec![ValType::I32],
+            vec![ValType::I32, ValType::I32],
+            decode(),
+        ),
+        Me::Encode => (
+            vec![ValType::I32, ValType::I32],
+            vec![ValType::I32],
+            encode(),
+        ),
+        Me::LowerCp => (vec![ValType::I32], vec![ValType::I32], lower_cp(ctx)),
+        Me::ToLowerCase => (values(1), values(1), to_lower_case(ctx)),
         Me::Push => (values(2), values(1), push(ctx)),
         Me::Pop => (values(1), values(1), pop()),
         Me::MapBound => (values(2), values(1), map_bound(ctx)),
@@ -1266,6 +1318,428 @@ fn split(ctx: &Ctx) -> FnBuild {
     let mut out = Vec::new();
     box_array(&inner, &mut out);
     f.body.extend(out);
+    f
+}
+
+
+/// `decode(p) -> (cp, width)`: the code point at byte address `p`, and how
+/// many bytes it took.
+///
+/// A helper because `toLowerCase` needs it twice per character -- once to read
+/// and once to know how far to step -- and because the next method that walks
+/// characters rather than bytes will want the same. `Me::Units` only needs the
+/// *width*, which is why it does not share this: counting leading bytes is
+/// cheaper than decoding them.
+///
+/// Well-formedness is assumed, not checked. Every string in this engine came
+/// from a literal, a concatenation of literals, or a host string, and all
+/// three are UTF-8 by construction -- there is no route by which an
+/// ill-formed one reaches here, so validating would cost every character to
+/// defend against nothing.
+fn decode() -> FnBuild {
+    let mut f = FnBuild::new(1);
+    let b0 = f.local(ValType::I32);
+    let cp = f.local(ValType::I32);
+    let w = f.local(ValType::I32);
+
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Load8U(0, 0));
+    b.push(Ins::LocalSet(b0));
+
+    // 1 byte: 0xxxxxxx
+    b.push(Ins::LocalGet(b0));
+    b.push(Ins::I32Const(0x80));
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(b0));
+    b.push(Ins::LocalSet(cp));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::LocalSet(w));
+    b.push(Ins::End);
+
+    // 2 bytes: 110xxxxx 10xxxxxx
+    b.push(Ins::LocalGet(b0));
+    b.push(Ins::I32Const(0xc0));
+    b.push(Ins::I32GeU);
+    b.push(Ins::LocalGet(b0));
+    b.push(Ins::I32Const(0xe0));
+    b.push(Ins::I32LtU);
+    b.push(Ins::I32And);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(b0));
+    b.push(Ins::I32Const(0x1f));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Const(6));
+    b.push(Ins::I32Shl);
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Load8U(0, 1));
+    b.push(Ins::I32Const(0x3f));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Or);
+    b.push(Ins::LocalSet(cp));
+    b.push(Ins::I32Const(2));
+    b.push(Ins::LocalSet(w));
+    b.push(Ins::End);
+
+    // 3 bytes: 1110xxxx 10xxxxxx 10xxxxxx
+    b.push(Ins::LocalGet(b0));
+    b.push(Ins::I32Const(0xe0));
+    b.push(Ins::I32GeU);
+    b.push(Ins::LocalGet(b0));
+    b.push(Ins::I32Const(0xf0));
+    b.push(Ins::I32LtU);
+    b.push(Ins::I32And);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(b0));
+    b.push(Ins::I32Const(0x0f));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Const(12));
+    b.push(Ins::I32Shl);
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Load8U(0, 1));
+    b.push(Ins::I32Const(0x3f));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Const(6));
+    b.push(Ins::I32Shl);
+    b.push(Ins::I32Or);
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Load8U(0, 2));
+    b.push(Ins::I32Const(0x3f));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Or);
+    b.push(Ins::LocalSet(cp));
+    b.push(Ins::I32Const(3));
+    b.push(Ins::LocalSet(w));
+    b.push(Ins::End);
+
+    // 4 bytes: 11110xxx and three continuations.
+    b.push(Ins::LocalGet(b0));
+    b.push(Ins::I32Const(0xf0));
+    b.push(Ins::I32GeU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(b0));
+    b.push(Ins::I32Const(0x07));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Const(18));
+    b.push(Ins::I32Shl);
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Load8U(0, 1));
+    b.push(Ins::I32Const(0x3f));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Const(12));
+    b.push(Ins::I32Shl);
+    b.push(Ins::I32Or);
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Load8U(0, 2));
+    b.push(Ins::I32Const(0x3f));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Const(6));
+    b.push(Ins::I32Shl);
+    b.push(Ins::I32Or);
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Load8U(0, 3));
+    b.push(Ins::I32Const(0x3f));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Or);
+    b.push(Ins::LocalSet(cp));
+    b.push(Ins::I32Const(4));
+    b.push(Ins::LocalSet(w));
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(cp));
+    b.push(Ins::LocalGet(w));
+    f
+}
+
+/// `encode(dst, cp) -> width`: write `cp` as UTF-8 at `dst`, return the bytes
+/// written.
+fn encode() -> FnBuild {
+    let mut f = FnBuild::new(2);
+    let dst = 0;
+    let cp = 1;
+
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(cp));
+    b.push(Ins::I32Const(0x80));
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(dst));
+    b.push(Ins::LocalGet(cp));
+    b.push(Ins::I32Store8(0, 0));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(cp));
+    b.push(Ins::I32Const(0x800));
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(dst));
+    b.push(Ins::LocalGet(cp));
+    b.push(Ins::I32Const(6));
+    b.push(Ins::I32ShrU);
+    b.push(Ins::I32Const(0xc0));
+    b.push(Ins::I32Or);
+    b.push(Ins::I32Store8(0, 0));
+    b.push(Ins::LocalGet(dst));
+    b.push(Ins::LocalGet(cp));
+    b.push(Ins::I32Const(0x3f));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Const(0x80));
+    b.push(Ins::I32Or);
+    b.push(Ins::I32Store8(0, 1));
+    b.push(Ins::I32Const(2));
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(cp));
+    b.push(Ins::I32Const(0x10000));
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(dst));
+    b.push(Ins::LocalGet(cp));
+    b.push(Ins::I32Const(12));
+    b.push(Ins::I32ShrU);
+    b.push(Ins::I32Const(0xe0));
+    b.push(Ins::I32Or);
+    b.push(Ins::I32Store8(0, 0));
+    b.push(Ins::LocalGet(dst));
+    b.push(Ins::LocalGet(cp));
+    b.push(Ins::I32Const(6));
+    b.push(Ins::I32ShrU);
+    b.push(Ins::I32Const(0x3f));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Const(0x80));
+    b.push(Ins::I32Or);
+    b.push(Ins::I32Store8(0, 1));
+    b.push(Ins::LocalGet(dst));
+    b.push(Ins::LocalGet(cp));
+    b.push(Ins::I32Const(0x3f));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Const(0x80));
+    b.push(Ins::I32Or);
+    b.push(Ins::I32Store8(0, 2));
+    b.push(Ins::I32Const(3));
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(dst));
+    b.push(Ins::LocalGet(cp));
+    b.push(Ins::I32Const(18));
+    b.push(Ins::I32ShrU);
+    b.push(Ins::I32Const(0xf0));
+    b.push(Ins::I32Or);
+    b.push(Ins::I32Store8(0, 0));
+    b.push(Ins::LocalGet(dst));
+    b.push(Ins::LocalGet(cp));
+    b.push(Ins::I32Const(12));
+    b.push(Ins::I32ShrU);
+    b.push(Ins::I32Const(0x3f));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Const(0x80));
+    b.push(Ins::I32Or);
+    b.push(Ins::I32Store8(0, 1));
+    b.push(Ins::LocalGet(dst));
+    b.push(Ins::LocalGet(cp));
+    b.push(Ins::I32Const(6));
+    b.push(Ins::I32ShrU);
+    b.push(Ins::I32Const(0x3f));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Const(0x80));
+    b.push(Ins::I32Or);
+    b.push(Ins::I32Store8(0, 2));
+    b.push(Ins::LocalGet(dst));
+    b.push(Ins::LocalGet(cp));
+    b.push(Ins::I32Const(0x3f));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Const(0x80));
+    b.push(Ins::I32Or);
+    b.push(Ins::I32Store8(0, 3));
+    b.push(Ins::I32Const(4));
+    f
+}
+
+/// `lower_cp(cp) -> cp`: the Unicode simple lowercase mapping, by binary
+/// search over the run table in the data segment.
+///
+/// The table is `crate::case::RUNS` as fixed 12-byte entries -- `u32 start`,
+/// `u32 len`, `i32 delta` -- placed by the emitter and pointed at by
+/// [`Ctx::case_table`]. Fixed width is what lets the search index by
+/// multiplication; `crate::case` records the two compact encodings measured
+/// and rejected, and what they would have saved.
+///
+/// A code point with no entry is returned unchanged, which is most of them:
+/// 1460 of 1 114 112 have a mapping at all. Chinese, emoji, punctuation and
+/// already-lowercase Latin all take that path, and none of them traps -- which
+/// is criterion ② of `plan/design-case-mapping-decision.md` and the reason
+/// "trap on anything non-ASCII" was rejected.
+fn lower_cp(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(1);
+    let lo = f.local(ValType::I32);
+    let hi = f.local(ValType::I32);
+    let mid = f.local(ValType::I32);
+    let at = f.local(ValType::I32);
+    let start = f.local(ValType::I32);
+
+    let b = &mut f.body;
+    b.push(Ins::I32Const(ctx.case_runs as i32));
+    b.push(Ins::LocalSet(hi));
+
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(lo));
+    b.push(Ins::LocalGet(hi));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+
+    b.push(Ins::LocalGet(lo));
+    b.push(Ins::LocalGet(hi));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Const(2));
+    b.push(Ins::I32DivS);
+    b.push(Ins::LocalSet(mid));
+    b.push(Ins::LocalGet(mid));
+    b.push(Ins::I32Const(12));
+    b.push(Ins::I32Mul);
+    b.push(Ins::I32Const(ctx.case_table));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(at));
+    b.push(Ins::LocalGet(at));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalSet(start));
+
+    // cp < start -> search left
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::LocalGet(start));
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(mid));
+    b.push(Ins::LocalSet(hi));
+    // `Br(1)`, not `Br(2)`: from inside this `if` the labels are 0 = the
+    // `if`, 1 = the loop, 2 = the block around it. Branching to a *loop* label
+    // jumps to its top, which is the "search left again" this arm means;
+    // `Br(2)` would leave the search entirely and answer "no mapping" for
+    // every code point below the midpoint -- which is what it did, and what
+    // made `"HELLO"` lowercase to `"HELLO"`.
+    b.push(Ins::Br(1));
+    b.push(Ins::End);
+
+    // cp < start + len -> found
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::LocalGet(start));
+    b.push(Ins::LocalGet(at));
+    b.push(Ins::I32Load(ALIGN_WORD, 4));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::LocalGet(at));
+    b.push(Ins::I32Load(ALIGN_WORD, 8));
+    b.push(Ins::I32Add);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    // otherwise search right
+    b.push(Ins::LocalGet(mid));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(lo));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(0));
+    f
+}
+
+/// `s.toLowerCase()` -- ECMA-262 22.1.3.29, Unicode simple case mapping.
+///
+/// Fourth in the second demand survey at 25 of 82 scripts and 67 uses -- and
+/// all 67 are `to_lower`, with `to_upper` at zero, which is why this ships
+/// alone rather than as a pair.
+///
+/// # The output buffer
+///
+/// Allocated at `hl + hl/2`, not `hl`, because two code points lowercase to a
+/// *longer* UTF-8 sequence: U+023A and U+023E are two bytes and map to three.
+/// Everything else keeps or shrinks its width, so 3/2 is a bound rather than a
+/// guess, and it buys a single pass -- the alternative is decoding every
+/// character twice, once to measure and once to write. The record's length is
+/// written at the end from what was actually produced, so the slack is heap
+/// the bump allocator never hands out again and nothing else can observe.
+fn to_lower_case(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(WIDTH);
+    let h = f.local(ValType::I32);
+    let hl = f.local(ValType::I32);
+    let out = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+    let o = f.local(ValType::I32);
+    let cp = f.local(ValType::I32);
+    let w = f.local(ValType::I32);
+
+    unbox_string(0, &mut f.body);
+    f.body.push(Ins::LocalSet(h));
+
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalSet(hl));
+
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32ShrU);
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32Add);
+    b.push(ctx.rt(Rt::Alloc));
+    b.push(Ins::LocalSet(out));
+
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(ctx.me(Me::Decode));
+    b.push(Ins::LocalSet(w));
+    b.push(Ins::LocalSet(cp));
+
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(cp));
+    b.push(ctx.me(Me::LowerCp));
+    b.push(ctx.me(Me::Encode));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(o));
+
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(w));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Store(ALIGN_WORD, 0));
+
+    let inner = vec![Ins::LocalGet(out)];
+    let mut boxed = Vec::new();
+    box_string(&inner, &mut boxed);
+    f.body.extend(boxed);
     f
 }
 

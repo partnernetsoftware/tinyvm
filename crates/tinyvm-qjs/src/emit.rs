@@ -704,6 +704,21 @@ pub(crate) mod m1 {
                 arity: scan.uniform_arity(program),
             }
         });
+        // The lowercase run table is placed only when something asks for it.
+        // 8 076 bytes is a third again of a bare module, so a program that
+        // never lowercases must not carry it -- and this `if` is the whole
+        // gate, because the address is what the search reads and nothing else
+        // reaches the pool. The price is named in
+        // `plan/design-case-mapping-decision.md`, published rather than
+        // buried, because whether it is worth paying is a product judgement.
+        let (case_table, case_runs) = if scan.methods.wants(method::Me::LowerCp) {
+            (
+                pool.blob(&crate::case::segment_bytes()),
+                crate::case::RUNS.len() as u32,
+            )
+        } else {
+            (0, 0)
+        };
         let method_set: Vec<runtime::RtFunc> = if scan.methods.is_empty() {
             Vec::new()
         } else {
@@ -713,6 +728,8 @@ pub(crate) mod m1 {
                 plan: scan.methods.clone(),
                 uniform: uniform.map(|u| (u.type_index, u.arity)),
                 array_base: arr_base,
+                case_table,
+                case_runs,
             })
         };
 
@@ -1092,6 +1109,7 @@ pub(crate) mod m1 {
                 Ins::I32And => ir::Ins::I32And,
                 Ins::I32Or => ir::Ins::I32Or,
                 Ins::I32Shl => ir::Ins::I32Shl,
+                Ins::I32ShrU => ir::Ins::I32ShrU,
                 Ins::I64Eq => ir::Ins::I64Eq,
                 Ins::F64Eq => ir::Ins::F64Eq,
                 Ins::F64Ne => ir::Ins::F64Ne,
