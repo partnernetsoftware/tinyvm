@@ -24,7 +24,7 @@ use super::repr::{
 };
 // `map`'s prefab is the one function that builds an array and calls back into
 // a function value; `box_function` is variant A's and B's property read.
-use super::repr::{box_array, const_undefined};
+use super::repr::{box_array, const_bool, const_undefined};
 use super::array::{ARR_ELEMS, ARR_LEN, Ar, ELEM_BYTES, ELEM_PAYLOAD, ELEM_TAG};
 use super::runtime::{ALIGN_WORD, FN_ELEMENT, FN_ENV, FnBuild, Rt, RtFunc};
 
@@ -84,6 +84,21 @@ pub(crate) enum Me {
     Units,
     Trim,
     IndexOf,
+    /// `s.includes(t)` -- ECMA-262 22.1.3.8. **The most-demanded method in the
+    /// corpus**: the second survey counts `.contains(` in 58 of 82 downstream
+    /// scripts, 721 times, ahead of everything else measured.
+    ///
+    /// Not `indexOf(t) !== -1`, though it answers the same question. `indexOf`
+    /// reports a *position*, so it drags in [`Me::Units`] to convert a byte
+    /// offset into UTF-16 code units; a Boolean needs no position and
+    /// therefore no helper. The search loop is duplicated rather than shared
+    /// for that reason -- sharing it would make the cheapest method pay for
+    /// the more expensive one's arithmetic.
+    Includes,
+    /// `s.startsWith(t)` -- ECMA-262 22.1.3.23.
+    StartsWith,
+    /// `s.endsWith(t)` -- ECMA-262 22.1.3.7.
+    EndsWith,
     Push,
     /// `a.pop()` -- ECMA-262 23.1.3.22. The **fifth** method, added only to
     /// measure criterion ④: how many variant-specific lines a new method
@@ -110,6 +125,9 @@ pub(crate) const SET: &[Me] = &[
     Me::Units,
     Me::Trim,
     Me::IndexOf,
+    Me::Includes,
+    Me::StartsWith,
+    Me::EndsWith,
     Me::Push,
     Me::Pop,
     Me::MapBound,
@@ -179,6 +197,9 @@ impl Me {
             Me::Units => "__m_units",
             Me::Trim => "__m_trim",
             Me::IndexOf => "__m_index_of",
+            Me::Includes => "__m_includes",
+            Me::StartsWith => "__m_starts_with",
+            Me::EndsWith => "__m_ends_with",
             Me::Push => "__m_push",
             Me::Pop => "__m_pop",
             Me::MapBound => "__m_map_bound",
@@ -193,6 +214,9 @@ impl Me {
         match (name, argc) {
             ("trim", 0) => Some(Me::Trim),
             ("indexOf", 1) => Some(Me::IndexOf),
+            ("includes", 1) => Some(Me::Includes),
+            ("startsWith", 1) => Some(Me::StartsWith),
+            ("endsWith", 1) => Some(Me::EndsWith),
             ("push", 1) => Some(Me::Push),
             ("pop", 0) => Some(Me::Pop),
             ("map", 1) => Some(Me::MapBound),
@@ -221,6 +245,11 @@ impl Me {
         match self {
             Me::Trim => vec![Me::WsWidth],
             Me::IndexOf => vec![Me::Units],
+            // No `Units`: a Boolean has no position to report, so none of the
+            // three needs the byte-offset-to-code-unit conversion `indexOf`
+            // exists to do. This is the whole reason they are not written as
+            // `indexOf(t) !== -1`.
+            Me::Includes | Me::StartsWith | Me::EndsWith => Vec::new(),
             Me::WsWidth | Me::Units | Me::Push | Me::Pop | Me::MapBound => Vec::new(),
         }
     }
@@ -241,6 +270,9 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
         Me::Units => (vec![i32_, i32_], vec![i32_], units()),
         Me::Trim => (values(1), values(1), trim(ctx)),
         Me::IndexOf => (values(2), values(1), index_of(ctx)),
+        Me::Includes => (values(2), values(1), includes()),
+        Me::StartsWith => (values(2), values(1), affix(Affix::Start)),
+        Me::EndsWith => (values(2), values(1), affix(Affix::End)),
         Me::Push => (values(2), values(1), push(ctx)),
         Me::Pop => (values(1), values(1), pop()),
         Me::MapBound => (values(2), values(1), map_bound(ctx)),
@@ -764,6 +796,219 @@ fn number_const(b: &mut Vec<Ins>, v: i32) {
     let mut out = Vec::new();
     box_number(&inner, &mut out);
     b.extend(out);
+}
+
+
+/// Which end of the haystack an affix test compares.
+///
+/// One function for `startsWith` and `endsWith`, because they differ in a
+/// single addend: the offset the comparison starts at. Writing them separately
+/// would duplicate the length guard and the byte loop to express that.
+#[derive(Clone, Copy)]
+enum Affix {
+    Start,
+    End,
+}
+
+/// `s.includes(t)` -- ECMA-262 22.1.3.8.
+///
+/// # Why a byte comparison is the right one
+///
+/// UTF-8 is self-synchronising and prefix-free: a multi-byte sequence's
+/// continuation bytes are all `10xxxxxx` and can never start one, so a byte
+/// sequence matches at some offset **iff** the corresponding code-point
+/// sequence does. There is no possibility of matching the tail of one
+/// character and the head of the next, which is the failure that makes
+/// byte-level search wrong for encodings like Shift-JIS. So this needs no
+/// decoding, and the result is exact rather than an approximation.
+///
+/// Compare `.length`, where the same reasoning does **not** apply: a count of
+/// characters is not a count of bytes, which is why that one decodes.
+fn includes() -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH);
+    let h = f.local(ValType::I32);
+    let nd = f.local(ValType::I32);
+    let hl = f.local(ValType::I32);
+    let nl = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+    let j = f.local(ValType::I32);
+    let ok = f.local(ValType::I32);
+
+    unbox_string(0, &mut f.body);
+    f.body.push(Ins::LocalSet(h));
+    unbox_string(WIDTH, &mut f.body);
+    f.body.push(Ins::LocalSet(nd));
+
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalSet(hl));
+    b.push(Ins::LocalGet(nd));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalSet(nl));
+
+    // 22.1.3.8 step 8 with an empty search string: `IsStringWellFormedUnicode`
+    // aside, every string contains the empty one.
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    const_bool(true, b);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    // Tested before the subtraction below, which would otherwise wrap.
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    const_bool(false, b);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32Sub);
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32LtU);
+    b.push(Ins::BrIf(1));
+
+    b.push(Ins::I32Const(1));
+    b.push(Ins::LocalSet(ok));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(j));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::LocalGet(nd));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::I32Ne);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(ok));
+    b.push(Ins::Br(2));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(j));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(ok));
+    b.push(Ins::If(BlockType::Empty));
+    const_bool(true, b);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    const_bool(false, b);
+    f
+}
+
+/// `s.startsWith(t)` and `s.endsWith(t)` -- ECMA-262 22.1.3.23 and 22.1.3.7.
+///
+/// One comparison at a fixed offset, so there is no outer loop: the two
+/// differ only in whether that offset is `0` or `haystack - needle`. Byte
+/// comparison is exact here for the reason [`includes`] gives, plus a second
+/// one that matters only for `endsWith`: because UTF-8 is self-synchronising,
+/// an offset that is a suffix boundary in bytes is one in characters too, so
+/// this cannot match starting halfway through a character.
+fn affix(which: Affix) -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH);
+    let h = f.local(ValType::I32);
+    let nd = f.local(ValType::I32);
+    let hl = f.local(ValType::I32);
+    let nl = f.local(ValType::I32);
+    let at = f.local(ValType::I32);
+    let j = f.local(ValType::I32);
+
+    unbox_string(0, &mut f.body);
+    f.body.push(Ins::LocalSet(h));
+    unbox_string(WIDTH, &mut f.body);
+    f.body.push(Ins::LocalSet(nd));
+
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalSet(hl));
+    b.push(Ins::LocalGet(nd));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalSet(nl));
+
+    // A needle longer than the haystack cannot be either affix, and the test
+    // has to come before the subtraction for `End` or it wraps.
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    const_bool(false, b);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    match which {
+        Affix::Start => {
+            b.push(Ins::I32Const(0));
+        }
+        Affix::End => {
+            b.push(Ins::LocalGet(hl));
+            b.push(Ins::LocalGet(nl));
+            b.push(Ins::I32Sub);
+        }
+    }
+    b.push(Ins::LocalSet(at));
+
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(at));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::LocalGet(nd));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::I32Ne);
+    b.push(Ins::If(BlockType::Empty));
+    const_bool(false, b);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(j));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    const_bool(true, b);
+    f
 }
 
 /// `[1, 2].push(3)` -- ECMA-262 23.1.3.23, without the rest parameter.

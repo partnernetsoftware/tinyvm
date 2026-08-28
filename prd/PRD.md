@@ -56,7 +56,7 @@ flowchart TD
   subgraph LANG["tinyvm-qjs — 随语言与规范变"]
     R1["① lex / parse / AST<br/><i>a rejection names the engine, not the author</i><br/><i>templates fold to +, arrows to function<br/>expressions, for…of to an index loop<br/>— none of the three gets a node</i>"]
     R2["② lower to V1<br/>eight tags · dispatch order<br/><i>Number, then String, then the rest</i><br/><b>storage &amp; lifetime live here</b><br/><i>a cell per declaration, not per frame</i>"]
-    R3["③ runtime prelude<br/>bump heap · object and array records<br/>method bodies: trim indexOf push pop map<br/><i>gated: unused means unemitted</i><br/><i>per method, not per set</i>"]
+    R3["③ runtime prelude<br/>bump heap · object and array records<br/>method bodies: trim indexOf push pop map<br/>includes startsWith endsWith<br/><i>gated: unused means unemitted</i><br/><i>per method, not per set</i>"]
     R4["④ encode .wasm<br/>standard bytes · LEB128"]
     R1 --> R2 --> R3 --> R4
   end
@@ -280,8 +280,8 @@ fleet_binding())`——使用那个 286 行、29 操作的 `fleet.qjs` 库的**�
 
 | 构造 | 脚本数 | 占比 | 出现次数 | 本引擎 | JS 里叫什么 |
 |------|-------|------|---------|--------|-------------|
-| `.contains(` | **58** | **71%** | **721** | ✗ | `String/Array.prototype.includes` |
-| `.starts_with` / `.ends_with` | **41** | **50%** | 169 | ✗ | `startsWith` / `endsWith` |
+| `.contains(` | **58** | **71%** | **721** | ✅ 2026-08-29 | `String.prototype.includes` |
+| `.starts_with` / `.ends_with` | **41** | **50%** | 169 | ✅ 2026-08-29 | `startsWith` / `endsWith` |
 | `.split(` | 34 | 41% | 129 | ✗ | `split` |
 | `.to_upper` / `.to_lower` | 25 | 30% | 67 | ✗ | `toUpperCase` / `toLowerCase` |
 | `break` | 17 | 21% | 56 | ✗ | 同名 |
@@ -303,10 +303,26 @@ fleet_binding())`——使用那个 286 行、29 操作的 `fleet.qjs` 库的**�
 两张表数的是同一个语料。**换一把尺就换一个路线图**——所以「用哪把尺」这件事，
 本身就是要被记录和辩护的决定，不能默认。
 
-**下一项因此是字符串方法，按需求顺序，不按 ECMA-262 目录顺序。**
-第一批的选择还额外便宜：`indexOf` 已经在 rev `21d8d9a` 里了，
-而 `includes` 就是它上面一层薄壳——**需求最高的一项恰好也是成本最低的一项**，
-这种情况少见，遇到了就先做。
+**第一批（前两行，71% 与 50%）已于 2026-08-29 落地。** 实测代价：
+`includes` **320** 字节、`startsWith` **275**、`endsWith` **272**，
+对照 `indexOf` 的 **440**。
+
+**`includes` 比 `indexOf` 便宜，而这不是巧合，是设计。** 顺手的写法是
+`indexOf(t) !== -1`；那样它会拖进 `units` 这个把字节偏移换算成 UTF-16
+码元的辅助件——而**布尔值没有位置要报告**。搜索循环因此是复制的，不是共享的：
+共享会让最便宜的方法替最贵的那个付算术。这条有测试盯着
+（`includes_is_cheaper_than_index_of_because_it_needs_no_position`），
+一旦有人「优化」成调用 `indexOf`，它会响。
+
+**三个方法都在字节层比较，而这是精确的而不是近似的。** UTF-8 自同步且前缀无关
+（续字节恒为 `10xxxxxx`，永远不能起头），所以字节序列在某偏移匹配**当且仅当**
+码点序列匹配，也不可能从一个字符的中间开始匹配。这是**编码的性质**，
+不是对输入的假设——测试拿 `é`（2 字节）和 `😀`（4 字节）钉住了它。
+对照 `.length`：同样的捷径在那里是**错的**，因为字符数不等于字节数，所以那个要解码。
+
+**下一批按表往下走**：`.split(`（41%，129 次）与 `.to_upper/.to_lower`（30%，67 次）。
+两者都比第一批贵，且贵法不同：`split` 要分配数组，大小写要 Unicode 映射表——
+**后者的成本要先量再决定**，ASCII 版本便宜但会给出 `"İ".toLowerCase()` 这类错误答案。
 
 **同时记两条「零使用」**：`do { } while`、三元、解构、默认参数在 82 个脚本里
 **一次都没出现**。加上第一张表里的 `switch`（2 个脚本 6 次），
@@ -424,6 +440,10 @@ tinyvm (35)                                      [~]
 │   │   │   ├── every other String property still traps    [x] deliberate
 │   │   │   └── a program without `.length` got smaller    [x] -19 bytes
 │   │   ├── methods: trim indexOf push pop map             [x] binding **measured**
+│   │   ├── includes / startsWith / endsWith               [x] 需求普查前两名
+│   │   │   ├── 字节层比较，对多字节字符精确               [x] é 与 😀 钉住
+│   │   │   └── includes 不经由 indexOf，因此更便宜         [x] 320 vs 440 字节
+│   │   ├── split / toUpperCase / toLowerCase              [ ] 下一批，成本要先量
 │   │   │   ├── the mechanism was decided by experiment    [x] research/method-binding
 │   │   │   ├── trim covers all of Zs + LineTerminator     [x] 12.2 + 12.3
 │   │   │   ├── indexOf positions agree with .length       [x] UTF-16 units
