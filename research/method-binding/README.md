@@ -10,7 +10,7 @@
 
 | Q | 问题（一句话） | 状态 | 结论 | 规格 | 实现 |
 |---|---|---|---|---|---|
-| Q1 | `"a".trim()` 里的 `trim` 怎么拿到 `"a"`？三种绑定机制哪种边际成本不随方法数增长？ | **已判决** | **变体 C（调用点特化）** | [`plan/design-method-binding-experiment.md`](../../plan/design-method-binding-experiment.md) | `crates/tinyvm-qjs` 的三个 default-off feature；变体 C 已实现 4 个方法里的 1 个 |
+| Q1 | `"a".trim()` 里的 `trim` 怎么拿到 `"a"`？三种绑定机制哪种边际成本不随方法数增长？ | **已判决** | **变体 C（调用点特化）** | [`plan/design-method-binding-experiment.md`](../../plan/design-method-binding-experiment.md) | 三个 default-off feature，判决后全部删除；赢家已转正为 `crates/tinyvm-qjs/src/method.rs` |
 
 ## Q1 一句话背景
 
@@ -45,6 +45,20 @@ C 赢在**不向不相干的代码收费**：加四个与方法无关的函数�
 所以可修性检查不只对自己那个变体做：**任何变体推翻一条共同前提时，所有变体都要重测。**
 
 数字与完整 trace 见 [`RESULTS.md`](RESULTS.md)。
+
+## 分档（2026-08-28 补测）
+
+原记「L1/L2 未测定」。补测后有两件事要说：
+
+1. **skill §2.5.1 的三档对这个设计不成立。** 那个模板假设机制是**一组函数**；
+   赢家的机制是发射在**每个调用点**上的代码，不是函数。所以 **L1 就是「每调用点」
+   那个数**，没有第二个数可报——照模板硬报一个只会是编造。
+2. **L2（每个方法体，含私有 helper）已测**：`trim` 518、`indexOf` 337、
+   `push` 73、`pop` 108、`map` 151 字节。
+
+还有一条**容易混的**：这里的「每调用点」（75–164）与判据 ③b（43–53）**不是同一个数**
+——基线不同，问题不同，两个都对。详见 [`RESULTS.md`](RESULTS.md) 那张对照表。
+判决用的是 ③b，不受影响。
 
 ## 判决之后 —— **已执行**
 
