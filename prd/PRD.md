@@ -54,7 +54,7 @@ embedder 词汇的原因。
 ```mermaid
 flowchart TD
   subgraph LANG["tinyvm-qjs — 随语言与规范变"]
-    R1["① lex / parse / AST<br/><i>a rejection names the engine, not the author</i><br/><i>templates fold to +, arrows to function<br/>expressions — neither gets a node</i>"]
+    R1["① lex / parse / AST<br/><i>a rejection names the engine, not the author</i><br/><i>templates fold to +, arrows to function<br/>expressions, for…of to an index loop<br/>— none of the three gets a node</i>"]
     R2["② lower to V1<br/>eight tags · dispatch order<br/><i>Number, then String, then the rest</i><br/><b>storage &amp; lifetime live here</b><br/><i>a cell per declaration, not per frame</i>"]
     R3["③ runtime prelude<br/>bump heap · object and array records<br/>method bodies: trim indexOf push pop map<br/><i>gated: unused means unemitted</i><br/><i>per method, not per set</i>"]
     R4["④ encode .wasm<br/>standard bytes · LEB128"]
@@ -124,6 +124,28 @@ flowchart TD
 
 所以这张图上要补的一格判据，是在「东西放哪间」之外的：
 **在这一间的什么时刻，以及为谁。**
+
+---
+
+**房间 ① 有一种反过来的用法，`for…of` 是第一个例子：把本该在房间 ③ 的东西，
+用房间 ① 已有的词汇写出来，于是房间 ③ 一个字节都不用加。**
+
+`for…of` 需要一个运行期检查——「右边到底是不是数组」，编译期答不了。
+直觉的做法是给房间 ③ 加一个预制件，再给它配一道门。实际做法是发现
+**这个检查可以完全用子集里已有的语句写出来**：`typeof S === "string"`、
+`typeof S !== "object"`、`S === null`、`typeof S.length !== "number"`，
+四道 `if` + `throw`，全是房间 ① 折出来的普通语句。
+于是房间 ③ 没变，零成本门不需要谓词——**没有门要维护，因为没有东西要门控**。
+
+这条和上面三条「放错房间」是同一枚硬币：**先问这件事能不能用已有房间的词汇说出来，
+再决定要不要新开一格。** `map` 那次的教训是「够不到」这个前提要实测；
+这次的教训是「说不出来」这个前提也要实测。
+
+顺带记一条守卫的**顺序**教训，它不在任何一间房里，在语言本身：
+四道守卫第一版只写了最后一道，结果 `for (const x of 42)` 在读 `42 .length` 时
+**先 trap 了**（原始值上取属性走 `require_tag` 到 `unreachable`），
+连抛都没轮到，`catch` 什么也看不见。**一道守卫必须先把类型收窄到它自己不会炸的范围，
+才轮得到它去判断。**
 
 ## 语言路线图的依据：一次需求普查（2026-08-28）
 
