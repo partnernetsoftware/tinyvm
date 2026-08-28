@@ -1189,9 +1189,10 @@ fn length(ctx: &Ctx) -> FnBuild {
     b.push(Ins::End);
     b.push(Ins::End);
 
-    let mut inner = Vec::new();
-    inner.push(Ins::LocalGet(n));
-    inner.push(Ins::F64ConvertI32S);
+    let inner = vec![
+        Ins::LocalGet(n),
+        Ins::F64ConvertI32S,
+    ];
     let mut out = Vec::new();
     box_number(&inner, &mut out);
     f.body.extend(out);

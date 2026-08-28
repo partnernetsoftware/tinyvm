@@ -569,8 +569,9 @@ fn trim(ctx: &Ctx) -> FnBuild {
     b.push(Ins::End);
     b.push(Ins::End);
 
-    let mut inner = Vec::new();
-    inner.push(Ins::LocalGet(out));
+    let inner = vec![
+        Ins::LocalGet(out),
+    ];
     let mut tail = Vec::new();
     box_string(&inner, &mut tail);
     f.body.extend(tail);
@@ -729,11 +730,12 @@ fn index_of(ctx: &Ctx) -> FnBuild {
 
     b.push(Ins::LocalGet(ok));
     b.push(Ins::If(BlockType::Empty));
-    let mut found = Vec::new();
-    found.push(Ins::LocalGet(h));
-    found.push(Ins::LocalGet(i));
-    found.push(ctx.me(Me::Units));
-    found.push(Ins::F64ConvertI32S);
+    let found = vec![
+        Ins::LocalGet(h),
+        Ins::LocalGet(i),
+        ctx.me(Me::Units),
+        Ins::F64ConvertI32S,
+    ];
     let mut boxed = Vec::new();
     box_number(&found, &mut boxed);
     b.extend(boxed);
@@ -756,8 +758,9 @@ fn index_of(ctx: &Ctx) -> FnBuild {
 
 /// Push a Number literal as a V1 pair.
 fn number_const(b: &mut Vec<Ins>, v: i32) {
-    let mut inner = Vec::new();
-    inner.push(Ins::F64Const(v as f64));
+    let inner = vec![
+        Ins::F64Const(v as f64),
+    ];
     let mut out = Vec::new();
     box_number(&inner, &mut out);
     b.extend(out);
@@ -782,10 +785,11 @@ fn push(ctx: &Ctx) -> FnBuild {
     b.push(Ins::LocalGet(WIDTH + 1));
     b.push(ctx.arr(Ar::Push));
 
-    let mut inner = Vec::new();
-    inner.push(Ins::LocalGet(a));
-    inner.push(Ins::I32Load(ALIGN_WORD, ARR_LEN));
-    inner.push(Ins::F64ConvertI32S);
+    let inner = vec![
+        Ins::LocalGet(a),
+        Ins::I32Load(ALIGN_WORD, ARR_LEN),
+        Ins::F64ConvertI32S,
+    ];
     let mut out = Vec::new();
     box_number(&inner, &mut out);
     f.body.extend(out);
@@ -866,8 +870,9 @@ fn map_bound(ctx: &Ctx) -> FnBuild {
     b.push(Ins::End);
     b.push(Ins::End);
 
-    let mut inner = Vec::new();
-    inner.push(Ins::LocalGet(out));
+    let inner = vec![
+        Ins::LocalGet(out),
+    ];
     let mut boxed = Vec::new();
     box_array(&inner, &mut boxed);
     f.body.extend(boxed);
