@@ -55,7 +55,7 @@ embedder 词汇的原因。
 flowchart TD
   subgraph LANG["tinyvm-qjs — 随语言与规范变"]
     R1["① lex / parse / AST<br/><i>a rejection names the engine, not the author</i><br/><i>templates fold to +, arrows to function<br/>expressions — neither gets a node</i>"]
-    R2["② lower to V1<br/>eight tags · dispatch order<br/><i>Number, then String, then the rest</i>"]
+    R2["② lower to V1<br/>eight tags · dispatch order<br/><i>Number, then String, then the rest</i><br/><b>storage &amp; lifetime live here</b><br/><i>a cell per declaration, not per frame</i>"]
     R3["③ runtime prelude<br/>bump heap · object and array records<br/>method bodies: trim indexOf push pop map<br/><i>gated: unused means unemitted</i><br/><i>per method, not per set</i>"]
     R4["④ encode .wasm<br/>standard bytes · LEB128"]
     R1 --> R2 --> R3 --> R4
@@ -101,6 +101,29 @@ flowchart TD
 第三条的教训超出体积：`research/method-binding/` 那场三选一的判决，**结论本来会反过来**
 ——一个方案之所以看起来输，只是因为它的家具被放在了错误的房间里。
 **放错房间不只是代价问题，它会让你把结构问题误读成方案优劣。**
+
+---
+
+**房间 ② 有一种和 ③ 完全不同的放错法：东西放对了房间，但放在了房间里错误的时刻。**
+
+2026-08-28 的每轮绑定分歧就是这一种。捕获绑定的 cell 分配确实属于房间 ②——存储与
+生命周期是降级的事，不是解析的事，也不是运行时预制件的事。它没放错房间，
+**它放错了时刻**：开在**函数入口**，而 ECMA-262 14.3.1 说绑定属于**声明这条语句**。
+一个函数一格，于是循环体三趟写同一格，三个闭包读出同一个值——`222` 而不是 `012`。
+
+这种放错法比 ③ 那三种更难发现，原因写在判据里：**它不报错。**
+少一个特性会在房间 ①「大声拒绝」，付错字节会在门控实测里露出来，
+而这一条给出的 `333` 与正确的 `012` 都是合法输出，**没有任何一道门会响**。
+它是靠「排 `for-of` 的队时顺手实测了一下将要复用的东西」才掉出来的。
+
+同一天它还自己复发了一次，形状一模一样。第二步把脚本绑定改成捕获时，
+`place()` 先判的是「这个绑定属于谁」（`func == SCRIPT`），于是**闭包内部**读它
+也拿到了全局——读到的正是「最新那个 cell」，也就是要修的那个共享答案。
+正确的问法是「**谁在读**」：脚本读全局，嵌套函数读自己的环境。
+**一个决定有两个答案时，先问的必须是「谁在问」，不是「这是什么」。**
+
+所以这张图上要补的一格判据，是在「东西放哪间」之外的：
+**在这一间的什么时刻，以及为谁。**
 
 ## 语言路线图的依据：一次需求普查（2026-08-28）
 
