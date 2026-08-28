@@ -363,11 +363,31 @@ pub(crate) mod m1 {
     /// about the *engine*, not about the script, and the diagnostic says so.
     const MAX_FRAMES: u32 = 448;
 
-    pub(crate) fn parse(tokens: &[Token], options: Options) -> Result<Program, CompileError> {
+    /// How a module specifier becomes source.
+    ///
+    /// A borrowed trait object rather than a generic parameter: the parser
+    /// holds one for its whole life and recurses through it, so it has to be a
+    /// single concrete type in the struct. Named because it appears in four
+    /// signatures and reads as noise in all of them.
+    pub(crate) type ModuleResolver<'r> = &'r dyn Fn(&str) -> Option<String>;
+
+    pub(crate) fn parse(tokens: Vec<Token>, options: Options) -> Result<Program, CompileError> {
+        parse_with_modules(tokens, options, None)
+    }
+
+    pub(crate) fn parse_with_modules(
+        tokens: Vec<Token>,
+        options: Options,
+        resolve: Option<ModuleResolver<'_>>,
+    ) -> Result<Program, CompileError> {
+        let has_arrow = tokens.iter().any(|t| t.kind == TokenKind::FatArrow);
         let mut parser = Parser {
             tokens,
             pos: 0,
             options,
+            resolve,
+            exports: Vec::new(),
+            loading: Vec::new(),
             functions: Vec::new(),
             bindings: Vec::new(),
             scopes: Vec::new(),
@@ -376,7 +396,7 @@ pub(crate) mod m1 {
             pending: Vec::new(),
             arg_count: 0,
             frames: 0,
-            has_arrow: tokens.iter().any(|t| t.kind == TokenKind::FatArrow),
+            has_arrow,
             loop_depth: 0,
         };
         parser.script()
@@ -385,9 +405,31 @@ pub(crate) mod m1 {
     // -- the parser ----------------------------------------------------------
 
     struct Parser<'a> {
-        tokens: &'a [Token],
+        /// Owned rather than borrowed, and that is what makes modules
+        /// possible: an `import` swaps this for the imported source's tokens,
+        /// parses it, and swaps back. A borrowed slice could not hold a stream
+        /// the parser tokenized itself.
+        tokens: Vec<Token>,
         pos: usize,
         options: Options,
+        /// How a specifier becomes source. `None` means this build was asked
+        /// to compile without modules, and an `import` is refused by name.
+        ///
+        /// A callback, not a path: **this crate does not touch a filesystem**.
+        /// What a specifier means -- relative to what, with which extension,
+        /// whether `../` may escape a root -- is the embedder's policy, the
+        /// same way the host door's vocabulary is. See
+        /// `plan/design-module-milestone.md` §2.
+        resolve: Option<ModuleResolver<'a>>,
+        /// What the module currently being parsed marks with `export`, in
+        /// source order. Empty while parsing the entry source, which is why
+        /// an `export` there is refused rather than ignored.
+        exports: Vec<(String, BindingId)>,
+        /// The specifiers currently being parsed, outermost first.
+        ///
+        /// A cycle is not a stack overflow here: it is detected and named.
+        /// Silently hanging on a self-import would be worse than refusing one.
+        loading: Vec<String>,
         functions: Vec<Function>,
         bindings: Vec<Binding>,
         /// Every scope ever opened, kept after it closes: a pending reference
@@ -577,7 +619,7 @@ pub(crate) mod m1 {
         /// the lexeme is -- `**` and `class` alike -- so naming it is never a
         /// lie.
         fn semicolon(&mut self) -> Result<(), CompileError> {
-            if self.eat(&TokenKind::Semi) || semicolon_is_implied(self.tokens, self.pos) {
+            if self.eat(&TokenKind::Semi) || semicolon_is_implied(&self.tokens, self.pos) {
                 return Ok(());
             }
             let token = self.peek();
@@ -856,6 +898,238 @@ pub(crate) mod m1 {
             Ok(body)
         }
 
+        /// `import * as ns from "SPEC";` -- the whole module system, and it is
+        /// a **compile-time inclusion** rather than a link.
+        ///
+        /// The imported source is tokenized, parsed into a scope of its own,
+        /// and its exports are bound to `ns` as an ordinary object of function
+        /// values. One `.wasm` comes out, with one load gate and one set of
+        /// `Limits`, exactly as before. `plan/design-module-milestone.md` §1
+        /// records that this was first written down as a *linking* model and
+        /// why that was wrong.
+        ///
+        /// # What this replaces
+        ///
+        /// `tests/qjs_produces_a_fleet_operation.rs` downstream reads:
+        ///
+        /// ```text
+        /// format!("{}\n{driver}", fleet_binding())
+        /// ```
+        ///
+        /// -- the only way to use `scripts/qjs/lib/fleet.qjs`, a 286-line
+        /// library of 29 operations, is to paste its text in front of your
+        /// script from Rust. That library has no consumers because it *cannot*
+        /// have any. This is that `format!`, done properly: the difference
+        /// between the two is the namespace.
+        ///
+        /// # Why the module does not see the importer
+        ///
+        /// The scope opened for it is rooted at the script scope rather than
+        /// at wherever the `import` was written. A module that could read its
+        /// importer's locals would be the same defect as the concatenation,
+        /// just harder to notice.
+        fn import_statement(&mut self, span: Span) -> Result<StmtKind, CompileError> {
+            let at = self.peek().offset;
+            self.advance(); // `import`
+
+            if !self.eat(&TokenKind::Star) {
+                return Err(unsupported(
+                    Boundary::FullJs,
+                    "an `import` that is not `import * as NAME from \"…\"`",
+                    at,
+                ));
+            }
+            let as_ok = matches!(self.kind(), TokenKind::Ident(w) if w == "as");
+            if !as_ok {
+                return Err(malformed("needs `as` after `import *`", self.peek().offset));
+            }
+            self.advance();
+            let TokenKind::Ident(alias) = self.peek().kind.clone() else {
+                return Err(self.cannot_use("needs a name after `import * as`"));
+            };
+            let alias_span = Span(self.peek().offset);
+            self.advance();
+            let from_ok = matches!(self.kind(), TokenKind::Ident(w) if w == "from");
+            if !from_ok {
+                return Err(malformed(
+                    "needs `from` after the imported name",
+                    self.peek().offset,
+                ));
+            }
+            self.advance();
+            let TokenKind::Str(specifier) = self.peek().kind.clone() else {
+                return Err(self.cannot_use("needs a quoted module specifier after `from`"));
+            };
+            self.advance();
+            self.semicolon()?;
+
+            let Some(resolve) = self.resolve else {
+                return Err(malformed(
+                    "was given no module resolver, so it cannot follow an `import`; the \
+                     embedder supplies one, because this compiler does not read files",
+                    at,
+                ));
+            };
+            if self.loading.contains(&specifier) {
+                let chain = self.loading.join("` -> `");
+                return Err(malformed(
+                    &format!(
+                        "finds that `{specifier}` imports itself, directly or through \
+                         `{chain}`; a module graph with a cycle has no order to evaluate it in"
+                    ),
+                    at,
+                ));
+            }
+            let Some(source) = resolve(&specifier) else {
+                return Err(malformed(
+                    &format!("cannot resolve the module `{specifier}`"),
+                    at,
+                ));
+            };
+            let module_tokens = crate::lex::tokenize(&source)?;
+
+            // The alias is the importer's, declared before the module is
+            // parsed so the module cannot see it either.
+            let alias_id = self.declare(&alias, BindingKind::Const, alias_span)?;
+            self.bindings[alias_id.0 as usize].initialised = Some(at);
+
+            // Swap in the module's stream, and give it a scope with **no
+            // parent**. Rooting it at the script scope was the first attempt
+            // and it does not isolate anything -- that is where the importer's
+            // own top-level names live, so a module could read them. A module
+            // that can see its importer is the concatenation this feature
+            // replaces, wearing a namespace.
+            //
+            // `is_function: true` because the scope is a lookup root: `var`
+            // has to land somewhere, and `enclosing_function_scope` walks up
+            // expecting to find one.
+            let outer_tokens = std::mem::replace(&mut self.tokens, module_tokens);
+            let outer_pos = std::mem::replace(&mut self.pos, 0);
+            let outer_open = std::mem::take(&mut self.open);
+            let outer_exports = std::mem::take(&mut self.exports);
+            self.has_arrow |= self
+                .tokens
+                .iter()
+                .any(|t| t.kind == TokenKind::FatArrow);
+            self.loading.push(specifier.clone());
+            self.enter(true, self.func());
+
+            let parsed = self.statements_until(&TokenKind::Eof, "the imported module");
+            let exports = std::mem::replace(&mut self.exports, outer_exports);
+            // Every reference the namespace makes is written *after* the whole
+            // module, which is where they happen: the object is built once the
+            // module's declarations have all run. Using the importer's offset
+            // put them before the module's own `const`, and the temporal dead
+            // zone -- correctly -- refused them.
+            let after_module = self.peek().offset;
+
+            // The namespace is built while the module's scope is still open,
+            // so its names resolve there and nowhere else.
+            let namespace = parsed.as_ref().ok().map(|_| Expr {
+                kind: ExprKind::Object(
+                    exports
+                        .iter()
+                        .map(|(name, _)| Property {
+                            key: name.clone(),
+                            value: Expr {
+                                kind: ExprKind::Name(self.occurrence(
+                                    name,
+                                    after_module,
+                                    Role::Read,
+                                )),
+                                span,
+                            },
+                            span,
+                        })
+                        .collect(),
+                ),
+                span,
+            });
+
+            self.leave();
+            self.loading.pop();
+            self.tokens = outer_tokens;
+            self.pos = outer_pos;
+            self.open = outer_open;
+
+            let body = parsed?;
+            let namespace = namespace.expect("built whenever the module parsed");
+            if exports.is_empty() {
+                return Err(malformed(
+                    &format!(
+                        "finds nothing exported from `{specifier}`, so `{alias}` would be an \
+                         empty object; mark what the module offers with `export`"
+                    ),
+                    at,
+                ));
+            }
+
+            let mut out = body;
+            out.push(Stmt {
+                kind: StmtKind::Decl(vec![Declarator {
+                    binding: alias_id,
+                    init: Some(namespace),
+                    span,
+                }]),
+                span,
+            });
+            Ok(StmtKind::Block(out))
+        }
+
+        /// `export function f() {}` / `export const x = …`, inside an imported
+        /// module.
+        ///
+        /// A prefix rather than a statement of its own: what it modifies is a
+        /// declaration, and the declaration is what runs. The name is recorded
+        /// for the namespace the importer builds; nothing else changes, which
+        /// is why an exported binding is an ordinary one and a module can call
+        /// its own exports without going through anything.
+        ///
+        /// Refused in the entry source, where there is nobody to export to.
+        /// Saying so is better than accepting it and doing nothing, which is
+        /// the shape of every silent-wrong-answer this engine has recorded.
+        fn export_statement(&mut self) -> Result<StmtKind, CompileError> {
+            let at = self.peek().offset;
+            if self.loading.is_empty() {
+                return Err(malformed(
+                    "finds an `export` in the entry source, which nothing imports; a \
+                     script's value is what it returns, so there is nobody to export to",
+                    at,
+                ));
+            }
+            self.advance(); // `export`
+            let span = Span(self.peek().offset);
+            match self.kind().clone() {
+                TokenKind::Function => {
+                    // A declaration is `StmtKind::Func`, not `Decl`: its name
+                    // binds to one statically known function, which is what
+                    // lets a call to it be direct. The namespace reads it the
+                    // same way any other reference does.
+                    let kind = self.function_declaration(span)?;
+                    if let StmtKind::Func { binding, .. } = &kind {
+                        let name = self.bindings[binding.0 as usize].name.clone();
+                        self.exports.push((name, *binding));
+                    }
+                    Ok(kind)
+                }
+                TokenKind::Let | TokenKind::Const | TokenKind::Var => {
+                    let declarators = self.declaration()?;
+                    self.semicolon()?;
+                    for d in &declarators {
+                        let name = self.bindings[d.binding.0 as usize].name.clone();
+                        self.exports.push((name, d.binding));
+                    }
+                    Ok(StmtKind::Decl(declarators))
+                }
+                _ => Err(unsupported(
+                    Boundary::FullJs,
+                    "an `export` of anything but a `function`, `let`, `const` or `var` \
+                     declaration",
+                    at,
+                )),
+            }
+        }
+
         fn statement(&mut self) -> Result<Stmt, CompileError> {
             // Two, for one frame: this is the parser's largest, holding the
             // whole statement match and the diagnostics it formats, and a
@@ -907,6 +1181,12 @@ pub(crate) mod m1 {
                     self.semicolon()?;
                     StmtKind::Throw(value)
                 }
+                TokenKind::Unsupported(word) if word.phrase.contains("`import`") => {
+                    self.import_statement(span)?
+                }
+                TokenKind::Unsupported(word) if word.phrase.contains("`export`") => {
+                    self.export_statement()?
+                }
                 TokenKind::While => self.while_statement()?,
                 TokenKind::For => self.for_statement()?,
                 TokenKind::Return => {
@@ -915,7 +1195,7 @@ pub(crate) mod m1 {
                     // 12.10 rule 3 puts after a lone `return`, so a value here
                     // really is on the same line.
                     let value = if self.at(&TokenKind::Semi)
-                        || semicolon_is_implied(self.tokens, self.pos)
+                        || semicolon_is_implied(&self.tokens, self.pos)
                     {
                         None
                     } else {

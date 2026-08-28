@@ -39,7 +39,7 @@ use opts::{Names, Options};
 
 fn compile(source: &str, names: Names) -> Result<Program, CompileError> {
     let tokens = lex::tokenize(source)?;
-    parse::m1::parse(&tokens, Options { names })
+    parse::m1::parse(tokens, Options { names })
 }
 
 /// Parse with no host table: a name must be declared in the source.

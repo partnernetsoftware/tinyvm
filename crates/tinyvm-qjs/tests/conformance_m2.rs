@@ -1542,8 +1542,21 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     ("async function f() { }", "the `async` keyword"),
     ("await 1;", "the `await` keyword"),
     ("yield 1;", "the `yield` keyword"),
-    ("import x;", "the `import` keyword"),
-    ("export let x = 1;", "the `export` keyword"),
+    // `import` is lowerable since 2026-08-29, so the boundary moved from the
+    // keyword to the *form*: `import * as NAME from "…"` compiles, and every
+    // other spelling names itself. A more specific sentence than the one this
+    // row used to assert, which is what the row exists to notice.
+    (
+        "import x;",
+        "an `import` that is not `import * as NAME from \"…\"`",
+    ),
+    // `export let x = 1;` left this table on 2026-08-29 and did not move to
+    // another row. It is refused, but as a *malformed* program rather than an
+    // unlowerable one -- the engine understands `export` perfectly now; there
+    // is simply nobody in an entry source to export to. This table's contract
+    // is one sentence shape, "does not support X yet", and stretching it to
+    // cover a different kind of refusal would make the shape meaningless.
+    // `modules_m3::export_in_the_entry_source_is_refused` owns it.
     ("super();", "the `super` keyword"),
     // -- the string forms the value representation cannot hold --------------
     ("\"\\ud800\"", "unpaired surrogates in string literals"),

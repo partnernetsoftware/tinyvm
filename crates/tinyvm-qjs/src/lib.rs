@@ -355,9 +355,45 @@ pub fn compile_qjs_m1(source: &str) -> Result<Vec<u8>, CompileError> {
 /// assert_eq!(imports, ["sys.print", "sys.read_len", "sys.read"]);
 /// # Ok::<(), tinyvm_qjs::CompileError>(())
 /// ```
+/// [`compile_qjs_m1_with`], plus a way for the source to `import` other
+/// sources.
+///
+/// `resolve` turns a module specifier into source. **This crate never touches
+/// a filesystem**: what a specifier means -- relative to what, with which
+/// extension, whether `../` may leave a project root -- is the embedder's
+/// policy, the same way the host door's vocabulary is. Returning `None`
+/// refuses the specifier, and the caller gets a diagnostic naming it.
+///
+/// The result is still **one** `.wasm`. An `import` is compile-time inclusion,
+/// not a link: the imported source is parsed into a scope of its own and its
+/// exports become an object bound to the alias, so there is one module at the
+/// load gate and one set of `Limits`, exactly as without imports.
+///
+/// ```
+/// use tinyvm_qjs::{Options, compile_qjs_m1_with_modules};
+/// let lib = "export function two() { return 2; }";
+/// let wasm = compile_qjs_m1_with_modules(
+///     "import * as m from \"lib\"; return m.two() + 1;",
+///     Options::default(),
+///     &|spec: &str| (spec == "lib").then(|| lib.to_owned()),
+/// )?;
+/// assert_eq!(&wasm[..4], b"\0asm");
+/// # Ok::<(), tinyvm_qjs::CompileError>(())
+/// ```
+pub fn compile_qjs_m1_with_modules(
+    source: &str,
+    options: Options,
+    resolve: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<u8>, CompileError> {
+    let tokens = lex::tokenize(source)?;
+    let program = parse::m1::parse_with_modules(tokens, options.clone(), Some(resolve))?;
+    let module = emit::m1::lower(&program, &options)?;
+    Ok(ir::m1::assemble(&module))
+}
+
 pub fn compile_qjs_m1_with(source: &str, options: Options) -> Result<Vec<u8>, CompileError> {
     let tokens = lex::tokenize(source)?;
-    let program = parse::m1::parse(&tokens, options.clone())?;
+    let program = parse::m1::parse(tokens, options.clone())?;
     let module = emit::m1::lower(&program, &options)?;
     Ok(ir::m1::assemble(&module))
 }

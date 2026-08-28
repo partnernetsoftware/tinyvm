@@ -52,7 +52,7 @@ fn run(source: &str) -> Out {
         }
         Ok(Value::Number(x)) => Out::Num(x),
         Ok(other) => panic!("{source:?}: unexpected {other:?}"),
-        Err(e) => Out::Threw(format!("{e}")),
+        Err(e) => Out::Threw(e.to_string()),
     }
 }
 
