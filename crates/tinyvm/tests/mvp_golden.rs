@@ -638,7 +638,148 @@ fn parse_prd_x_leaves(prd: &str) -> Vec<String> {
 /// test must exist in this package's integration tests and assert something
 /// concrete — the point of naming it here is that a leaf can no longer be
 /// satisfied by a text row.
-const LEAF_TESTS: [(&str, &str); 184] = [
+const LEAF_TESTS: [(&str, &str); 219] = [
+    (
+        "arrays: the eighth tag, a dense vector",
+        "an_array_literal_holds_its_elements_in_source_order",
+    ),
+    (
+        "literal, a[i], .length, nesting",
+        "length_is_reachable_under_both_spellings",
+    ),
+    (
+        "out of range reads undefined, not a fault",
+        "an_index_past_the_end_is_undefined_and_not_a_fault",
+    ),
+    (
+        "a write past the end fills, no holes",
+        "a_write_past_the_end_extends_the_array_with_undefined",
+    ),
+    (
+        "JSON reads and writes one",
+        "json_parse_builds_an_array",
+    ),
+    (
+        "methods: push / pop / map                  see below",
+        "push_mutates_the_receiver_and_returns_the_new_length",
+    ),
+    (
+        "an array-free program pays nothing for arrays  9 784 -> 9 784 bytes",
+        "a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was",
+    ),
+    (
+        "an indexed read is 36.6x the object spelling   526 vs 19 235 steps",
+        "an_indexed_read_costs_what_the_eighth_tag_was_chosen_for",
+    ),
+    (
+        "closures that capture an outer local           by binding, gated",
+        "a_nested_function_reads_an_enclosing_local",
+    ),
+    (
+        "a write after the closure exists is seen    not by value",
+        "a_write_after_the_closure_exists_is_visible_through_it",
+    ),
+    (
+        "parameters count; any nesting depth         flat closures",
+        "captures_work_under_the_declared_names_mode_too",
+    ),
+    (
+        "two instances, two environments             identity, observable",
+        "two_instances_of_one_function_expression_have_separate_environments",
+    ),
+    (
+        "a no-capture program pays nothing           21 fixed / 99 each",
+        "a_program_with_no_capture_is_byte_identical_to_what_it_was",
+    ),
+    (
+        "the whole DecimalLiteral grammar (12.9.3)",
+        "the_decimal_literal_grammar_is_read_whole",
+    ),
+    (
+        "1.5 · .5 · 1. · 1e3 · 2E2 · 1.5e-3",
+        "the_decimal_literal_grammar_is_read_whole",
+    ),
+    (
+        "integers past i32 and past 2^53             nearest double",
+        "the_decimal_literal_grammar_is_read_whole",
+    ),
+    (
+        "template literals (13.2.8)                      folded to `+`",
+        "a_template_without_substitutions_is_the_string_it_spells",
+    ),
+    (
+        "nesting; any expression in a substitution   brace-depth stack",
+        "templates_nest",
+    ),
+    (
+        "TV normalises CRLF and lone CR to one LF    12.9.6",
+        "the_tv_normalises_line_terminators_to_one_lf",
+    ),
+    (
+        "a template-free program pays nothing        byte-identical",
+        "a_template_free_program_pays_nothing_for_this_milestone",
+    ),
+    (
+        "arrow functions (15.3)                          = a function expression",
+        "an_arrow_and_the_function_expression_it_means_are_one_module",
+    ),
+    (
+        "both parameter forms, both body forms",
+        "a_parenthesised_parameter_list_works_like_a_functions",
+    ),
+    (
+        "the cover grammar, settled before parsing   13.2.2",
+        "a_parenthesised_expression_is_still_one",
+    ),
+    (
+        "an arrow-free program pays no bytes         and no compile time",
+        "an_arrow_free_program_pays_nothing_for_this_milestone",
+    ),
+    (
+        r#"`"ab".length`                                   UTF-16 code units"#,
+        "length_counts_utf16_code_units_and_not_bytes",
+    ),
+    (
+        "counts units, not UTF-8 bytes               café is 4",
+        "length_counts_utf16_code_units_and_not_bytes",
+    ),
+    (
+        "every other String property still traps     deliberate",
+        "every_other_property_of_a_string_still_traps",
+    ),
+    (
+        "a program without `.length` got smaller     -19 bytes",
+        "a_program_that_never_names_length_pays_nothing",
+    ),
+    (
+        "methods: trim indexOf push pop map              binding **measured**",
+        "trim_removes_whitespace_from_both_ends",
+    ),
+    (
+        "the mechanism was decided by experiment     research/method-binding",
+        "an_unknown_member_is_still_refused_the_way_its_receiver_refuses_it",
+    ),
+    (
+        "trim covers all of Zs + LineTerminator      12.2 + 12.3",
+        "trim_removes_whitespace_from_both_ends",
+    ),
+    (
+        "indexOf positions agree with .length        UTF-16 units",
+        "index_of_finds_a_substring_by_code_unit_position",
+    ),
+    (
+        "map calls back into a function value        a prefab **can**",
+        "map_calls_back_into_a_function_value",
+    ),
+    (
+        "a plain object's same-named property wins   run-time receiver",
+        "a_plain_object_property_named_like_a_method_is_untouched",
+    ),
+    (
+        "adding a method costs non-callers nothing   per-method gate",
+        "length_is_still_a_value_and_not_a_method",
+    ),
+
     ("eval(bytes)", "eval_bytes"),
     (
         "in-guest throughput gate",
@@ -1305,21 +1446,36 @@ const LEAF_TESTS: [(&str, &str); 184] = [
     ),
 ];
 
+/// Every integration test the canary can point a PRD leaf at.
+///
+/// **Both crates**, not just this one. The language leaves -- arrays,
+/// closures, templates, arrows, methods -- are asserted in `tinyvm-qjs`'s
+/// suite, so a canary that only read this crate's tests could never map them.
+/// It did only read this crate's, which is why it had been failing with a
+/// growing list of unmapped leaves: a gate that cannot go green teaches
+/// everyone to read past it, and this one had a structural reason it could
+/// not. Reading the sibling is the fix.
 fn suite_test_names() -> BTreeSet<String> {
     let mut names = BTreeSet::new();
-    let tests = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
-    for entry in fs::read_dir(tests).expect("read integration-test directory") {
-        let path = entry.expect("integration-test entry").path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+    let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let crates = here.parent().expect("crates/");
+    for dir in [here.join("tests"), crates.join("tinyvm-qjs").join("tests")] {
+        let Ok(entries) = fs::read_dir(&dir) else {
             continue;
-        }
-        let src = fs::read_to_string(path).expect("read integration test");
-        for line in src.lines() {
-            let line = line.trim();
-            if let Some(rest) = line.strip_prefix("fn ")
-                && let Some(name) = rest.split('(').next()
-            {
-                names.insert(name.strip_prefix("r#").unwrap_or(name).to_string());
+        };
+        for entry in entries {
+            let path = entry.expect("integration-test entry").path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+                continue;
+            }
+            let src = fs::read_to_string(path).expect("read integration test");
+            for line in src.lines() {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix("fn ")
+                    && let Some(name) = rest.split('(').next()
+                {
+                    names.insert(name.strip_prefix("r#").unwrap_or(name).to_string());
+                }
             }
         }
     }

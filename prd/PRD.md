@@ -54,9 +54,9 @@ embedder 词汇的原因。
 ```mermaid
 flowchart TD
   subgraph LANG["tinyvm-qjs — 随语言与规范变"]
-    R1["① lex / parse / AST<br/><i>a rejection names the engine, not the author</i>"]
+    R1["① lex / parse / AST<br/><i>a rejection names the engine, not the author</i><br/><i>templates fold to +, arrows to function<br/>expressions — neither gets a node</i>"]
     R2["② lower to V1<br/>eight tags · dispatch order<br/><i>Number, then String, then the rest</i>"]
-    R3["③ runtime prelude<br/>bump heap · object and array records<br/><i>gated: unused means unemitted</i>"]
+    R3["③ runtime prelude<br/>bump heap · object and array records<br/>method bodies: trim indexOf push pop map<br/><i>gated: unused means unemitted</i><br/><i>per method, not per set</i>"]
     R4["④ encode .wasm<br/>standard bytes · LEB128"]
     R1 --> R2 --> R3 --> R4
   end
@@ -78,12 +78,29 @@ flowchart TD
   FW["fault word<br/>heap exhausted / uncaught throw"] -.->|"the guest writes its own reason"| R7
 ```
 
-**房间 ③ 是最容易放错的一间。** `runtime::SET` 是**无条件**的——`Rt::offset()` 是它在
-那个切片里的下标——所以往里加一臂就是给每个模块加一臂。数组落地时 `__typeof` 和
-`__truthy` 的 Array 臂正是这样被加进去的，**每个程序多付 11 字节**，包括 `return 1;`。
-门控的先例是 `convert::JSON_SET`，而它的门之所以站得住，是因为谓词**精确**：名字出现。
-数组的精确谓词是「有 ArrayLiteral 节点，或程序提到 `JSON`」——后者不能省，因为
-`JSON.parse` 能从编译器看不见的文本里造出数组。
+**房间 ③ 是最容易放错的一间**，而且有两种放错法。
+
+**一、放进无条件的那一格。** `runtime::SET` 是无条件的——`Rt::offset()` 是它在那个切片
+里的下标——所以往里加一臂就是给每个模块加一臂。数组落地时 `__typeof` 和 `__truthy`
+的 Array 臂正是这样被加进去的，**每个程序多付 11 字节**，包括 `return 1;`。
+门控的先例是 `convert::JSON_SET`，谓词**精确**：名字出现。数组的精确谓词是
+「有 ArrayLiteral 节点，或程序提到 `JSON`」——后者不能省，因为 `JSON.parse` 能从
+编译器看不见的文本里造出数组。
+
+同一格还咬过第二次：`__len` 在这里有身体、却没有任何调用点，**每个模块白背 19 字节**，
+直到 `"ab".length` 落地才被发现。**无条件的集合应当定期扫一遍死成员。**
+
+**二、门装错了层。** 方法落地时，门第一版装在**整个集合**上，于是只写 `trim()` 的程序
+要为 `indexOf` 付 307 字节。门该装在**每件家具**上，不是房门上。
+
+**三、家具放进了别的房间——这是最贵的一种。** `a.map(f)` 的循环最初内联在**房间 ①**
+的每个调用点上，因为大家都以为「房间 ③ 的家具够不到房间 ⑥ 的函数表」。
+**那条前提是错的**：把统一签名的 type index 交给 prefab 层就行。循环搬回房间 ③ 之后，
+每调用点从 162 字节降到 48。
+
+第三条的教训超出体积：`research/method-binding/` 那场三选一的判决，**结论本来会反过来**
+——一个方案之所以看起来输，只是因为它的家具被放在了错误的房间里。
+**放错房间不只是代价问题，它会让你把结构问题误读成方案优劣。**
 
 ## Capability tree
 
@@ -113,7 +130,7 @@ tinyvm (35)                                      [~]
 │   │   │   ├── JSON reads and writes one                 [x]
 │   │   │   ├── a string key is not an index (10.4.2.1)   [~] recorded divergence
 │   │   │   ├── a non-index property write traps          [~] nowhere to put it
-│   │   │   └── methods (push / map) need a prototype     [ ]
+│   │   │   └── methods: push / pop / map                 [x] see below
 │   │   ├── an array-free program pays nothing for arrays [x] 9 784 -> 9 784 bytes
 │   │   ├── an indexed read is 36.6x the object spelling  [x] 526 vs 19 235 steps
 │   │   ├── closures that capture an outer local          [x] by binding, gated
@@ -125,6 +142,28 @@ tinyvm (35)                                      [~]
 │   │   │   ├── 1.5 · .5 · 1. · 1e3 · 2E2 · 1.5e-3         [x]
 │   │   │   ├── integers past i32 and past 2^53            [x] nearest double
 │   │   │   └── hex / octal / binary / separators          [ ] own grammars
+│   │   ├── template literals (13.2.8)                     [x] folded to `+`
+│   │   │   ├── nesting; any expression in a substitution  [x] brace-depth stack
+│   │   │   ├── TV normalises CRLF and lone CR to one LF   [x] 12.9.6
+│   │   │   ├── a template-free program pays nothing       [x] byte-identical
+│   │   │   └── tagged templates                           [ ] needs a raw array
+│   │   ├── arrow functions (15.3)                         [x] = a function expression
+│   │   │   ├── both parameter forms, both body forms      [x]
+│   │   │   ├── the cover grammar, settled before parsing  [x] 13.2.2
+│   │   │   ├── an arrow-free program pays no bytes        [x] and no compile time
+│   │   │   └── **the equivalence is conditional**          [~] expires if `this` lands
+│   │   ├── `"ab".length`                                  [x] UTF-16 code units
+│   │   │   ├── counts units, not UTF-8 bytes              [x] café is 4
+│   │   │   ├── every other String property still traps    [x] deliberate
+│   │   │   └── a program without `.length` got smaller    [x] -19 bytes
+│   │   ├── methods: trim indexOf push pop map             [x] binding **measured**
+│   │   │   ├── the mechanism was decided by experiment    [x] research/method-binding
+│   │   │   ├── trim covers all of Zs + LineTerminator     [x] 12.2 + 12.3
+│   │   │   ├── indexOf positions agree with .length       [x] UTF-16 units
+│   │   │   ├── map calls back into a function value       [x] a prefab **can**
+│   │   │   ├── a plain object's same-named property wins  [x] run-time receiver
+│   │   │   ├── adding a method costs non-callers nothing  [x] per-method gate
+│   │   │   └── every other method                          [ ] one row + one body each
 │   │   ├── host calls with declared raw signatures       [x]
 │   │   │   └── a host length answer must be a length    [x]
 │   │   ├── nesting bounded by a diagnostic, not an abort [x]
