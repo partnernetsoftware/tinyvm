@@ -640,7 +640,10 @@ fn a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was() {
         // from "this engine is broken". Seven bytes buys the difference
         // between a sentence and a bare `unreachable`, and only programs that
         // reach the arm pay it -- the row below still does not.
-        ("let o = {a:1}; let k = \"a\"; return o[k];", 10_249),
+        // +58 on 2026-08-30: `__len` counts eight plain-ASCII bytes a step
+        // (180 000 -> 19 900 steps on 6 000 characters, tests/length_cost.rs).
+        // Only programs that can reach the string-`.length` arm carry it.
+        ("let o = {a:1}; let k = \"a\"; return o[k];", 10_307),
         ("let o = {a:1}; return o[\"a\"];", 10_088),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();

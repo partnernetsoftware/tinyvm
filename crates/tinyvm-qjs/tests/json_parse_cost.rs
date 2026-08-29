@@ -35,8 +35,11 @@ fn parse_cost(item: &str, n: usize) -> u64 {
 fn short_integers_are_read_in_one_pass() {
     let per = parse_cost("12345", 100) / 100;
     println!("JSON.parse of \"12345\": {per} steps each");
-    // 527 measured: one `__jp_at` call per digit is what is left.
-    assert!(per < 700, "a five-digit integer cost {per} steps; it was ~1 600");
+    // 527 measured against a baseline whose `t.length` cost ~30 steps a
+    // byte; with `.length` counted by the word (2026-08-30) the baseline
+    // lost ~18 000 steps and the same parse reads ~700. One `__jp_at` call
+    // per digit is what is left.
+    assert!(per < 800, "a five-digit integer cost {per} steps; it was ~1 600");
 }
 
 #[test]

@@ -1282,6 +1282,43 @@ fn length(ctx: &Ctx) -> FnBuild {
 
     b.push(Ins::Block(BlockType::Empty));
     b.push(Ins::Loop(BlockType::Empty));
+    // Eight plain-ASCII bytes are eight units: while eight remain and no
+    // byte of the word has its high bit set, count the word whole. Two i32
+    // loads or-ed together, since the instruction set has no i64 `and`.
+    // The word loop hands over to the byte below at the first word that is
+    // not plain ASCII, and the byte loop comes back here after each byte, so
+    // ASCII text after a multi-byte character is counted by the word again.
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(bytes));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(8));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32LtU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(p));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalTee(byte));
+    b.push(Ins::I32Load(0, 4));
+    b.push(Ins::LocalGet(byte));
+    b.push(Ins::I32Load(0, 8));
+    b.push(Ins::I32Or);
+    b.push(Ins::I32Const(0x80808080u32 as i32));
+    b.push(Ins::I32And);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Const(8));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(n));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(8));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
     b.push(Ins::LocalGet(i));
     b.push(Ins::LocalGet(bytes));
     b.push(Ins::I32GeU);
