@@ -507,7 +507,7 @@ prefab），所以并行推进、一次验证。
 |---|----|---------------|-----------|
 | ~~A1~~ | ~~核里 16 条红测试逐条归因~~ **已归因（2026-08-29）** | 16 条 = **13 条卡带**（缺 `wasm-opt`，Binaryen 未装）+ `fan_c`（clang 的 wasm 链接器缺）+ `webkit`（JSC 差分脚本）+ `ios_wasi_host`（模拟器容器脚本） | **全是本机缺工具链，无一是代码缺陷**。装 Binaryen 与 wasm-ld 后复跑；装不了就在此行写「未跑」 |
 | A2 | 金丝雀补成双向——**测试已落地（`f4bf11f`），独立核验只过了一半，还开着** | 它只查「`[x]` 有没有测试」，**不查「`[ ]` 是不是其实做了」**——今天一次抓到 4 条陈旧 `[ ]`。现在 `prd_unchecked_leaves_are_not_already_done` + 手写 `STALE_HINTS`（17 行）在 `mvp_golden.rs` 里。核验方**没有判 holds**：(1) 全套 `cargo test -p tinyvm` 在核验窗口内没跑完；(2) 负控制没复跑；(3) `STALE_HINTS` 的注释说「`7c4f9dc^` 时这些测试都在而 PRD 还写 `[ ]`」，但 `push / pop / map` 那行在 `7c4f9dc^` 已是 `[x]`（本文件第 501 行）——那两行只在下游 PRD 里陈旧过 | 本次更新 PRD 时补测（2026-08-29）：(1) 负控制 `sed '557s/\[x\]/[ ]/'` → 测试红、点名 `break_leaves_the_loop`，前向金丝雀仍绿，PRD 已还原；(2) `tinyvm-qjs` **980/0**，`tinyvm` **297/16**，16 条逐名 = A1 归因的那 16 条。**仍开着**：改掉那句注释（代码改动，不在本次 PRD 更新里做）；改完才打 `[x]` |
-| A3 | Status 行的版本与测试数上门 | PRD 36 首行停在 rev `0afc88a`/153，实际 `ec67034`/152，靠人问才发现 | 有一条检查在 Status 与实际 pin 不符时失败 |
+| ~~A3~~ | ~~Status 行的版本与测试数上门~~ **已上门（agenterm `bc1a22d5`），且已咬过一次（2026-08-29）** | PRD 36 首行停在 rev `0afc88a`/153，实际 `ec67034`/152，靠人问才发现 | `the_prd_states_the_revision_this_build_pins`：抬 pin 到 `94237cb` 时 PRD 还写 `ec67034`，`cargo test -p agenterm-qjswasm` 红，同一提交里改链才绿——门第一次真的响了 |
 | A4 | 一个真实 App target 消费 XCFramework | 验收 #5；打包与冒烟都已绿（`smoke-ios-bridge.sh` exit 0），**只是仓里没有 Xcode 工程** | 仓里有工程且能构建；**不需要设备** |
 | A5 | 验收 #4：两个结构不同的游戏跑通确定性回放 | 相关测试正在 A1 的 16 条里 | #4 变绿 |
 
@@ -649,6 +649,7 @@ tinyvm (35)                                      [~]
 │   │   ├── every rejection names the engine boundary     [x]
 │   │   ├── an exhausted heap is legible, not a bare trap [x]
 │   │   ├── an uncaught throw is legible, not a bare trap [x]
+│   │   │   └── the thrown String itself is host-readable (`FAULT_THROWN` pointer, `guest_thrown_message`) [x] 94237cb；下游 agenterm `2cde8b63` 打印它
 │   │   ├── the acceptance library runs through a host door [x]
 │   │   └── full JS engine / AOT                          [–]
 │   ├── host                                              [x]

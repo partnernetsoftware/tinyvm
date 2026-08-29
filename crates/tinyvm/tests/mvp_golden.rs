@@ -656,7 +656,7 @@ fn parse_prd_leaves(prd: &str, marker: &str) -> Vec<String> {
 // `prd/PRD.md`'s acceptance section now writes the command set down, with this
 // package in it, so the next gap is caught by the gate rather than by someone
 // deciding to look.
-const LEAF_TESTS: [(&str, &str); 249] = [
+const LEAF_TESTS: [(&str, &str); 252] = [
     (
         "`break` / `continue`                           见下方方法段的同名行",
         "break_leaves_the_loop",
@@ -1006,6 +1006,18 @@ const LEAF_TESTS: [(&str, &str); 249] = [
     (
         "an exhausted heap is legible, not a bare trap",
         "qjs_m1_tells_an_exhausted_heap_from_a_broken_script",
+    ),
+    (
+        "`Object.keys(o)`：折成 `o.__keys()`，门控 prefab   208 字节；迁移语料 12 处",
+        "keys_come_back_in_insertion_order",
+    ),
+    (
+        "第三种接收者：调用点原只分「数组 / 否则字符串」  对象接收者曾落进 String 拒绝",
+        "it_reads_the_way_the_corpus_uses_it",
+    ),
+    (
+        "the thrown String itself is host-readable (`FAULT_THROWN` pointer, `guest_thrown_message`)  94237cb；下游 agenterm `2cde8b63` 打印它",
+        "a_thrown_string_is_readable_from_the_host",
     ),
     ("iOS runtime boundary", "native_interpreter_boundary"),
     ("interpret wasm", "eval_bytes"),
