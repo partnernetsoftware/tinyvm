@@ -510,6 +510,10 @@ prefab），所以并行推进、一次验证。
 | ~~A3~~ | ~~Status 行的版本与测试数上门~~ **已上门（agenterm `bc1a22d5`），且已咬过一次（2026-08-29）** | PRD 36 首行停在 rev `0afc88a`/153，实际 `ec67034`/152，靠人问才发现 | `the_prd_states_the_revision_this_build_pins`：抬 pin 到 `94237cb` 时 PRD 还写 `ec67034`，`cargo test -p agenterm-qjswasm` 红，同一提交里改链才绿——门第一次真的响了 |
 | A4 | 一个真实 App target 消费 XCFramework | 验收 #5；打包与冒烟都已绿（`smoke-ios-bridge.sh` exit 0），**只是仓里没有 Xcode 工程** | 仓里有工程且能构建；**不需要设备** |
 | A5 | 验收 #4：两个结构不同的游戏跑通确定性回放 | 相关测试正在 A1 的 16 条里 | #4 变绿 |
+| A6 | `print(非字符串)` 等宿主参数解包在运行期裸 trap | 下游 `print(s.length)` 编译期不拒（类型是运行期事实），运行期在 `unwrap_args` 的 `length < 0` 处 `unreachable`；缺失 String 属性已会报名字（`d2e66b3`），这一处还不会 | 报一个带名字的 fault（哪个宿主函数、第几个参数、拿到的是什么 tag） |
+| A7 | 嵌套闭包 + 调用 `import` 进来的函数 → wasm 校验失败 | 下游第一波迁移六组之一测到：`loading wasm: validation: type mismatch`；顶层函数与顶层 try 没事，入口因此都写成平的 | 先要一个 ≤10 行复现进 `tests/`，再修 |
+| A8 | `undefined.x` 不可捕获 | ECMA-262 是可捕获的 TypeError；今天是 `unbox_object` 裸 trap，`try/catch` 看不见 | 走 unwind 通道抛可捕获的值；无 `try` 的程序零字节 |
+| A9 | V1 装箱下的步数价格 | 下游实测：`"" + x` 每次上千步、`JSON.parse` 每字节 75–107 步、`includes` 每字符 >10 步；16M 默认步数下真仓输入撞顶（现在 CLI 可抬到 100M，但价格本身是上游的） | 先量一张「每个操作多少步」的表进 PRD，再决定优化哪一个 |
 
 ### B. 需求为零，**故意不做**（已带数字，不需再决策）
 
