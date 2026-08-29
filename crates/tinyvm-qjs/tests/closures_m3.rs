@@ -256,7 +256,7 @@ fn a_program_with_no_capture_is_byte_identical_to_what_it_was() {
         // thrown String's address in the entry epilogue, so the host can read
         // what an uncaught throw said. `JSON.stringify` can throw, so this row
         // has the channel; the three rows above do not and are unchanged.
-        ("return JSON.stringify({a:1});", 16_157),
+        ("return JSON.stringify({a:1});", 16_245),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(

@@ -40,9 +40,17 @@ fn short_integers_are_read_in_one_pass() {
 }
 
 #[test]
-fn fractions_still_take_the_general_path_and_still_answer() {
+fn short_fractions_are_one_exact_division_and_exponents_take_the_general_path() {
     let per = parse_cost("1.5", 100) / 100;
     println!("JSON.parse of \"1.5\": {per} steps each");
+    assert!(per < 800, "\"1.5\" cost {per} steps; it was ~1 300");
+    for (text, want) in [("[0.1]", 0.1f64), ("[12.375]", 12.375), ("[-0.5]", -0.5), ("[1e3]", 1000.0), ("[1.5e-1]", 0.15), ("[123456789012345.6]", 123456789012345.6), ("[0.30000000000000004]", 0.30000000000000004)] {
+        let wasm = compile_qjs_m1(&format!("return JSON.parse(\"{text}\")[0];")).expect("compiles");
+        let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
+        let mut instance = module.instantiate().expect("instantiates");
+        let vals = instance.invoke_by_name("main", &Value::args(&[])).expect("runs");
+        assert_eq!(Value::returned(&vals).expect("value"), Value::Number(want), "{text}");
+    }
     let wasm = compile_qjs_m1(r#"return JSON.parse("[1.5, -0, 12345678901234567, 1e3]")[2];"#).expect("compiles");
     let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
     let mut instance = module.instantiate().expect("instantiates");

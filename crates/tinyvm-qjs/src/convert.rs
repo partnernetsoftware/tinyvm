@@ -5069,6 +5069,9 @@ pub(crate) mod json {
         let nd = f.local(ValType::I32);
         let val = f.local(ValType::F64);
         let general = f.local(ValType::I32);
+        // Digits after the point, for the one exact division below.
+        let fd = f.local(ValType::I32);
+        let scale = f.local(ValType::F64);
         let names = ctx.names;
         let b = &mut f.body;
 
@@ -5134,14 +5137,27 @@ pub(crate) mod json {
                 b.push(Ins::I32Eq);
             },
             |b| {
-                b.extend_from_slice(&[ic(1), st(general)]);
+                // A fraction keeps accumulating: `12.375` is 12375 / 10^3,
+                // and one division by an exact power of ten is correctly
+                // rounded while the significand has at most fifteen digits
+                // (`__digits_to_f64` makes the same argument).
                 advance(b, 0, 1);
                 digit_at(ctx, b, 0, c);
                 b.push(Ins::I32Eqz);
                 b.push(Ins::If(BlockType::Empty));
                 fail(ctx, b, names.syntax, Ret::F64);
                 b.push(Ins::End);
-                while_loop(b, |b| digit_at(ctx, b, 0, c), |b| advance(b, 0, 1));
+                while_loop(
+                    b,
+                    |b| digit_at(ctx, b, 0, c),
+                    |b| {
+                        b.extend_from_slice(&[ld(val), Ins::F64Const(10.0), Ins::F64Mul]);
+                        b.extend_from_slice(&[ld(c), ic(0x30), Ins::I32Sub, Ins::F64ConvertI32S, Ins::F64Add, st(val)]);
+                        bump(b, nd, 1);
+                        bump(b, fd, 1);
+                        advance(b, 0, 1);
+                    },
+                );
             },
         );
 
@@ -5187,16 +5203,28 @@ pub(crate) mod json {
             },
         );
 
-        // Fast path: an integer of at most fifteen digits is exact in the
-        // value accumulated above -- no copy, no second parse. A JSON
-        // document is mostly such numbers, and `__str_to_num` over a fresh
-        // record cost ~1 600 steps for a five-digit one.
+        // Fast path: a number with no exponent and at most fifteen digits
+        // is exact in the value accumulated above, divided once by 10^fd --
+        // no copy, no second parse. A JSON document is mostly such numbers,
+        // and `__str_to_num` over a fresh record cost ~1 600 steps for a
+        // five-digit integer and ~1 300 for `1.5`.
         if_then(
             b,
             |b| {
                 b.extend_from_slice(&[ld(general), Ins::I32Eqz, ld(nd), ic(15), Ins::I32LtS, ld(nd), ic(15), Ins::I32Eq, Ins::I32Or, Ins::I32And]);
             },
             |b| {
+                // scale = 10^fd, exact for fd <= 15 (< 22).
+                b.extend_from_slice(&[Ins::F64Const(1.0), st(scale)]);
+                while_loop(
+                    b,
+                    |b| b.extend_from_slice(&[ld(fd), ic(0), Ins::I32Ne]),
+                    |b| {
+                        b.extend_from_slice(&[ld(scale), Ins::F64Const(10.0), Ins::F64Mul, st(scale)]);
+                        bump(b, fd, -1);
+                    },
+                );
+                b.extend_from_slice(&[ld(val), ld(scale), Ins::F64Div, st(val)]);
                 if_then(b, |b| b.push(ld(neg)), |b| b.extend_from_slice(&[ld(val), Ins::F64Neg, st(val)]));
                 b.push(ld(val));
                 b.push(Ins::Return);
