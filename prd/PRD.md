@@ -76,6 +76,9 @@ flowchart TD
   R6 <--> R7
   R6 --> OUT(["Value::returned<br/>one V1 pair"])
   FW["fault word<br/>heap exhausted / uncaught throw"] -.->|"the guest writes its own reason"| R7
+
+  PRD["📄 prd/PRD.md capability tree<br/><i>canary both ways: a checked leaf must have a test,<br/>an unchecked one must not already have one</i><br/><i>the reverse table is hand-written, not topic-matched —<br/>a refusal test looks exactly like a shipped one</i>"] -.->|"what a leaf claims, a test answers for"| R1
+  style PRD fill:#eee,stroke:#999,stroke-dasharray: 5 5,color:#555
 ```
 
 **房间 ③ 是最容易放错的一间**，而且有两种放错法。
@@ -101,6 +104,16 @@ flowchart TD
 第三条的教训超出体积：`research/method-binding/` 那场三选一的判决，**结论本来会反过来**
 ——一个方案之所以看起来输，只是因为它的家具被放在了错误的房间里。
 **放错房间不只是代价问题，它会让你把结构问题误读成方案优劣。**
+
+**四、树自己也会放错，而且有两个方向。** 前向金丝雀（`prd_x_leaves_have_suite_edges`）
+防的是 `[x]` 吹牛；2026-08-29 一天抓到四片叶子反过来——测试早就在，叶子还写 `[ ]`。
+反向那条（`prd_unchecked_leaves_are_not_already_done`，`f4bf11f`）**不能按主题猜**：
+`parse_int_is_not_silently_number` 是一条**拒绝**测试，按主题看和「做了 `parseInt`」
+一模一样，所以表是手写的，每片开着的叶子预先登记它做成时会存在的测试名。
+**它自己的注释又放错了一次**——说 `push / map` 那两行在 `7c4f9dc^` 时还是 `[ ]`，
+其实那只在下游 PRD 里发生过，本文件第 501 行一直是 `[x]`。没有金丝雀核对金丝雀的注释，
+这条靠人读出来，还没改。（写这一段时又被它咬了一口：它读**每一个** fence，
+不只能力树那个——上面 mermaid 里一个带记号的标签，一分钟内就被前向金丝雀点名了。）
 
 ---
 
@@ -493,7 +506,7 @@ prefab），所以并行推进、一次验证。
 | # | 事 | 为什么（实测） | 做完算什么 |
 |---|----|---------------|-----------|
 | ~~A1~~ | ~~核里 16 条红测试逐条归因~~ **已归因（2026-08-29）** | 16 条 = **13 条卡带**（缺 `wasm-opt`，Binaryen 未装）+ `fan_c`（clang 的 wasm 链接器缺）+ `webkit`（JSC 差分脚本）+ `ios_wasi_host`（模拟器容器脚本） | **全是本机缺工具链，无一是代码缺陷**。装 Binaryen 与 wasm-ld 后复跑；装不了就在此行写「未跑」 |
-| A2 | 金丝雀补成双向 | 它只查「`[x]` 有没有测试」，**不查「`[ ]` 是不是其实做了」**——今天一次抓到 4 条陈旧 `[ ]` | 一条测试能在「做了却还标 `[ ]`」时变红 |
+| A2 | 金丝雀补成双向——**测试已落地（`f4bf11f`），独立核验只过了一半，还开着** | 它只查「`[x]` 有没有测试」，**不查「`[ ]` 是不是其实做了」**——今天一次抓到 4 条陈旧 `[ ]`。现在 `prd_unchecked_leaves_are_not_already_done` + 手写 `STALE_HINTS`（17 行）在 `mvp_golden.rs` 里。核验方**没有判 holds**：(1) 全套 `cargo test -p tinyvm` 在核验窗口内没跑完；(2) 负控制没复跑；(3) `STALE_HINTS` 的注释说「`7c4f9dc^` 时这些测试都在而 PRD 还写 `[ ]`」，但 `push / pop / map` 那行在 `7c4f9dc^` 已是 `[x]`（本文件第 501 行）——那两行只在下游 PRD 里陈旧过 | 本次更新 PRD 时补测（2026-08-29）：(1) 负控制 `sed '557s/\[x\]/[ ]/'` → 测试红、点名 `break_leaves_the_loop`，前向金丝雀仍绿，PRD 已还原；(2) `tinyvm-qjs` **980/0**，`tinyvm` **297/16**，16 条逐名 = A1 归因的那 16 条。**仍开着**：改掉那句注释（代码改动，不在本次 PRD 更新里做）；改完才打 `[x]` |
 | A3 | Status 行的版本与测试数上门 | PRD 36 首行停在 rev `0afc88a`/153，实际 `ec67034`/152，靠人问才发现 | 有一条检查在 Status 与实际 pin 不符时失败 |
 | A4 | 一个真实 App target 消费 XCFramework | 验收 #5；打包与冒烟都已绿（`smoke-ios-bridge.sh` exit 0），**只是仓里没有 Xcode 工程** | 仓里有工程且能构建；**不需要设备** |
 | A5 | 验收 #4：两个结构不同的游戏跑通确定性回放 | 相关测试正在 A1 的 16 条里 | #4 变绿 |
@@ -1299,6 +1312,7 @@ sh crates/tinyvm/smoke-ios-bridge.sh        # iOS：XCFramework + Swift 包 + �
 而「跑一遍」是。**
 
 **基线（2026-08-29 立）**：第一条 **980 / 0**；第二条 **296 / 16**；第三条 **exit 0**。
+`f4bf11f` 加了一条金丝雀之后第二条是 **297 / 16**（2026-08-29 复跑，16 条逐名同上）。
 
 第二条那 16 条**全部既存**，都在游戏卡带、转换器 CLI、webkit 差分与 iOS 模拟器容器上，
 需要外部工具链或夹具，本会话没碰过 `crates/tinyvm/src/`。
