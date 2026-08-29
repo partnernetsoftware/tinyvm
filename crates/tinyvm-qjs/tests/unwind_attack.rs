@@ -127,6 +127,8 @@ impl Bases {
             captures: false,
             string_length: None,
             string_member: false,
+            unwind: None,
+            type_error: None,
         };
         let cv = convert::Ctx {
             func_base: convert_base,
@@ -1046,13 +1048,13 @@ fn an_uncaught_throw_is_visible_through_the_public_guest_fault_door() {
 #[test]
 fn a_program_that_names_json_declares_the_channel_json_raises_through() {
     // One global is the bump pointer; two per script binding. `x` and the
-    // catch parameter are two bindings, so five is "no channel" -- and a
-    // `try`/`catch` alone still declares none, because nothing on any path
-    // through it can raise.
+    // catch parameter are two bindings, so five would be "no channel" -- and
+    // since 2026-08-29 a `try`/`catch` declares one, because a property read
+    // off undefined inside it is a TypeError the catch takes.
     assert_eq!(
         globals_of("let x = 0; try { x = 1; } catch (e) { x = 2; } return x;"),
-        5,
-        "a `try`/`catch` with nothing that can raise declares no channel"
+        8,
+        "a `try`/`catch` declares the channel a TypeError would need"
     );
     // One `throw` anywhere and the three appear.
     assert_eq!(

@@ -770,12 +770,15 @@ fn a_program_that_cannot_throw_declares_no_unwinding_global() {
     assert_eq!(globals_of("let a = 1; let b = 2; return a + b;"), 5);
     // A `try` with nothing that can throw inside it is the same: the clauses
     // still run, and there is still nothing to unwind.
+    // Since 2026-08-29 a `try` declares the channel: it is where a TypeError
+    // (a property read off undefined) can be caught, so three more globals
+    // sit after `out` and the catch parameter.
     assert_eq!(
         globals_of(
             "let out = 0; try { out = 1; } catch (e) { out = 2; } finally { out = out + 10; } return out;"
         ),
-        5,
-        "`out` and the catch parameter are two script bindings, and neither is an unwind channel"
+        8,
+        "`out` and the catch parameter are two script bindings, plus the unwind channel a `try` opens"
     );
     assert_eq!(
         run(
@@ -793,21 +796,28 @@ fn a_program_that_cannot_throw_declares_no_unwinding_global() {
     );
 }
 
-/// DIVERGENCE: a trap is not a throw, and `catch` cannot see one.
-///
-/// ECMA-262 makes a property access on `undefined` a TypeError, which a
-/// `catch` takes. This engine has no `Error` objects and no way to build one,
-/// so the access is an `unreachable` and the clause never runs. It is the
-/// honest shape of the gap -- the alternative would be a `catch` that
-/// sometimes swallows a fault with no value to describe it.
+/// A property access on `undefined` is the TypeError ECMA-262 says it is,
+/// and `catch` takes it -- as a String, since this engine has no `Error`
+/// objects (2026-08-29; until then it was an `unreachable` the clause never
+/// saw). A *real* trap -- calling a value that is not a function -- is still
+/// not a throw, and `catch` still cannot see one; that is the honest shape
+/// of what remains.
 #[test]
-fn a_trap_is_not_a_throw() {
-    let mut instance = instantiate(
+fn a_property_read_off_undefined_is_a_throw_and_a_real_trap_still_is_not() {
+    let mut caught = instantiate(
         "let out = 0; try { const u = undefined; out = u.a; } catch (e) { out = 5; } return out;",
     );
-    instance
+    let vals = caught
         .invoke_by_name("main", &Value::args(&[]))
-        .expect_err("the property access traps rather than throwing");
+        .expect("the TypeError is caught and the script completes");
+    assert_eq!(Value::returned(&vals), Ok(Value::Number(5.0)));
+
+    let mut trapped = instantiate(
+        "let out = 0; try { const f = 1; f(); } catch (e) { out = 5; } return out;",
+    );
+    trapped
+        .invoke_by_name("main", &Value::args(&[]))
+        .expect_err("calling a non-function traps rather than throwing");
 }
 
 /// What a program that *can* throw pays on the path where it does not.

@@ -91,6 +91,8 @@ impl Prog {
             captures: false,
             string_length: None,
             string_member: false,
+            unwind: None,
+            type_error: None,
         };
         let cv = convert::Ctx {
             func_base: base,

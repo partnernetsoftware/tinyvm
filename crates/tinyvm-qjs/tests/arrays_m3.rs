@@ -617,6 +617,9 @@ fn a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was() {
     // `__obj_get`'s arm that names the key read off undefined/null/a
     // primitive (`FAULT_PROPERTY_OF_NON_OBJECT`), behind the same gate as
     // the String arm. `"return 1;"` did not move.
+    // The fleet library moved by +301 on 2026-08-29 (late): it has a
+    // `try` and property reads, so it carries the TypeError text and the throw
+    // arm in `__obj_get`. A JSON-only program did not move.
     for (source, want) in [
         ("return 1;", 9_940),
         ("let o = {a:1}; o.b = 2; return o.a;", 10_108) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,

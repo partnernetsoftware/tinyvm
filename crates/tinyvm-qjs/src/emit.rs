@@ -614,7 +614,19 @@ pub(crate) mod m1 {
         let method_base = arr_base + arr_len;
         let method_len = scan.methods.len();
         let user_base = method_base + method_len;
+        // The three unwind globals sit *after* every binding global, so a
+        // program that cannot throw has the same global indices it always
+        // had. Computed here rather than where the globals are built, because
+        // the JSON set is handed the indices and is built before them.
+        let binding_globals = BINDING_GLOBALS + program.script().bindings.len() as u32 * WIDTH;
+        let unwind = scan.throws.then(|| Unwind::at(binding_globals));
+
         let ctx = Ctx {
+            unwind: unwind.map(|u| runtime::UnwindGlobals { flag: u.flag, tag: u.tag, payload: u.payload }),
+            // Only a program that reads a static property can reach the
+            // TypeError; a JSON-only program has a channel and no such read.
+            type_error: (unwind.is_some() && scan.string_member)
+                .then(|| runtime::TypeErrorNames::intern(&mut pool)),
             func_base: runtime_base,
             heap_global: HEAP_GLOBAL,
             type_names: scan.type_of.then(|| runtime::TypeNames::intern(&mut pool)),
@@ -634,13 +646,6 @@ pub(crate) mod m1 {
             runtime_base,
             names: convert::Names::intern(&mut pool),
         };
-
-        // The three unwind globals sit *after* every binding global, so a
-        // program that cannot throw has the same global indices it always
-        // had. Computed here rather than where the globals are built, because
-        // the JSON set is handed the indices and is built before them.
-        let binding_globals = BINDING_GLOBALS + program.script().bindings.len() as u32 * WIDTH;
-        let unwind = scan.throws.then(|| Unwind::at(binding_globals));
 
         let mut types: Vec<ir::FuncType> = Vec::new();
         let imports: Vec<ir::Import> = match &table {
@@ -1588,6 +1593,9 @@ pub(crate) mod m1 {
                 handler,
                 finalizer,
             } => {
+                // A `try` is a place a TypeError can be caught, so the
+                // channel exists even when the script never spells `throw`.
+                scan.throws = true;
                 block.iter().try_for_each(|s| host_stmt(program, s, scan))?;
                 if let Some(catch) = handler {
                     catch
@@ -3316,6 +3324,7 @@ pub(crate) mod m1 {
                             self.key(key)?;
                             let call = self.ctx.call(Rt::ObjGet);
                             self.push(call);
+                            self.throw_check();
                         }
                         Accessor::Prop(base) => {
                             self.key_pair(key)?;
@@ -3509,6 +3518,7 @@ pub(crate) mod m1 {
                             self.push(Ins::LocalGet(raw));
                             let call = self.ctx.call(Rt::ObjGet);
                             self.push(call);
+                            self.throw_check();
                         }
                         TargetKey::Pair { slot, base } => {
                             load_local(slot, &mut self.f.body);
@@ -3801,6 +3811,7 @@ pub(crate) mod m1 {
             self.push(Ins::I32Const(key));
             let get = self.ctx.call(Rt::ObjGet);
             self.push(get);
+            self.throw_check();
             store_local(value, &mut self.f.body);
             if self.captures {
                 unbox_function(value, &mut self.f.body);

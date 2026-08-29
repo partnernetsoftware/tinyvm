@@ -458,7 +458,38 @@ pub(crate) struct Conversions {
 }
 
 
+/// The unwind channel's three globals, when the program has one: a runtime
+/// function that wants to *throw* rather than fault sets the value, sets the
+/// flag and returns; the call site's `throw_check` does the rest.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct UnwindGlobals {
+    pub(crate) flag: u32,
+    pub(crate) tag: u32,
+    pub(crate) payload: u32,
+}
+
+/// The two pooled halves of the TypeError text `__obj_get` throws.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TypeErrorNames {
+    pub(crate) prefix: i32,
+    pub(crate) suffix: i32,
+}
+
+impl TypeErrorNames {
+    pub(crate) fn intern(pool: &mut StringPool) -> Self {
+        Self {
+            prefix: pool.intern("TypeError: cannot read property '"),
+            suffix: pool.intern("' of a value that has no properties"),
+        }
+    }
+}
+
 pub(crate) struct Ctx {
+    /// Present when the program can catch: `__obj_get` throws a TypeError
+    /// through it for a property read off undefined/null/a primitive
+    /// (ECMA-262's answer) instead of faulting. Absent, the fault stays.
+    pub(crate) unwind: Option<UnwindGlobals>,
+    pub(crate) type_error: Option<TypeErrorNames>,
     /// Function index of `__add`. Imports occupy the first indices, so this is
     /// the import count.
     pub(crate) func_base: u32,
@@ -1772,11 +1803,81 @@ fn obj_get(ctx: &Ctx) -> FnBuild {
         is_object(0, &mut arm);
         arm.push(Ins::I32Eqz);
         arm.push(Ins::If(BlockType::Empty));
-        arm.push(Ins::I32Const(FAULT_THROWN));
-        arm.push(Ins::LocalGet(key));
-        arm.push(Ins::I32Store(2, 0));
-        store_fault(FAULT_PROPERTY_OF_NON_OBJECT, &mut arm);
-        arm.push(Ins::Unreachable);
+        match (ctx.unwind, ctx.type_error) {
+            // The program can catch: throw the TypeError as a String --
+            // prefix, the key, suffix -- and answer `undefined` so the call
+            // site's `throw_check` can leave.
+            (Some(unwind), Some(names)) => {
+                let out = f.local(ValType::I32);
+                let w = f.local(ValType::I32);
+                let piece = f.local(ValType::I32);
+                let i = f.local(ValType::I32);
+                let b = &mut arm;
+                // Total length, then one allocation.
+                b.push(Ins::I32Const(STRING_HEADER));
+                for p in [Ins::I32Const(names.prefix), Ins::LocalGet(key), Ins::I32Const(names.suffix)] {
+                    b.push(p);
+                    b.push(Ins::I32Load(ALIGN_WORD, 0));
+                    b.push(Ins::I32Add);
+                }
+                b.push(ctx.call(Rt::Alloc));
+                b.push(Ins::LocalSet(out));
+                b.push(Ins::I32Const(0));
+                b.push(Ins::LocalSet(w));
+                for p in [Ins::I32Const(names.prefix), Ins::LocalGet(key), Ins::I32Const(names.suffix)] {
+                    b.push(p);
+                    b.push(Ins::LocalSet(piece));
+                    b.push(Ins::I32Const(0));
+                    b.push(Ins::LocalSet(i));
+                    b.push(Ins::Block(BlockType::Empty));
+                    b.push(Ins::Loop(BlockType::Empty));
+                    b.push(Ins::LocalGet(i));
+                    b.push(Ins::LocalGet(piece));
+                    b.push(Ins::I32Load(ALIGN_WORD, 0));
+                    b.push(Ins::I32GeU);
+                    b.push(Ins::BrIf(1));
+                    b.push(Ins::LocalGet(out));
+                    b.push(Ins::LocalGet(w));
+                    b.push(Ins::I32Add);
+                    b.push(Ins::LocalGet(piece));
+                    b.push(Ins::LocalGet(i));
+                    b.push(Ins::I32Add);
+                    b.push(Ins::I32Load8U(0, STRING_HEADER as u32));
+                    b.push(Ins::I32Store8(0, STRING_HEADER as u32));
+                    b.push(Ins::LocalGet(w));
+                    b.push(Ins::I32Const(1));
+                    b.push(Ins::I32Add);
+                    b.push(Ins::LocalSet(w));
+                    b.push(Ins::LocalGet(i));
+                    b.push(Ins::I32Const(1));
+                    b.push(Ins::I32Add);
+                    b.push(Ins::LocalSet(i));
+                    b.push(Ins::Br(0));
+                    b.push(Ins::End);
+                    b.push(Ins::End);
+                }
+                b.push(Ins::LocalGet(out));
+                b.push(Ins::LocalGet(w));
+                b.push(Ins::I32Store(ALIGN_WORD, 0));
+                // The pair comes off payload first, as `throw` does.
+                b.push(Ins::LocalGet(out));
+                b.push(Ins::I64ExtendI32U);
+                b.push(Ins::GlobalSet(unwind.payload));
+                b.push(Ins::I32Const(super::repr::TAG_STRING));
+                b.push(Ins::GlobalSet(unwind.tag));
+                b.push(Ins::I32Const(1));
+                b.push(Ins::GlobalSet(unwind.flag));
+                const_undefined(b);
+                b.push(Ins::Return);
+            }
+            _ => {
+                arm.push(Ins::I32Const(FAULT_THROWN));
+                arm.push(Ins::LocalGet(key));
+                arm.push(Ins::I32Store(2, 0));
+                store_fault(FAULT_PROPERTY_OF_NON_OBJECT, &mut arm);
+                arm.push(Ins::Unreachable);
+            }
+        }
         arm.push(Ins::End);
         f.body.extend(arm);
     }

@@ -512,7 +512,7 @@ prefab），所以并行推进、一次验证。
 | A5 | 验收 #4：两个结构不同的游戏跑通确定性回放 | 相关测试正在 A1 的 16 条里 | #4 变绿 |
 | ~~A6~~ | ~~`print(非字符串)` 等宿主参数解包在运行期裸 trap~~ **已报名字（2026-08-29）** | `print(s.length)` 编译期不拒（类型是运行期事实），以前在 `unwrap_args` 落进 `unbox_string` 的裸 `unreachable` | 客人写 `"<host>#<n>"` 进 detail 字 + 第六个 fault code；`guest_host_argument` 读回；字面量 String 参数**不再发射标签测试**（比以前更小），其余每个 String 参数位 +~12 B；`I32`/`F64` 参数位同样报名字；`tests/host_argument.rs` 6 条 |
 | A7 | 嵌套闭包 + 调用 `import` 进来的函数 → wasm 校验失败 | 下游第一波迁移六组之一测到：`loading wasm: validation: type mismatch`；顶层函数与顶层 try 没事，入口因此都写成平的 | **11 种形状都过**（返回的闭包、`map` 回调、`try` 内、两层嵌套、箭头、字符串参数——`tests/closures_call_imports_m3.rs`，2026-08-29）；报告里没有原始源码，暂不能复现。谁再撞到，把那段脚本贴进来 |
-| A8 | `undefined.x` 不可捕获 | ECMA-262 是可捕获的 TypeError；今天是 `unbox_object` 裸 trap，`try/catch` 看不见 | 走 unwind 通道抛可捕获的值；无 `try` 的程序零字节；**2026-08-29 先做了一半**：`undefined.x`/`null.x`/`(1).x` 现在报键名（`FAULT_PROPERTY_OF_NON_OBJECT`，`tests/property_of_non_object.rs`），可捕获仍待 unwind 通道 |
+| ~~A8~~ | ~~`undefined.x` 不可捕获~~ **已可捕获（2026-08-29 深夜）** | ECMA-262 是可捕获的 TypeError；以前是 `unbox_object` 裸 trap，`try/catch` 看不见 | 运行时 `Ctx` 现在知道 unwind 通道；`__obj_get` 对非对象接收者在有通道时抛一个 String（`TypeError: cannot read property 'x' of a value that has no properties`）并答 undefined，三处属性读调用点之后加 `throw_check`；扫描期 `try` 也开通道（之前只有 `throw` 开）。无 `try` 的程序仍是具名 fault，`"return 1;"` 字节不动；`tests/catchable_type_error.rs` |
 | A9 | V1 装箱下的步数价格 | **实测（2026-08-29，下游 CLI 二分 `--max-operations`，扣除空程序 101 步）**：循环一次 **146**；`"" + n` **≈5 200**；`s = s + "x"`（串在长）**≈8 800**；`includes` **≈127/字符**；`JSON.parse` **≈520/字节**；`JSON.stringify` **≈700/字节**；`slice(0,10)` 于 1 000 字符 78 000 → `83721d0` 后 <3 000 | 表已进 PRD；`num_to_string` **已动**（`27d67b4`：整数走位数循环，537 步，下游 CLI 复测 ≈400）；`JSON.parse` **已动**（`json_pnum` 整数一趟：1 600 → 527 步/个；`json_pstr` 字符串四字节一步：119 → 29 步/字节；`plan/design-json-parse-fast.md`）；小数也已（`1.5`：1 336 → 539）；指数、短键、`__jp_at` 每位一次是下一层 |
 
 ### B. 需求为零，**故意不做**（已带数字，不需再决策）
@@ -658,6 +658,7 @@ tinyvm (35)                                      [~]
 │   │   ├── a missing String property names itself at run time (`FAULT_MISSING_STRING_METHOD`), not a bare trap [x] 2026-08-29；`slice`/`substr`/`substring` 曾是三个「不同的 bug」
 │   │   ├── a host argument of the wrong type names the call and the position (`FAULT_HOST_ARGUMENT`) [x] 2026-08-29；字面量 String 参数不再带标签测试
 │   │   ├── a property read off undefined/null/a primitive names the key (`FAULT_PROPERTY_OF_NON_OBJECT`) [x] 2026-08-29；仍不可捕获（A8），但不再哑
+│   │   ├── inside a `try`, that read is a catchable TypeError (a String) [x] 2026-08-29；`try` 本身就开 unwind 通道；无 `try` 仍是具名 fault
 │   │   ├── `0x`/`0o`/`0b` number literals（无位数或超 64 位具名拒绝） [x] 2026-08-29；Win32 常量不必再写十进制
 │   │   ├── reserved words as property names（`o.class`、`{ do: 1 }`） [x] 2026-08-29；`.` 后与 `:` 前是 IdentifierName
 │   │   ├── the acceptance library runs through a host door [x]

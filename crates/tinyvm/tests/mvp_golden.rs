@@ -656,7 +656,7 @@ fn parse_prd_leaves(prd: &str, marker: &str) -> Vec<String> {
 // `prd/PRD.md`'s acceptance section now writes the command set down, with this
 // package in it, so the next gap is caught by the gate rather than by someone
 // deciding to look.
-const LEAF_TESTS: [(&str, &str); 258] = [
+const LEAF_TESTS: [(&str, &str); 259] = [
     (
         "`break` / `continue`                           见下方方法段的同名行",
         "break_leaves_the_loop",
@@ -1042,6 +1042,10 @@ const LEAF_TESTS: [(&str, &str); 258] = [
     (
         "a property read off undefined/null/a primitive names the key (`FAULT_PROPERTY_OF_NON_OBJECT`)  2026-08-29；仍不可捕获（A8），但不再哑",
         "undefined_and_null_name_the_key",
+    ),
+    (
+        "inside a `try`, that read is a catchable TypeError (a String)  2026-08-29；`try` 本身就开 unwind 通道；无 `try` 仍是具名 fault",
+        "inside_a_try_the_read_is_a_catchable_type_error_naming_the_key",
     ),
     ("iOS runtime boundary", "native_interpreter_boundary"),
     ("interpret wasm", "eval_bytes"),

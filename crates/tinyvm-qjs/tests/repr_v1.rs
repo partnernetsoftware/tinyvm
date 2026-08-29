@@ -112,6 +112,8 @@ impl Prog {
                 captures: false,
                 string_length: length_name,
                 string_member: false,
+                unwind: None,
+                type_error: None,
             },
             cv: convert::Ctx {
                 func_base: CONVERT_BASE,
@@ -507,6 +509,8 @@ fn add_tests_number_before_string() {
         captures: false,
         string_length: None,
         string_member: false,
+        unwind: None,
+        type_error: None,
     };
     let funcs = runtime::build(&ctx);
     let add = funcs
@@ -559,6 +563,8 @@ fn a_new_type_costs_nothing_at_a_site_that_never_sees_it() {
         captures: false,
         string_length: None,
         string_member: false,
+        unwind: None,
+        type_error: None,
     };
     let arms: Vec<&'static str> = runtime::build(&ctx)
         .iter()
@@ -774,6 +780,8 @@ fn typeof_costs_nothing_in_a_program_that_never_asks() {
         captures: false,
         string_length: None,
         string_member: false,
+        unwind: None,
+        type_error: None,
     };
     let built = runtime::build(&ctx);
     let quiet_typeof = built
