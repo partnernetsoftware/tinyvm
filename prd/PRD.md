@@ -508,7 +508,7 @@ prefab），所以并行推进、一次验证。
 | ~~A1~~ | ~~核里 16 条红测试逐条归因~~ **已归因（2026-08-29）** | 16 条 = **13 条卡带**（缺 `wasm-opt`，Binaryen 未装）+ `fan_c`（clang 的 wasm 链接器缺）+ `webkit`（JSC 差分脚本）+ `ios_wasi_host`（模拟器容器脚本） | **全是本机缺工具链，无一是代码缺陷**。装 Binaryen 与 wasm-ld 后复跑；装不了就在此行写「未跑」 |
 | ~~A2~~ | ~~金丝雀补成双向~~ **已闭合（2026-08-29 收尾）** | 前向：`[x]` 有没有测试；反向：`[ ]` 是不是其实做了（`STALE_HINTS`） | 那句错注释已改（`push / pop / map` 在本 PRD 早是 `[x]`，只在下游陈旧过——注释现在这么说）；hex/octal/binary 落地当天把它的反向行改成回归行、开着的叶改成「numeric separators」；负控制（`[x]`→`[ ]` 一条 → 测试红、点名）2026-08-29 复跑过 |
 | ~~A3~~ | ~~Status 行的版本与测试数上门~~ **已上门（agenterm `bc1a22d5`），且已咬过一次（2026-08-29）** | PRD 36 首行停在 rev `0afc88a`/153，实际 `ec67034`/152，靠人问才发现 | `the_prd_states_the_revision_this_build_pins`：抬 pin 到 `94237cb` 时 PRD 还写 `ec67034`，`cargo test -p agenterm-qjswasm` 红，同一提交里改链才绿——门第一次真的响了 |
-| A4 | 一个真实 App target 消费 XCFramework | 验收 #5；打包与冒烟都已绿（`smoke-ios-bridge.sh` exit 0），**只是仓里没有 Xcode 工程** | 仓里有工程且能构建；**不需要设备** |
+| ~~A4~~ | ~~一个真实 App target 消费 XCFramework~~ **已落地（2026-08-30）** | 验收 #5；此前打包与冒烟已绿，只是仓里没有工程 | 工程由 xcodegen 从仓内 `bindings/swift/app/project.yml` 生成到临时目录（可复现，不提交 `.xcodeproj`），SwiftUI 应用 `import TinyArcadeRuntime` 并调用 `TinyArcadeCartridgeDescriptorV1.inspect`；`smoke-ios-bridge.sh` 为模拟器与真机各构建一次（`CODE_SIGNING_ALLOWED=NO`，不要设备）并检查 `.app` 存在——exit 0；`tests/ios_app_target.rs` 钉住规格与冒烟步骤在仓里 |
 | A5 | 验收 #4：两个结构不同的游戏跑通确定性回放 | 相关测试正在 A1 的 16 条里 | #4 变绿 |
 | ~~A6~~ | ~~`print(非字符串)` 等宿主参数解包在运行期裸 trap~~ **已报名字（2026-08-29）** | `print(s.length)` 编译期不拒（类型是运行期事实），以前在 `unwrap_args` 落进 `unbox_string` 的裸 `unreachable` | 客人写 `"<host>#<n>"` 进 detail 字 + 第六个 fault code；`guest_host_argument` 读回；字面量 String 参数**不再发射标签测试**（比以前更小），其余每个 String 参数位 +~12 B；`I32`/`F64` 参数位同样报名字；`tests/host_argument.rs` 6 条 |
 | A7 | 嵌套闭包 + 调用 `import` 进来的函数 → wasm 校验失败 | 下游第一波迁移六组之一测到：`loading wasm: validation: type mismatch`；顶层函数与顶层 try 没事，入口因此都写成平的 | **11 种形状都过**（返回的闭包、`map` 回调、`try` 内、两层嵌套、箭头、字符串参数——`tests/closures_call_imports_m3.rs`，2026-08-29）；报告里没有原始源码，暂不能复现。谁再撞到，把那段脚本贴进来 |
@@ -666,6 +666,7 @@ tinyvm (35)                                      [~]
 │   ├── host                                              [x]
 │   ├── <100KiB>                                          [x]
 │   └── iOS runtime boundary                              [x]
+│   └── a real App target consumes the XCFramework (xcodegen, both destinations) [x] 2026-08-30 验收 #5
 │       ├── interpret wasm                                [x]
 │       ├── JIT native code                               [–]
 │       ├── device-side AOT                               [–]

@@ -362,6 +362,28 @@ swift package --package-path "$PACKAGE" dump-package >/dev/null
     CODE_SIGNING_ALLOWED=NO build
 )
 
+# Acceptance #5 (PRD A4): a real app target consumes the XCFramework through
+# the package. The project is generated into the scratch directory by
+# xcodegen from an in-repo spec, then built for the simulator and for a
+# device with signing off -- no device, no account.
+if ! command -v xcodegen >/dev/null 2>&1; then
+  echo 'xcodegen is required for the app-target step (brew install xcodegen)' >&2
+  exit 1
+fi
+APP="$TEMP/TinyArcadeApp"
+mkdir -p "$APP"
+PACKAGE_PATH="$PACKAGE" APP_SOURCES="$CRATE/bindings/swift/app/Sources" \
+  xcodegen generate --quiet --spec "$CRATE/bindings/swift/app/project.yml" --project "$APP" >/dev/null
+xcodebuild -quiet -project "$APP/TinyArcadeApp.xcodeproj" -scheme TinyArcadeApp \
+  -destination 'generic/platform=iOS Simulator' \
+  -derivedDataPath "$TEMP/app-simulator" \
+  CODE_SIGNING_ALLOWED=NO build
+xcodebuild -quiet -project "$APP/TinyArcadeApp.xcodeproj" -scheme TinyArcadeApp \
+  -destination 'generic/platform=iOS' \
+  -derivedDataPath "$TEMP/app-device" \
+  CODE_SIGNING_ALLOWED=NO build
+test -d "$TEMP/app-device/Build/Products/Debug-iphoneos/TinyArcadeApp.app"
+
 SIMULATOR_RUN=${TINYARCADE_RUN_BOOTED_SIMULATOR:-0}
 if [ "$SIMULATOR_RUN" = simd ]; then
   case ",$RUST_FEATURES," in
@@ -404,4 +426,4 @@ elif [ "$SIMULATOR_RUN" != 0 ]; then
   exit 1
 fi
 
-echo "OK: iOS device + universal simulator XCFramework and Swift package; links arm64=${ARM64_LINKED_BYTES} x86_64=${X86_64_LINKED_BYTES} profile-catalog=${HOST_PROFILE_CATALOG_LINKED_BYTES} replay=${REPLAY_LINKED_BYTES} private=${PRIVATE_LIBRARY_LINKED_BYTES} session=${GAME_SESSION_LINKED_BYTES} completion=${COMPLETION_LINKED_BYTES} simd=${SIMD_LINKED_BYTES} bytes"
+echo "OK: iOS device + universal simulator XCFramework, Swift package and app target; links arm64=${ARM64_LINKED_BYTES} x86_64=${X86_64_LINKED_BYTES} profile-catalog=${HOST_PROFILE_CATALOG_LINKED_BYTES} replay=${REPLAY_LINKED_BYTES} private=${PRIVATE_LIBRARY_LINKED_BYTES} session=${GAME_SESSION_LINKED_BYTES} completion=${COMPLETION_LINKED_BYTES} simd=${SIMD_LINKED_BYTES} bytes"

@@ -1,0 +1,32 @@
+# A real iOS app target that consumes the TinyArcade XCFramework through the
+# Swift package `build-swift-package.sh` writes. Generated into a scratch
+# directory by `smoke-ios-bridge.sh` with xcodegen (`brew install xcodegen`);
+# `PACKAGE_PATH` is the built package. Acceptance #5 (PRD A4): the app builds
+# for the simulator and for a device, with no signing and no device attached.
+name: TinyArcadeApp
+options:
+  bundleIdPrefix: org.tinyvm
+  deploymentTarget:
+    iOS: "14.0"
+  createIntermediateGroups: true
+packages:
+  TinyArcadeRuntimePackage:
+    path: ${PACKAGE_PATH}
+targets:
+  TinyArcadeApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: ${APP_SOURCES}
+    dependencies:
+      - package: TinyArcadeRuntimePackage
+        product: TinyArcadeRuntime
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.tinyvm.TinyArcadeApp
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        SWIFT_VERSION: "5.9"
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGN_IDENTITY: ""

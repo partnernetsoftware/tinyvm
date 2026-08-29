@@ -656,7 +656,7 @@ fn parse_prd_leaves(prd: &str, marker: &str) -> Vec<String> {
 // `prd/PRD.md`'s acceptance section now writes the command set down, with this
 // package in it, so the next gap is caught by the gate rather than by someone
 // deciding to look.
-const LEAF_TESTS: [(&str, &str); 259] = [
+const LEAF_TESTS: [(&str, &str); 260] = [
     (
         "`break` / `continue`                           见下方方法段的同名行",
         "break_leaves_the_loop",
@@ -1046,6 +1046,10 @@ const LEAF_TESTS: [(&str, &str); 259] = [
     (
         "inside a `try`, that read is a catchable TypeError (a String)  2026-08-29；`try` 本身就开 unwind 通道；无 `try` 仍是具名 fault",
         "inside_a_try_the_read_is_a_catchable_type_error_naming_the_key",
+    ),
+    (
+        "a real App target consumes the XCFramework (xcodegen, both destinations)  2026-08-30 验收 #5",
+        "the_ios_smoke_builds_the_app_target_for_both_destinations",
     ),
     ("iOS runtime boundary", "native_interpreter_boundary"),
     ("interpret wasm", "eval_bytes"),
