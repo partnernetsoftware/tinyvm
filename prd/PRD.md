@@ -513,7 +513,7 @@ prefab），所以并行推进、一次验证。
 | ~~A6~~ | ~~`print(非字符串)` 等宿主参数解包在运行期裸 trap~~ **已报名字（2026-08-29）** | `print(s.length)` 编译期不拒（类型是运行期事实），以前在 `unwrap_args` 落进 `unbox_string` 的裸 `unreachable` | 客人写 `"<host>#<n>"` 进 detail 字 + 第六个 fault code；`guest_host_argument` 读回；字面量 String 参数**不再发射标签测试**（比以前更小），其余每个 String 参数位 +~12 B；`I32`/`F64` 参数位同样报名字；`tests/host_argument.rs` 6 条 |
 | A7 | 嵌套闭包 + 调用 `import` 进来的函数 → wasm 校验失败 | 下游第一波迁移六组之一测到：`loading wasm: validation: type mismatch`；顶层函数与顶层 try 没事，入口因此都写成平的 | **11 种形状都过**（返回的闭包、`map` 回调、`try` 内、两层嵌套、箭头、字符串参数——`tests/closures_call_imports_m3.rs`，2026-08-29）；报告里没有原始源码，暂不能复现。谁再撞到，把那段脚本贴进来 |
 | A8 | `undefined.x` 不可捕获 | ECMA-262 是可捕获的 TypeError；今天是 `unbox_object` 裸 trap，`try/catch` 看不见 | 走 unwind 通道抛可捕获的值；无 `try` 的程序零字节 |
-| A9 | V1 装箱下的步数价格 | **实测（2026-08-29，下游 CLI 二分 `--max-operations`，扣除空程序 101 步）**：循环一次 **146**；`"" + n` **≈5 200**；`s = s + "x"`（串在长）**≈8 800**；`includes` **≈127/字符**；`JSON.parse` **≈520/字节**；`JSON.stringify` **≈700/字节**；`slice(0,10)` 于 1 000 字符 78 000 → `83721d0` 后 <3 000 | 表已进 PRD；先动 `num_to_string`（`"" + n` 5 200 步是所有价格里最离谱的一条）与 `JSON.parse` |
+| A9 | V1 装箱下的步数价格 | **实测（2026-08-29，下游 CLI 二分 `--max-operations`，扣除空程序 101 步）**：循环一次 **146**；`"" + n` **≈5 200**；`s = s + "x"`（串在长）**≈8 800**；`includes` **≈127/字符**；`JSON.parse` **≈520/字节**；`JSON.stringify` **≈700/字节**；`slice(0,10)` 于 1 000 字符 78 000 → `83721d0` 后 <3 000 | 表已进 PRD；`num_to_string` **已动**（`27d67b4`：整数走位数循环，537 步，下游 CLI 复测 ≈400）；下一个是 `JSON.parse`（≈520/字节） |
 
 ### B. 需求为零，**故意不做**（已带数字，不需再决策）
 
