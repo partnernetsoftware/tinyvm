@@ -325,10 +325,7 @@ pub(crate) mod m1 {
     use crate::ir::m1 as ir;
     use crate::opts::{HostFn, HostParam, HostResult, Names, Options};
     use crate::repr::{
-        self, BlockType, Ins, ValType, WIDTH, box_array, box_bool, box_function, box_number,
-        box_object, box_string, const_bool, const_null, const_number, const_string,
-        const_undefined, drop_value, load_local, store_local, unbox_function, unbox_number,
-        unbox_string,
+        self, BlockType, Ins, ValType, WIDTH, box_array, box_bool, box_function, box_number, box_object, box_string, const_bool, const_null, const_number, const_string, const_undefined, drop_value, load_local, store_local, unbox_function, unbox_number,
     };
     use crate::repr::{is_array, is_object, is_string};
     use crate::runtime::{
@@ -3890,9 +3887,13 @@ pub(crate) mod m1 {
                 slots.push(slot);
             }
 
+            let literal: Vec<bool> =
+                args.iter().map(|arg| matches!(arg.kind, ast::ExprKind::Str(_))).collect();
+            let host = b.decl.name.clone();
+
             match &b.decl.result {
                 HostResult::Void => {
-                    self.unwrap_args(&slots, &b.decl.params);
+                    self.unwrap_args(&slots, &b.decl.params, &literal, &host);
                     self.push(Ins::Call(b.index));
                     const_undefined(&mut self.f.body);
                 }
@@ -3901,7 +3902,7 @@ pub(crate) mod m1 {
                     let params = b.decl.params.clone();
                     let index = b.index;
                     let inner = self.detached(|me| {
-                        me.unwrap_args(&slots, &params);
+                        me.unwrap_args(&slots, &params, &literal, &host);
                         me.push(Ins::Call(index));
                         if widen {
                             me.push(Ins::F64ConvertI32S);
@@ -3910,7 +3911,7 @@ pub(crate) mod m1 {
                     })?;
                     box_number(&inner, &mut self.f.body);
                 }
-                HostResult::Bytes { .. } => self.two_pass_string(b, &slots),
+                HostResult::Bytes { .. } => self.two_pass_string(b, &slots, &literal),
             }
 
             for slot in slots.into_iter().rev() {
@@ -3927,17 +3928,38 @@ pub(crate) mod m1 {
         /// runtime half of the policy whose compile-time half is
         /// [`static_type`] above: a dynamic language cannot settle every
         /// argument's type before it runs, and must not pretend to.
-        fn unwrap_args(&mut self, slots: &[u32], params: &[HostParam]) {
-            for (slot, param) in slots.iter().zip(params) {
+        fn unwrap_args(
+            &mut self,
+            slots: &[u32],
+            params: &[HostParam],
+            literal: &[bool],
+            host: &str,
+        ) {
+            for (position, (slot, param)) in slots.iter().zip(params).enumerate() {
                 match param {
                     // The bytes, not the record: a host reading `(ptr, len)`
                     // wants the text, and the 4-byte length header in front of
                     // it is this engine's business.
                     HostParam::StrPtrLen => {
-                        unbox_string(*slot, &mut self.f.body);
+                        // A literal's tag is known; any other String argument gets one
+                        // test that, on failure, records which host and which argument
+                        // (`runtime::FAULT_HOST_ARGUMENT`) before the trap. `print(s.length)`
+                        // used to be a bare `unreachable` here.
+                        if !literal.get(position).copied().unwrap_or(false) {
+                            is_string(*slot, &mut self.f.body);
+                            self.push(Ins::I32Eqz);
+                            self.push(Ins::If(BlockType::Empty));
+                            let detail = self.pool.intern(&format!("{host}#{}", position + 1));
+                            runtime::record_host_argument(detail, &mut self.f.body);
+                            self.push(Ins::Unreachable);
+                            self.push(Ins::End);
+                        }
+                        self.push(Ins::LocalGet(*slot + 1));
+                        self.push(Ins::I32WrapI64);
                         self.push(Ins::I32Const(STRING_HEADER));
                         self.push(Ins::I32Add);
-                        unbox_string(*slot, &mut self.f.body);
+                        self.push(Ins::LocalGet(*slot + 1));
+                        self.push(Ins::I32WrapI64);
                         self.push(Ins::I32Load(2, 0));
                     }
                     // The Number has to *be* an `i32`. `f64.trunc` rejects a
@@ -3985,13 +4007,13 @@ pub(crate) mod m1 {
         /// announced length a length at all. A negative answer is refused here,
         /// at the boundary the host lied across, before it becomes a size, a
         /// record header or an address.
-        fn two_pass_string(&mut self, b: &Bound, slots: &[u32]) {
+        fn two_pass_string(&mut self, b: &Bound, slots: &[u32], literal: &[bool]) {
             let length = b.length.expect("a Bytes result binds a length import");
             let n = self.take_raw();
             let p = self.take_raw();
             let params = b.decl.params.clone();
 
-            self.unwrap_args(slots, &params);
+            self.unwrap_args(slots, &params, literal, &b.decl.name);
             self.push(Ins::Call(length));
             self.push(Ins::LocalSet(n));
 
@@ -4012,7 +4034,7 @@ pub(crate) mod m1 {
             self.push(Ins::LocalGet(n));
             self.push(Ins::I32Store(2, 0));
 
-            self.unwrap_args(slots, &params);
+            self.unwrap_args(slots, &params, literal, &b.decl.name);
             self.push(Ins::LocalGet(p));
             self.push(Ins::I32Const(STRING_HEADER));
             self.push(Ins::I32Add);

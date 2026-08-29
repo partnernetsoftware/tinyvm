@@ -201,6 +201,27 @@ pub(crate) const FAULT_THROWN: i32 = 4;
 /// different bugs. The key was in a local the whole time.
 pub(crate) const FAULT_MISSING_STRING_METHOD: i32 = 5;
 
+/// A host function was handed an argument of the wrong type at run time,
+/// and [`FAULT_THROWN`] holds a pooled `"<host>#<n>"` (1-based argument
+/// position) so the host can say which call and which argument.
+///
+/// `print(1)` is refused at compile time because a literal's type is known;
+/// `print(s.length)` is not, because a receiver's type is a run-time fact,
+/// and until now it reached `unbox_string`'s bare `unreachable` inside the
+/// call-site's argument unwrapping. Every script author met it on their
+/// first `print(n)`. A literal String argument skips the check altogether:
+/// the compiler already knows.
+pub(crate) const FAULT_HOST_ARGUMENT: i32 = 6;
+
+/// Emitted where a host argument's tag test fails: the detail first, then
+/// the code, then the caller's `unreachable`.
+pub(crate) fn record_host_argument(detail: i32, out: &mut Vec<Ins>) {
+    out.push(Ins::I32Const(FAULT_THROWN));
+    out.push(Ins::I32Const(detail));
+    out.push(Ins::I32Store(2, 0));
+    store_fault(FAULT_HOST_ARGUMENT, out);
+}
+
 /// `mem[FAULT_THROWN] = ptr` when the pair in (`tag`, `payload`) is a String,
 /// else 0. `tag` and `payload` are the unwind channel's globals.
 pub(crate) fn record_thrown_string(tag: u32, payload: u32, out: &mut Vec<Ins>) {

@@ -234,6 +234,12 @@ pub enum GuestFault {
     /// [`CapabilityBoundary`](Self::CapabilityBoundary), but one that names
     /// itself: [`guest_missing_string_method`] reads the property's name.
     MissingStringMethod,
+    /// A host function was handed a value of the wrong type at run time --
+    /// `print(s.length)`, a Number where the declaration says String. Not
+    /// knowable at compile time (a literal is refused there), so the guest
+    /// records which call and which argument: [`guest_host_argument`] reads
+    /// `"<host>#<n>"`.
+    HostArgument,
 }
 
 /// Read the guest's own account of why it trapped, out of its linear memory.
@@ -296,6 +302,16 @@ pub fn guest_missing_string_method(memory: &[u8]) -> Option<String> {
     fault_detail_string(memory)
 }
 
+/// After a [`GuestFault::HostArgument`]: `"<host>#<n>"`, the host function's
+/// declared name and the 1-based position of the argument whose type was
+/// wrong; `None` for any other fault.
+pub fn guest_host_argument(memory: &[u8]) -> Option<String> {
+    if guest_fault(memory)? != GuestFault::HostArgument {
+        return None;
+    }
+    fault_detail_string(memory)
+}
+
 /// The String record the fault area's second word points at, if any.
 fn fault_detail_string(memory: &[u8]) -> Option<String> {
     let at = runtime::FAULT_THROWN as usize;
@@ -320,6 +336,7 @@ pub fn guest_fault(memory: &[u8]) -> Option<GuestFault> {
         runtime::FAULT_UNCAUGHT_THROW => Some(GuestFault::UncaughtThrow),
         runtime::FAULT_CAPABILITY => Some(GuestFault::CapabilityBoundary),
         runtime::FAULT_MISSING_STRING_METHOD => Some(GuestFault::MissingStringMethod),
+        runtime::FAULT_HOST_ARGUMENT => Some(GuestFault::HostArgument),
         _ => None,
     }
 }
