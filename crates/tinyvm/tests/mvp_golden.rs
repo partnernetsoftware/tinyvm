@@ -1685,7 +1685,10 @@ fn prd_x_leaves_have_suite_edges() {
 const STALE_HINTS: &[(&str, &str)] = &[
     // Regression rows: `[x]` today, so they match no `[ ]` token, but if a
     // leaf is ever re-opened these fire the day its test comes back. At
-    // `7c4f9dc^` all of these tests existed while the PRD still read `[ ]`.
+    // `7c4f9dc^` these tests existed while the PRD still read `[ ]` -- except
+    // `push / pop / map`, which was already `[x]` in this PRD and was stale
+    // only in agenterm's; its row here is a seed for the mechanism, not a
+    // record of a stale leaf in this file.
     ("`break` / `continue`", "break_leaves_the_loop"), // loops_and_replace_m3.rs
     ("split", "split_cuts_at_every_separator"),        // string_methods_m3.rs
     ("toLowerCase", "ascii_lowercases"),               // lowercase_m3.rs
