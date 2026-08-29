@@ -1343,7 +1343,8 @@ fn enumeration_is_refused() {
     // capability, and it is the better sentence: the engine can make the
     // call, it just has nothing to make it on.
     for (source, missing) in [
-        ("const o = {}; return Object.keys(o);", "Object"),
+        // `Object.keys` left this list on 2026-08-29: it is folded to a gated
+        // method call and answers. The rest of the namespace still stops here.
         ("const o = {}; return Object.values(o);", "Object"),
         ("const o = {}; return Object.entries(o);", "Object"),
         ("const o = {}; return Object.assign({}, o);", "Object"),

@@ -330,7 +330,7 @@ pub(crate) mod m1 {
         const_undefined, drop_value, load_local, store_local, unbox_function, unbox_number,
         unbox_string,
     };
-    use crate::repr::{is_array, is_string};
+    use crate::repr::{is_array, is_object, is_string};
     use crate::runtime::{
         self, ALIGN_WORD, Conversions, Ctx, FN_ELEMENT, FN_ENV, FnBuild, Rt, STRING_HEADER,
         StringPool,
@@ -3754,6 +3754,8 @@ pub(crate) mod m1 {
             // per method rather than being one shared check.
             if me.receiver_is_array() {
                 is_array(recv, &mut self.f.body);
+            } else if me.receiver_is_object() {
+                is_object(recv, &mut self.f.body);
             } else {
                 is_string(recv, &mut self.f.body);
             }
@@ -3770,6 +3772,8 @@ pub(crate) mod m1 {
             // on the receiver already in hand.
             if me.receiver_is_array() {
                 is_array(recv, &mut self.f.body);
+            } else if me.receiver_is_object() {
+                is_object(recv, &mut self.f.body);
             } else {
                 is_string(recv, &mut self.f.body);
             }

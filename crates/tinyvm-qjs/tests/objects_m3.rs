@@ -755,7 +755,9 @@ fn object_facilities_this_engine_refuses() {
     // the *binding*. There is no global scope for `Object` to be in, and the
     // sentence is about that rather than about the author.
     for source in [
-        "const o = {}; return Object.keys(o);",
+        // `Object.keys(o)` left this list on 2026-08-29 -- it is folded to a
+        // gated method call and answers (`object_keys_m3.rs`). The bare
+        // property read stays: `Object` is not a value here, only a spelling.
         "const o = {}; return Object.keys;",
     ] {
         let error = refuse(source);

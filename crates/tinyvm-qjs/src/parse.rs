@@ -1475,6 +1475,66 @@ pub(crate) mod m1 {
             }
         }
 
+        /// `Object.keys(x)` folded to `x.__keys()`, or the arguments handed
+        /// back untouched.
+        ///
+        /// ECMA-262 20.1.2.17 with the own-enumerable-string-keys rule, over
+        /// records that hold only such keys -- so "every entry, in insertion
+        /// order" is the whole of it. Folded rather than bound as a global for
+        /// the reason `Number` is: the method layer already gates per name
+        /// and emits nothing for a program that never writes it, and a
+        /// namespace object for one function would be a room with one chair.
+        ///
+        /// Twelve sites in the downstream migration corpus want this, all as
+        /// `for (const k of Object.keys(o))`. A script that declares its own
+        /// `Object` gets its own, as with `Number` and `JSON`.
+        fn fold_object_keys_call(
+            &mut self,
+            callee: &Expr,
+            args: Vec<Expr>,
+            span: Span,
+        ) -> Result<Result<Expr, Vec<Expr>>, CompileError> {
+            let ExprKind::Member {
+                object,
+                key: MemberKey::Static(member),
+            } = &callee.kind
+            else {
+                return Ok(Err(args));
+            };
+            let ExprKind::Name(name) = &object.kind else {
+                return Ok(Err(args));
+            };
+            if name.text != OBJECT || member != "keys" {
+                return Ok(Err(args));
+            }
+            if declared(&self.options.names, OBJECT) || self.is_declared_in_scope(OBJECT) {
+                return Ok(Err(args));
+            }
+            let mut args = args;
+            if args.len() != 1 {
+                return Err(unsupported(
+                    Boundary::FullJs,
+                    &format!("`Object.keys` called with {} arguments; it takes one", args.len()),
+                    span.offset(),
+                ));
+            }
+            self.pending[name.occurrence as usize].folded = true;
+            let receiver = args.remove(0);
+            Ok(Ok(Expr {
+                kind: ExprKind::Call {
+                    callee: Box::new(Expr {
+                        kind: ExprKind::Member {
+                            object: Box::new(receiver),
+                            key: MemberKey::Static(OBJ_KEYS_METHOD.to_owned()),
+                        },
+                        span,
+                    }),
+                    args: Vec::new(),
+                },
+                span,
+            }))
+        }
+
         /// Whether some enclosing scope declares this name.
         ///
         /// The escape hatch that keeps `Number` a *default*: a script that
@@ -2460,6 +2520,13 @@ pub(crate) mod m1 {
                         // run-time TypeError rather than a syntax one.
                         self.relabel(&expr, Role::Call);
                         let args = self.arguments()?;
+                        let args = match self.fold_object_keys_call(&expr, args, span)? {
+                            Ok(folded) => {
+                                expr = folded;
+                                continue;
+                            }
+                            Err(args) => args,
+                        };
                         expr = match self.fold_number_call(&expr, args, span)? {
                             Ok(folded) => folded,
                             Err(args) => Expr {
@@ -3129,6 +3196,12 @@ pub(crate) mod m1 {
     /// name away from the engine's own -- see [`Parser::resolve_one`].
     /// The name a global `Number(x)` is spelled with.
     const NUMBER: &str = "Number";
+    /// The namespace `Object.keys(x)` is spelled under.
+    const OBJECT: &str = "Object";
+    /// The reserved method name `Object.keys(x)` folds to: `x.__keys()`. Two
+    /// leading underscores because no script writes one -- the lexer accepts
+    /// it, the method table recognises it, and nothing else does.
+    const OBJ_KEYS_METHOD: &str = "__keys";
 
     fn declared(names: &Names, name: &str) -> bool {
         match names {

@@ -24,9 +24,9 @@ use super::repr::{
 };
 // `map`'s prefab is the one function that builds an array and calls back into
 // a function value; `box_function` is variant A's and B's property read.
-use super::repr::{box_array, const_bool, const_undefined};
+use super::repr::{box_array, const_bool, const_undefined, unbox_object};
 use super::array::{ARR_ELEMS, ARR_LEN, Ar, ELEM_BYTES, ELEM_PAYLOAD, ELEM_TAG};
-use super::runtime::{ALIGN_WORD, FN_ELEMENT, FN_ENV, FnBuild, Rt, RtFunc};
+use super::runtime::{ALIGN_WORD, ENTRY_BYTES, ENTRY_KEY, FN_ELEMENT, FN_ENV, FnBuild, OBJ_ENTRIES, OBJ_LEN, Rt, RtFunc};
 
 /// Where this set sits, and where the unconditional runtime sits. The same
 /// shape [`super::array::Ctx`] has, for the same reason: a gated set's own
@@ -124,6 +124,10 @@ pub(crate) enum Me {
     /// `s.replaceAll(from, to)` -- ECMA-262 22.1.3.20. What the corpus means
     /// when it writes `.replace`, which is why both ship.
     ReplaceAll,
+    /// `Object.keys(o)` -- ECMA-262 20.1.2.17, arriving as `o.__keys()` from
+    /// the parser's fold. Every entry's key, in insertion order, as a new
+    /// array of Strings.
+    ObjKeys,
     /// `s.toLowerCase()` -- ECMA-262 22.1.3.29. Fourth in the second survey,
     /// and the one whose price was measured before it was chosen: see
     /// `plan/design-case-mapping-decision.md`.
@@ -165,6 +169,7 @@ pub(crate) const SET: &[Me] = &[
     Me::ToLowerCase,
     Me::Replace,
     Me::ReplaceAll,
+    Me::ObjKeys,
     Me::Push,
     Me::Pop,
     Me::MapBound,
@@ -256,6 +261,7 @@ impl Me {
             Me::ToLowerCase => "__m_to_lower_case",
             Me::Replace => "__m_replace",
             Me::ReplaceAll => "__m_replace_all",
+            Me::ObjKeys => "__m_obj_keys",
             Me::Push => "__m_push",
             Me::Pop => "__m_pop",
             Me::MapBound => "__m_map_bound",
@@ -277,6 +283,7 @@ impl Me {
             ("toLowerCase", 0) => Some(Me::ToLowerCase),
             ("replace", 2) => Some(Me::Replace),
             ("replaceAll", 2) => Some(Me::ReplaceAll),
+            ("__keys", 0) => Some(Me::ObjKeys),
             ("push", 1) => Some(Me::Push),
             ("pop", 0) => Some(Me::Pop),
             ("map", 1) => Some(Me::MapBound),
@@ -292,10 +299,18 @@ impl Me {
         matches!(self, Me::Push | Me::Pop | Me::MapBound)
     }
 
+    /// Whether the receiver is an Object record. The third receiver kind: the
+    /// call site used to test "array, else string", which sent an object
+    /// receiver down the property path and into the String refusal --
+    /// `Object.keys({})` trapped on its first day for exactly that.
+    pub(crate) fn receiver_is_object(self) -> bool {
+        matches!(self, Me::ObjKeys)
+    }
+
     /// Whether this method's body reaches into the array set, which the
     /// *array* gate controls. See [`Ctx::array_base`].
     pub(crate) fn needs_arrays(self) -> bool {
-        matches!(self, Me::Push | Me::MapBound | Me::Split)
+        matches!(self, Me::Push | Me::MapBound | Me::Split | Me::ObjKeys)
     }
 
 
@@ -313,7 +328,7 @@ impl Me {
             Me::Split => vec![Me::Substr],
             Me::ToLowerCase => vec![Me::Decode, Me::Encode, Me::LowerCp],
             Me::Decode | Me::Encode | Me::LowerCp => Vec::new(),
-            Me::Replace | Me::ReplaceAll => Vec::new(),
+            Me::Replace | Me::ReplaceAll | Me::ObjKeys => Vec::new(),
             Me::WsWidth | Me::Units | Me::Push | Me::Pop | Me::MapBound => Vec::new(),
         }
     }
@@ -357,6 +372,7 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
         Me::ToLowerCase => (values(1), values(1), to_lower_case(ctx)),
         Me::Replace => (values(3), values(1), replace(ctx, Reach::First)),
         Me::ReplaceAll => (values(3), values(1), replace(ctx, Reach::All)),
+        Me::ObjKeys => (values(1), values(1), obj_keys(ctx)),
         Me::Push => (values(2), values(1), push(ctx)),
         Me::Pop => (values(1), values(1), pop()),
         Me::MapBound => (values(2), values(1), map_bound(ctx)),
@@ -2016,6 +2032,74 @@ fn replace(ctx: &Ctx, reach: Reach) -> FnBuild {
     let inner = vec![Ins::LocalGet(out)];
     let mut boxed = Vec::new();
     box_string(&inner, &mut boxed);
+    f.body.extend(boxed);
+    f
+}
+
+/// `Object.keys(o)` -- ECMA-262 20.1.2.17.
+///
+/// A record here holds only own enumerable string keys, so the answer is
+/// every entry's key in insertion order and nothing has to be filtered. The
+/// keys are the record's own String pointers -- literals in the pool or
+/// strings the script built -- so the new array shares them rather than
+/// copying: a String is immutable, and `__str_eq` compares bytes.
+///
+/// Shape is `map_bound`'s without the callback: new array sized to the
+/// count, one push per entry, box the array.
+fn obj_keys(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(WIDTH);
+    let o = f.local(ValType::I32);
+    let entries = f.local(ValType::I32);
+    let out = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+    let n = f.local(ValType::I32);
+
+    unbox_object(0, &mut f.body);
+    f.body.push(Ins::LocalSet(o));
+
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Load(ALIGN_WORD, OBJ_LEN));
+    b.push(Ins::LocalSet(n));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Load(ALIGN_WORD, OBJ_ENTRIES));
+    b.push(Ins::LocalSet(entries));
+    b.push(Ins::LocalGet(n));
+    b.push(ctx.arr(Ar::New));
+    b.push(Ins::LocalSet(out));
+
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+
+    b.push(Ins::LocalGet(out));
+    let key = vec![
+        Ins::LocalGet(entries),
+        Ins::LocalGet(i),
+        Ins::I32Const(ENTRY_BYTES),
+        Ins::I32Mul,
+        Ins::I32Add,
+        Ins::I32Load(ALIGN_WORD, ENTRY_KEY),
+    ];
+    let mut boxed = Vec::new();
+    box_string(&key, &mut boxed);
+    b.extend(boxed);
+    b.push(ctx.arr(Ar::Push));
+
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    let inner = vec![Ins::LocalGet(out)];
+    let mut boxed = Vec::new();
+    box_array(&inner, &mut boxed);
     f.body.extend(boxed);
     f
 }
