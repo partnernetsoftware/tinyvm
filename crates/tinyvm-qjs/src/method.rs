@@ -20,7 +20,7 @@
 //! by charging every unrelated function value instead.
 
 use super::repr::{
-    self, BlockType, Ins, ValType, WIDTH, box_number, box_string, unbox_array, unbox_string,
+    self, BlockType, Ins, ValType, WIDTH, box_number, box_string, unbox_array, unbox_string, unbox_number,
 };
 // `map`'s prefab is the one function that builds an array and calls back into
 // a function value; `box_function` is variant A's and B's property read.
@@ -132,6 +132,21 @@ pub(crate) enum Me {
     /// and the one whose price was measured before it was chosen: see
     /// `plan/design-case-mapping-decision.md`.
     ToLowerCase,
+    /// `s.slice(start, end)` -- ECMA-262 22.1.3.21, both indices given.
+    /// Positions are UTF-16 code units, as `length` and `indexOf` count
+    /// them; the byte work is in [`Me::SliceCore`], shared with the
+    /// one-argument form so a program using both pays for one body.
+    Slice,
+    /// `s.slice(start)`: `end` defaults to the length. Its own variant
+    /// because a call site's arity is part of what it denotes (see
+    /// [`Me::at_call_site`]); the body is three instructions around the core.
+    SliceFrom,
+    /// `(record, from_units, to_units) -> record`, the shared body of the two
+    /// `slice` forms: code-unit positions to byte offsets in one pass, then
+    /// [`Me::Substr`]. A boundary that falls inside a surrogate pair is a
+    /// lone surrogate, which UTF-8 cannot carry: that traps, for the reason
+    /// `split("")` gives.
+    SliceCore,
     Push,
     /// `a.pop()` -- ECMA-262 23.1.3.22. The **fifth** method, added only to
     /// measure criterion ④: how many variant-specific lines a new method
@@ -167,6 +182,9 @@ pub(crate) const SET: &[Me] = &[
     Me::Encode,
     Me::LowerCp,
     Me::ToLowerCase,
+    Me::Slice,
+    Me::SliceFrom,
+    Me::SliceCore,
     Me::Replace,
     Me::ReplaceAll,
     Me::ObjKeys,
@@ -259,6 +277,9 @@ impl Me {
             Me::Encode => "__m_encode",
             Me::LowerCp => "__m_lower_cp",
             Me::ToLowerCase => "__m_to_lower_case",
+            Me::Slice => "__m_slice",
+            Me::SliceFrom => "__m_slice_from",
+            Me::SliceCore => "__m_slice_core",
             Me::Replace => "__m_replace",
             Me::ReplaceAll => "__m_replace_all",
             Me::ObjKeys => "__m_obj_keys",
@@ -281,6 +302,8 @@ impl Me {
             ("endsWith", 1) => Some(Me::EndsWith),
             ("split", 1) => Some(Me::Split),
             ("toLowerCase", 0) => Some(Me::ToLowerCase),
+            ("slice", 2) => Some(Me::Slice),
+            ("slice", 1) => Some(Me::SliceFrom),
             ("replace", 2) => Some(Me::Replace),
             ("replaceAll", 2) => Some(Me::ReplaceAll),
             ("__keys", 0) => Some(Me::ObjKeys),
@@ -327,6 +350,9 @@ impl Me {
             Me::Includes | Me::StartsWith | Me::EndsWith | Me::Substr => Vec::new(),
             Me::Split => vec![Me::Substr],
             Me::ToLowerCase => vec![Me::Decode, Me::Encode, Me::LowerCp],
+            // Flat, like `ToLowerCase`'s: `want` pulls one level of helpers.
+            Me::Slice | Me::SliceFrom => vec![Me::SliceCore, Me::Units, Me::Substr],
+            Me::SliceCore => vec![Me::Units, Me::Substr],
             Me::Decode | Me::Encode | Me::LowerCp => Vec::new(),
             Me::Replace | Me::ReplaceAll | Me::ObjKeys => Vec::new(),
             Me::WsWidth | Me::Units | Me::Push | Me::Pop | Me::MapBound => Vec::new(),
@@ -370,6 +396,9 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
         ),
         Me::LowerCp => (vec![ValType::I32], vec![ValType::I32], lower_cp(ctx)),
         Me::ToLowerCase => (values(1), values(1), to_lower_case(ctx)),
+        Me::Slice => (values(3), values(1), slice(ctx, true)),
+        Me::SliceFrom => (values(2), values(1), slice(ctx, false)),
+        Me::SliceCore => (vec![i32_, i32_, i32_], vec![i32_], slice_core(ctx)),
         Me::Replace => (values(3), values(1), replace(ctx, Reach::First)),
         Me::ReplaceAll => (values(3), values(1), replace(ctx, Reach::All)),
         Me::ObjKeys => (values(1), values(1), obj_keys(ctx)),
@@ -1772,6 +1801,229 @@ fn to_lower_case(ctx: &Ctx) -> FnBuild {
     f.body.extend(boxed);
     f
 }
+
+/// `s.slice(start[, end])` -- ECMA-262 22.1.3.21.
+///
+/// Fourth in the migration surveys and the one every wave-1 group asked for
+/// by name: `sub_string(a, b)` in rh became `slice(a, b)` in the mapping, and
+/// `test_harness.bounded_record_text` truncates evidence with it.
+///
+/// Each index is a Number (the spec's ToIntegerOrInfinity on other types is
+/// not done: a non-Number traps in `unbox_number`, which is this engine's
+/// standing narrowing for method arguments). NaN is 0; the value is clamped
+/// to `[-len, len]` *before* truncation so the truncation cannot trap, and
+/// the clamp changes nothing inside that range; a negative index counts from
+/// the end. Positions are UTF-16 code units, as `length` counts them.
+///
+/// `has_end` picks the two-argument body; the one-argument form takes `end =
+/// length`. Both are a few instructions around [`Me::SliceCore`].
+fn slice(ctx: &Ctx, has_end: bool) -> FnBuild {
+    let mut f = FnBuild::new(if has_end { 3 * WIDTH } else { 2 * WIDTH });
+    let h = f.local(ValType::I32);
+    let units = f.local(ValType::I32);
+    let from = f.local(ValType::I32);
+    let to = f.local(ValType::I32);
+    let r = f.local(ValType::F64);
+    let lenf = f.local(ValType::F64);
+
+    unbox_string(0, &mut f.body);
+    f.body.push(Ins::LocalSet(h));
+
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(ctx.me(Me::Units));
+    b.push(Ins::LocalSet(units));
+    b.push(Ins::LocalGet(units));
+    b.push(Ins::F64ConvertI32S);
+    b.push(Ins::LocalSet(lenf));
+
+    // One relative index: NaN -> 0; clamp to [-len, len]; truncate; a
+    // negative result counts from the end.
+    let relative = |b: &mut Vec<Ins>, arg: u32, into: u32| {
+        unbox_number(arg, b);
+        b.push(Ins::LocalSet(r));
+        b.push(Ins::LocalGet(r));
+        b.push(Ins::LocalGet(r));
+        b.push(Ins::F64Ne);
+        b.push(Ins::If(BlockType::Empty));
+        b.push(Ins::F64Const(0.0));
+        b.push(Ins::LocalSet(r));
+        b.push(Ins::End);
+        b.push(Ins::LocalGet(r));
+        b.push(Ins::LocalGet(lenf));
+        b.push(Ins::F64Neg);
+        b.push(Ins::F64Lt);
+        b.push(Ins::If(BlockType::Empty));
+        b.push(Ins::LocalGet(lenf));
+        b.push(Ins::F64Neg);
+        b.push(Ins::LocalSet(r));
+        b.push(Ins::End);
+        b.push(Ins::LocalGet(r));
+        b.push(Ins::LocalGet(lenf));
+        b.push(Ins::F64Gt);
+        b.push(Ins::If(BlockType::Empty));
+        b.push(Ins::LocalGet(lenf));
+        b.push(Ins::LocalSet(r));
+        b.push(Ins::End);
+        b.push(Ins::LocalGet(r));
+        b.push(Ins::I32TruncF64S);
+        b.push(Ins::LocalSet(into));
+        b.push(Ins::LocalGet(into));
+        b.push(Ins::I32Const(0));
+        b.push(Ins::I32LtS);
+        b.push(Ins::If(BlockType::Empty));
+        b.push(Ins::LocalGet(units));
+        b.push(Ins::LocalGet(into));
+        b.push(Ins::I32Add);
+        b.push(Ins::LocalSet(into));
+        b.push(Ins::End);
+    };
+    relative(b, WIDTH, from);
+    if has_end {
+        relative(b, 2 * WIDTH, to);
+    } else {
+        b.push(Ins::LocalGet(units));
+        b.push(Ins::LocalSet(to));
+    }
+
+    let inner = vec![
+        Ins::LocalGet(h),
+        Ins::LocalGet(from),
+        Ins::LocalGet(to),
+        ctx.me(Me::SliceCore),
+    ];
+    let mut boxed = Vec::new();
+    box_string(&inner, &mut boxed);
+    f.body.extend(boxed);
+    f
+}
+
+/// `(record, from, to) -> record`: the byte offsets of two code-unit
+/// positions, found in one pass over the bytes, then [`Me::Substr`].
+///
+/// A lead byte starts a code unit; a 4-byte sequence is two. A position that
+/// falls on the second unit of such a pair is a lone surrogate, which no
+/// UTF-8 byte sequence means, so it traps: unrepresentable rather than
+/// unimplemented, as `split("")` says of itself. `from >= to` is the empty
+/// string before any byte is looked at (step 11 of the spec).
+fn slice_core(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(3);
+    let h = 0;
+    let from = 1;
+    let to = 2;
+    let hl = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+    let u = f.local(ValType::I32);
+    let bf = f.local(ValType::I32);
+    let bt = f.local(ValType::I32);
+    let byte = f.local(ValType::I32);
+    let w = f.local(ValType::I32);
+    let b = &mut f.body;
+
+    b.push(Ins::LocalGet(from));
+    b.push(Ins::LocalGet(to));
+    b.push(Ins::I32LtS);
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::I32Const(0));
+    b.push(ctx.me(Me::Substr));
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalSet(hl));
+    // Past the end unless the walk finds them: `to == length` is the
+    // common case and never meets a lead byte.
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::LocalSet(bf));
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::LocalSet(bt));
+
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::LocalSet(byte));
+    b.push(Ins::LocalGet(byte));
+    b.push(Ins::I32Const(0xc0));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Const(0x80));
+    b.push(Ins::I32Ne);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(u));
+    b.push(Ins::LocalGet(from));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalSet(bf));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(u));
+    b.push(Ins::LocalGet(to));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalSet(bt));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(byte));
+    b.push(Ins::I32Const(0xf0));
+    b.push(Ins::I32GeU);
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(w));
+    b.push(Ins::LocalGet(w));
+    b.push(Ins::I32Const(2));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(u));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(from));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::Unreachable);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(u));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(to));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::Unreachable);
+    b.push(Ins::End);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(u));
+    b.push(Ins::LocalGet(w));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(u));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(bf));
+    b.push(Ins::LocalGet(bt));
+    b.push(Ins::LocalGet(bf));
+    b.push(Ins::I32Sub);
+    b.push(ctx.me(Me::Substr));
+    f
+}
+
 
 
 /// Whether an occurrence loop stops after the first match.
