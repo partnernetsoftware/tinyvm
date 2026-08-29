@@ -648,7 +648,15 @@ fn parse_prd_x_leaves(prd: &str) -> Vec<String> {
 // `prd/PRD.md`'s acceptance section now writes the command set down, with this
 // package in it, so the next gap is caught by the gate rather than by someone
 // deciding to look.
-const LEAF_TESTS: [(&str, &str); 247] = [
+const LEAF_TESTS: [(&str, &str); 249] = [
+    (
+        "`break` / `continue`                           见下方方法段的同名行",
+        "break_leaves_the_loop",
+    ),
+    (
+        "split  · toLowerCase  · toUpperCase      [–] 前两个已落地，后者零使用",
+        "split_cuts_at_every_separator",
+    ),
     (
         "`for … of` over an array (13.7.5)              折成索引循环，无新节点",
         "it_visits_every_element_in_order",
