@@ -456,6 +456,52 @@ prefab），所以并行推进、一次验证。
 **状态：候选（未立项）。** 按 `decisive-experiment` §6 的资格，
 候选**不得写结论**——上面每一条都是待验证的输入，不是判决。
 
+## 待办清单（`/goal` 可直接引用这一节）
+
+**这一节存在的理由**：2026-08-29 被问「真的做完了吗」，答案是没有，而当时**没有一处
+地方能一眼答出还剩什么**——能力树里既有已做却仍标 `[ ]` 的（`break`/`continue`、
+`split`），也有做不了却和能做的混在一起的（真机 iPhone）。清单把两者分开。
+
+**怎么用**：`/goal` 引用本节时，「完成」= 下面每条要么状态变 `[x]`，
+要么在本表里带一个**实测数字**写明为何不做。**外部阻塞不算未完成，也不得作为停止的理由。**
+
+### A. 现在就能做，做完可核对
+
+| # | 事 | 为什么（实测） | 做完算什么 |
+|---|----|---------------|-----------|
+| A1 | 核里 16 条红测试逐条归因 | `cargo test -p tinyvm` 296/16，全在卡带 / 转换器 CLI / webkit 差分 / iOS 模拟器容器 | 每条要么修好，要么在本表写明缺什么外部件（工具链？夹具？） |
+| A2 | 金丝雀补成双向 | 它只查「`[x]` 有没有测试」，**不查「`[ ]` 是不是其实做了」**——今天一次抓到 4 条陈旧 `[ ]` | 一条测试能在「做了却还标 `[ ]`」时变红 |
+| A3 | Status 行的版本与测试数上门 | PRD 36 首行停在 rev `0afc88a`/153，实际 `ec67034`/152，靠人问才发现 | 有一条检查在 Status 与实际 pin 不符时失败 |
+| A4 | 一个真实 App target 消费 XCFramework | 验收 #5；打包与冒烟都已绿（`smoke-ios-bridge.sh` exit 0），**只是仓里没有 Xcode 工程** | 仓里有工程且能构建；**不需要设备** |
+| A5 | 验收 #4：两个结构不同的游戏跑通确定性回放 | 相关测试正在 A1 的 16 条里 | #4 变绿 |
+
+### B. 需求为零，**故意不做**（已带数字，不需再决策）
+
+| 事 | 数字 |
+|----|------|
+| `switch` · spread · `do{}while` · 解构 · 默认参数 | 82 个脚本**零使用**（剥离字符串与注释后重数） |
+| 跨 `finally` 的 `break`/`continue` | 语料 **1 处 1 脚本**；现为大声点名拒绝 |
+| `toUpperCase` | `to_lower` 67 次，`to_upper` **0 次** |
+| `parseInt` | 语义与 `Number` 不同，等按名需求，不做别名 |
+| 具名导入 / 默认导出 / 再导出 / 动态 import | 下游 42 处 import **全是**命名空间形式 |
+| hex / octal / 分隔符 · tagged template · `for … in` | 语料零使用 |
+
+### C. 外部阻塞——**点名，且不得作为停止的理由**
+
+| 事 | 挡在哪 |
+|----|--------|
+| 验收 #6：TestFlight 处理与可安装 | Apple 侧处理，需要开发者账号 |
+| 真机 iPhone 生命周期 / 帧时 / 音频 / 输入手感 | 需要一台真机 |
+| Apple 批准后的外部分发 | 同上 |
+
+### D. 候选，未立项（要先立判决性实验才动）
+
+| 事 | 前置 |
+|----|------|
+| 原生降级（AOT / JIT） | 四条前置写在「原生降级」那节；先要找到一个真跨过 1500 轮的载荷 |
+| typed function references · GC · memory64 · exception handling · threads | 各自要 fixture + 独立 oracle + 体积档，见 P2 |
+| slot-B | 未定义 |
+
 ## Capability tree
 
 Legend: `[x]` 已有可执行证据 · `[~]` 部分完成 · `[ ]` 规划 · `[–]` 有意排除
@@ -485,7 +531,7 @@ tinyvm (35)                                      [~]
 │   │   │   ├── 循环导入点名拒绝，不是栈溢出                [x] 判据 ④
 │   │   │   ├── 无 import 的程序零字节                      [x] 判据 ②，与 closures 同一组数
 │   │   │   └── 具名导入 / 默认导出 / 再导出 / 动态 import   [ ] 具名拒绝，需求为零
-│   │   ├── `break` / `continue`                          [ ] **普查从没数过它们**
+│   │   ├── `break` / `continue`                          [x] 见下方方法段的同名行
 │   │   ├── object literals, property access, assignment [x]
 │   │   ├── functions as values, stored/passed/called     [x]
 │   │   ├── Number<->String conversion, per ECMA-262      [x]
@@ -550,7 +596,7 @@ tinyvm (35)                                      [~]
 │   │   │   └── split("") **trap**：孤立代理 UTF-8 表示不了 [具名] 不是未实现
 │   │   │   ├── 字节层比较，对多字节字符精确               [x] é 与 😀 钉住
 │   │   │   └── includes 不经由 indexOf，因此更便宜         [x] 320 vs 440 字节
-│   │   ├── split / toUpperCase / toLowerCase              [ ] 下一批，成本要先量
+│   │   ├── split [x] · toLowerCase [x] · toUpperCase      [–] 前两个已落地，后者零使用
 │   │   │   ├── the mechanism was decided by experiment    [x] research/method-binding
 │   │   │   ├── trim covers all of Zs + LineTerminator     [x] 12.2 + 12.3
 │   │   │   ├── indexOf positions agree with .length       [x] UTF-16 units
