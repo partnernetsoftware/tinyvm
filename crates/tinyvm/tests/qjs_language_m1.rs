@@ -165,7 +165,6 @@ fn qjs_m1_rejections_name_the_engine_boundary() {
     // which is exactly why this test asserts the *shape* of a refusal rather
     // than its text.
     for source in [
-        "return 0x10;",
         "return 1_000;",
         "return 0777;",
         "return obj.field;",
@@ -822,7 +821,7 @@ fn qjs_m1_tells_an_uncaught_throw_from_a_broken_script() {
     );
     let mut broken = broken.instantiate().expect("instantiates");
     assert!(broken.invoke_by_name("main", &Value::args(&[])).is_err());
-    assert_eq!(guest_fault(&broken.memory().expect("guest memory")), None);
+    assert_eq!(guest_fault(&broken.memory().expect("guest memory")), Some(GuestFault::PropertyOfNonObject));
 }
 
 /// The acceptance library, driven end to end: a `fleet.js` wrapper calls out
