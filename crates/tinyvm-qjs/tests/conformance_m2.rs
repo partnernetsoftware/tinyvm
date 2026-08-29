@@ -294,9 +294,6 @@ fn the_decimal_literal_grammar_is_read_whole() {
     // The forms that are still their own grammars.
     for (source, phrase) in [
         ("1n", "BigInt literals"),
-        ("0x10", "hexadecimal number literals"),
-        ("0o17", "octal number literals"),
-        ("0b101", "binary number literals"),
         ("1_000", "numeric separators in number literals"),
         // A fractional *key* needs 6.1.6.1.20 at compile time, and that
         // algorithm lives in the guest. See `parse`'s own note.
@@ -1469,15 +1466,10 @@ fn every_unsupported_construct_names_its_own_capability() {
 const UNSUPPORTED: &[(&str, &str)] = &[
     // -- numeric literal forms ----------------------------------------------
     ("1_000", "numeric separators in number literals"),
-    ("0b101", "binary number literals"),
     ("1n", "BigInt literals"),
-    ("0x10", "hexadecimal number literals"),
-    ("0o17", "octal number literals"),
-    ("0b101", "binary number literals"),
     // `1e3` and `2147483648` left this table when the lexer learned the whole
     // DecimalLiteral grammar; the other radices took their place, and they are
     // grammars of their own rather than a decimal it could not spell.
-    ("0o17", "octal number literals"),
     // -- operators ----------------------------------------------------------
     ("2 ** 3", "exponentiation"),
     ("1 & 2", "bitwise operators"),
@@ -1630,7 +1622,8 @@ fn no_diagnostic_blames_the_script() {
 /// it rather than the whole file.
 #[test]
 fn a_diagnostic_points_at_the_construct_it_names() {
-    assert_eq!(refuse("1 + 0x10").offset, 4);
+    // `0x10` lowers now (2026-08-29); a BigInt still points at itself.
+    assert_eq!(refuse("1 + 1n").offset, 4);
     assert_eq!(refuse("let x = 1; x ** 2;").offset, 13);
     assert_eq!(refuse("let a = 1;\nlet b = 1_000;").offset, 19);
 }

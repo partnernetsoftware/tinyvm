@@ -877,13 +877,11 @@ fn a_reserved_word_after_a_dot_is_a_property_name() {
         "export",
         "enum",
     ];
+    // Since 2026-08-29 every one of them is an IdentifierName after `.`:
+    // the property is written and read back under that name.
     for word in refused {
-        let src = format!("var o = {{}}; return o.{word};");
-        let error = compile_qjs_m1(&src).expect_err(&format!("`o.{word}` is refused today"));
-        assert_eq!(
-            error.message, "this engine does not support a property named with a reserved word yet",
-            "`o.{word}` must name the property boundary, not the keyword"
-        );
+        let src = format!("var o = {{}}; o.{word} = 1; return o.{word};");
+        compile_qjs_m1(&src).unwrap_or_else(|e| panic!("`o.{word}` must be a property name: {e}"));
     }
 }
 

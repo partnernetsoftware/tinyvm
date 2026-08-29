@@ -509,16 +509,37 @@ impl Lexer<'_> {
     fn number(&mut self) -> Result<TokenKind, CompileError> {
         let start = self.pos;
         if self.bytes[start] == b'0' {
-            let phrase = match self.peek_at(1) {
-                Some(b'x' | b'X') => Some("hexadecimal number literals"),
-                Some(b'o' | b'O') => Some("octal number literals"),
-                Some(b'b' | b'B') => Some("binary number literals"),
+            // ECMA-262 12.9.3: `0x`, `0o`, `0b` with at least one digit of
+            // the radix, ending where an identifier could not continue. A
+            // value that does not fit 64 bits is refused rather than rounded:
+            // the ports that wanted these are Win32 message constants, and a
+            // silently rounded constant is the wrong kind of wrong.
+            let radix = match self.peek_at(1) {
+                Some(b'x' | b'X') => Some((16u32, "hexadecimal")),
+                Some(b'o' | b'O') => Some((8, "octal")),
+                Some(b'b' | b'B') => Some((2, "binary")),
                 _ => None,
             };
-            if let Some(phrase) = phrase {
+            if let Some((radix, what)) = radix {
                 self.pos += 2;
-                self.eat_while(|b| b.is_ascii_alphanumeric() || b == b'_');
-                return Ok(subset(phrase));
+                let digits_at = self.pos;
+                self.eat_while(|b| (b as char).is_digit(radix));
+                let digits = &self.src[digits_at..self.pos];
+                let dangling = self.peek().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_');
+                if digits.is_empty() || dangling {
+                    self.eat_while(|b| b.is_ascii_alphanumeric() || b == b'_');
+                    return Err(malformed(
+                        &format!("needs {what} digits after the `0{}` at byte {start}", self.src.as_bytes()[start + 1] as char),
+                        start,
+                    ));
+                }
+                return match u64::from_str_radix(digits, radix) {
+                    Ok(value) => Ok(TokenKind::Int(value)),
+                    Err(_) => Err(malformed(
+                        &format!("a {what} literal wider than 64 bits at byte {start}"),
+                        start,
+                    )),
+                };
             }
             // ECMA-262 12.9.3: a `0` followed by another digit is a
             // LegacyOctalIntegerLiteral (`0777` is 511) or, once an `8` or a

@@ -400,7 +400,6 @@ fn what_is_still_out_of_subset_still_names_itself() {
         ("1 << 2", Boundary::Subset, "bitwise operators"),
         ("1 ? 2 : 3", Boundary::Subset, "conditional expressions"),
         ("`t`", Boundary::Subset, "template literals"),
-        ("0x10", Boundary::Subset, "hexadecimal number literals"),
         // `1.5` stood here until the lexer learned the whole DecimalLiteral
         // grammar; a separator is the numeric form still ahead of it.
         (

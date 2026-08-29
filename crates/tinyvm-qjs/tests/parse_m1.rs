@@ -782,7 +782,6 @@ fn what_the_front_end_cannot_read_yet_names_the_construct() {
         // their place, and `tests/objects_m3.rs` asserts the rest.
         ("({ [k]: 1 });", "computed property keys"),
         ("({ f() { } });", "methods in object literals"),
-        ("$0.new;", "a property named with a reserved word"),
         // `[1];` left this table when the Array milestone landed it; the one
         // array form still ahead of the engine took its place.
         ("[1, , 2];", "elisions in an array literal"),

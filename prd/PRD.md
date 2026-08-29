@@ -657,6 +657,8 @@ tinyvm (35)                                      [~]
 │   │   │   └── the thrown String itself is host-readable (`FAULT_THROWN` pointer, `guest_thrown_message`) [x] 94237cb；下游 agenterm `2cde8b63` 打印它
 │   │   ├── a missing String property names itself at run time (`FAULT_MISSING_STRING_METHOD`), not a bare trap [x] 2026-08-29；`slice`/`substr`/`substring` 曾是三个「不同的 bug」
 │   │   ├── a host argument of the wrong type names the call and the position (`FAULT_HOST_ARGUMENT`) [x] 2026-08-29；字面量 String 参数不再带标签测试
+│   │   ├── `0x`/`0o`/`0b` number literals（无位数或超 64 位具名拒绝） [x] 2026-08-29；Win32 常量不必再写十进制
+│   │   ├── reserved words as property names（`o.class`、`{ do: 1 }`） [x] 2026-08-29；`.` 后与 `:` 前是 IdentifierName
 │   │   ├── the acceptance library runs through a host door [x]
 │   │   └── full JS engine / AOT                          [–]
 │   ├── host                                              [x]

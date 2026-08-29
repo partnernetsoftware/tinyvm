@@ -895,23 +895,14 @@ fn integer_index_keys_are_not_hoisted() {
 /// **IdentifierName**, which by 12.7 includes every ReservedWord. So
 /// `{ class: 1 }` and `o.class` are ordinary JavaScript.
 ///
-/// This engine accepts a property name only where its lexer already had a
-/// token to hand back, which splits the keyword list in a place the grammar
-/// does not.
-///
-/// DIVERGENCE: the second list below is legal JavaScript and is refused. Two
-/// of its members -- `of` and `static`, plus `async`/`await` outside an async
-/// function -- are not ReservedWords at all (12.7.2), so the diagnostic's own
-/// noun is wrong for them: they are ordinary identifiers.
-///
-/// The refusal is honest and the workaround is exact -- a quoted key and a
-/// computed access reach every one of them -- so this is a boundary, not a
-/// trap. `fleet.js` uses none of these as a property name today, so it costs
-/// that file nothing; the list is written out because the split is invisible
-/// from the outside (`{ if: 1 }` works, `{ do: 1 }` does not) and the next
-/// person should read it rather than rediscover it one word at a time.
+/// Until 2026-08-29 this engine accepted a property name only where its
+/// lexer already had a token to hand back, which split the keyword list in a
+/// place the grammar does not (`{ if: 1 }` worked, `{ do: 1 }` did not), and
+/// the cli-smoke port had to write `operation["class"]`. The parser now
+/// takes any reserved word as an IdentifierName after `.` and before `:`;
+/// the quoted-key and computed forms below still work, as they always did.
 #[test]
-fn only_some_reserved_words_may_name_a_property() {
+fn every_reserved_word_may_name_a_property() {
     // Accepted, and reachable by dotted access.
     for word in [
         "if",
@@ -970,16 +961,12 @@ fn only_some_reserved_words_may_name_a_property() {
         "super",
         "enum",
     ] {
-        refuses_capability(
-            &format!("const o = {{ {word}: 1 }}; return 0;"),
-            "a property named with a reserved word",
-            Boundary::FullJs,
-        );
-        refuses_capability(
-            &format!("const o = {{ \"{word}\": 1 }}; return o.{word};"),
-            "a property named with a reserved word",
-            Boundary::FullJs,
-        );
+        // Since 2026-08-29 both forms lower: a reserved word is an
+        // IdentifierName before `:` and after `.` (13.2.5, 13.3.2).
+        compile_qjs_m1(&format!("const o = {{ {word}: 1 }}; return 0;"))
+            .unwrap_or_else(|e| panic!("{{ {word}: 1 }} must lower: {e}"));
+        compile_qjs_m1(&format!("const o = {{ \"{word}\": 1 }}; return o.{word};"))
+            .unwrap_or_else(|e| panic!("o.{word} must lower: {e}"));
         // The workaround, which is why this is a boundary and not a wall: the
         // property itself exists, in the right slot, under the right name.
         number(
@@ -1489,7 +1476,6 @@ fn every_refusal_names_a_boundary_and_a_place() {
         "const o = { __proto__: {} }; return 0;",
         "const a = {}; const o = { ...a }; return 0;",
         "const k = \"a\"; const o = { [k]: 1 }; return 0;",
-        "const o = { class: 1 }; return 0;",
         "const o = {}; delete o.a; return 0;",
         "const o = {}; return \"a\" in o;",
         "const o = {}; return o instanceof Object;",

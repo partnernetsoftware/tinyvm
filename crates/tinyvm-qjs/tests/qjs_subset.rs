@@ -206,7 +206,6 @@ fn identifiers_are_not_supported_yet() {
 fn non_integer_numbers_are_not_supported_yet() {
     assert_capability_boundary("1.5", "32-bit");
     assert_capability_boundary("1e3", "32-bit");
-    assert_capability_boundary("0x10", "hexadecimal");
     assert_capability_boundary("1n", "BigInt");
 }
 

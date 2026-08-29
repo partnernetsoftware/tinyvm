@@ -656,7 +656,7 @@ fn parse_prd_leaves(prd: &str, marker: &str) -> Vec<String> {
 // `prd/PRD.md`'s acceptance section now writes the command set down, with this
 // package in it, so the next gap is caught by the gate rather than by someone
 // deciding to look.
-const LEAF_TESTS: [(&str, &str); 255] = [
+const LEAF_TESTS: [(&str, &str); 257] = [
     (
         "`break` / `continue`                           见下方方法段的同名行",
         "break_leaves_the_loop",
@@ -1030,6 +1030,14 @@ const LEAF_TESTS: [(&str, &str); 255] = [
     (
         "a host argument of the wrong type names the call and the position (`FAULT_HOST_ARGUMENT`)  2026-08-29；字面量 String 参数不再带标签测试",
         "a_number_where_a_string_is_declared_names_the_call_and_the_argument",
+    ),
+    (
+        "`0x`/`0o`/`0b` number literals（无位数或超 64 位具名拒绝）  2026-08-29；Win32 常量不必再写十进制",
+        "the_three_radices_answer",
+    ),
+    (
+        "reserved words as property names（`o.class`、`{ do: 1 }`）  2026-08-29；`.` 后与 `:` 前是 IdentifierName",
+        "reserved_words_name_properties_after_a_dot_and_in_a_literal",
     ),
     ("iOS runtime boundary", "native_interpreter_boundary"),
     ("interpret wasm", "eval_bytes"),

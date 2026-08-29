@@ -3264,6 +3264,16 @@ pub(crate) mod m1 {
     fn identifier_name(kind: &TokenKind) -> Option<String> {
         let word = match kind {
             TokenKind::Ident(name) => return Some(name.clone()),
+            // A reserved word this engine cannot lower as a *statement* is
+            // still an IdentifierName after `.` and before `:` (ECMA-262
+            // 13.3.2, 13.2.5): `operation.class` is a property, not a class.
+            // The lexer spells such a token "the `word` keyword".
+            TokenKind::Unsupported(u)
+                if u.boundary == Boundary::FullJs && u.phrase.ends_with(" keyword") =>
+            {
+                let inner = u.phrase.strip_prefix("the `")?.strip_suffix("` keyword")?;
+                return Some(inner.to_string());
+            }
             TokenKind::Function => "function",
             TokenKind::Return => "return",
             TokenKind::If => "if",

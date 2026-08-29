@@ -257,7 +257,8 @@ fn finding_4_leading_zero_changes_the_value() {
 
 #[test]
 fn guard_the_other_radix_prefixes_name_their_boundary() {
-    for source in ["return 0x1f;", "return 0o17;", "return 0b11;", "return 1n;"] {
+    // Hex, octal and binary lower since 2026-08-29; BigInt still names itself.
+    for source in ["return 1n;"] {
         let error = refuse(source);
         assert!(
             error.message.starts_with("this engine does not support"),
