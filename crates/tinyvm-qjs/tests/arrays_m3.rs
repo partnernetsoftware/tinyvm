@@ -613,9 +613,13 @@ fn a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was() {
     // not move. And by 244 more the same night: the scan and both copies
     // went four bytes at a time (29 steps a byte on a long string, from 119).
     // And 88 more for the fraction fast path (`1.5`: 1 336 -> 539 steps).
+    // Programs that read a static property moved by +24 the same night:
+    // `__obj_get`'s arm that names the key read off undefined/null/a
+    // primitive (`FAULT_PROPERTY_OF_NON_OBJECT`), behind the same gate as
+    // the String arm. `"return 1;"` did not move.
     for (source, want) in [
         ("return 1;", 9_940),
-        ("let o = {a:1}; o.b = 2; return o.a;", 10_084) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_108) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
         // A computed key whose *value* the text does not settle. This one
         // moved **up** by 117, and not for arrays: a computed key could
         // evaluate to `"length"`, so it turns on the string-`.length` arm of

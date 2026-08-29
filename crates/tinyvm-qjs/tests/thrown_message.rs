@@ -57,7 +57,7 @@ fn a_caught_throw_leaves_no_message() {
 /// epilogue that only a program with an unwind channel has.
 #[test]
 fn a_program_that_never_throws_pays_nothing() {
-    for (source, want) in [("return 1;", 9_940), ("let o = {a:1}; o.b = 2; return o.a;", 10_084) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */] {
+    for (source, want) in [("return 1;", 9_940), ("let o = {a:1}; o.b = 2; return o.a;", 10_108) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(n, want, "{source:?} is {n} bytes");
     }

@@ -381,7 +381,7 @@ fn an_ordinary_fault_does_not_claim_the_heap_ran_out() {
         .invoke_by_name("main", &Value::args(&[]))
         .expect_err("undefined.a is a fault");
     let memory = instance.memory().expect("memory zero");
-    assert_eq!(guest_fault(&memory), None);
+    assert_eq!(guest_fault(&memory), Some(GuestFault::PropertyOfNonObject));
 }
 
 // =========================================================================
@@ -801,7 +801,7 @@ fn the_fault_word_is_about_the_call_that_just_failed() {
         .expect_err("call two is a type error");
     assert_eq!(
         guest_fault(&instance.memory().expect("memory")),
-        None,
+        Some(GuestFault::PropertyOfNonObject),
         "call two is `undefined.a`, not a budget problem -- the word must have been cleared"
     );
 }

@@ -240,6 +240,10 @@ pub enum GuestFault {
     /// records which call and which argument: [`guest_host_argument`] reads
     /// `"<host>#<n>"`.
     HostArgument,
+    /// The script read a property of `undefined`, `null`, a Number or a
+    /// Boolean. ECMA-262 throws a TypeError; this engine stops, and names
+    /// the key: [`guest_property_of_non_object`].
+    PropertyOfNonObject,
 }
 
 /// Read the guest's own account of why it trapped, out of its linear memory.
@@ -312,6 +316,15 @@ pub fn guest_host_argument(memory: &[u8]) -> Option<String> {
     fault_detail_string(memory)
 }
 
+/// After a [`GuestFault::PropertyOfNonObject`]: the key the script read
+/// off a value that has no properties; `None` for any other fault.
+pub fn guest_property_of_non_object(memory: &[u8]) -> Option<String> {
+    if guest_fault(memory)? != GuestFault::PropertyOfNonObject {
+        return None;
+    }
+    fault_detail_string(memory)
+}
+
 /// The String record the fault area's second word points at, if any.
 fn fault_detail_string(memory: &[u8]) -> Option<String> {
     let at = runtime::FAULT_THROWN as usize;
@@ -337,6 +350,7 @@ pub fn guest_fault(memory: &[u8]) -> Option<GuestFault> {
         runtime::FAULT_CAPABILITY => Some(GuestFault::CapabilityBoundary),
         runtime::FAULT_MISSING_STRING_METHOD => Some(GuestFault::MissingStringMethod),
         runtime::FAULT_HOST_ARGUMENT => Some(GuestFault::HostArgument),
+        runtime::FAULT_PROPERTY_OF_NON_OBJECT => Some(GuestFault::PropertyOfNonObject),
         _ => None,
     }
 }

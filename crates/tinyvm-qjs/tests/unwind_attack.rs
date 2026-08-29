@@ -997,9 +997,11 @@ fn an_uncaught_throw_is_visible_through_the_public_guest_fault_door() {
     // is a different answer now, which is the whole point of the code.
     let mut broken = instantiate("const u = undefined; return u.a;");
     let _ = broken.invoke_by_name("main", &Value::args(&[]));
+    // Since 2026-08-29 the word names the key read off `undefined` -- which
+    // is still not a throw, and is the point.
     assert_eq!(
         tinyvm_qjs::guest_fault(&broken.memory().expect("guest memory")),
-        None,
+        Some(tinyvm_qjs::GuestFault::PropertyOfNonObject),
         "a broken script is not a throw"
     );
 

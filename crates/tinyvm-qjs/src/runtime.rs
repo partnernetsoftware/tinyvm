@@ -213,6 +213,13 @@ pub(crate) const FAULT_MISSING_STRING_METHOD: i32 = 5;
 /// the compiler already knows.
 pub(crate) const FAULT_HOST_ARGUMENT: i32 = 6;
 
+/// The script read a property of a value that is neither an Object nor a
+/// String -- `undefined.x`, `null.x`, `(1).x` -- and [`FAULT_THROWN`] holds
+/// the key's record. ECMA-262 throws a TypeError here; this engine stops,
+/// and until now stopped bare. Every wave-2 group guarded JSON fields with
+/// `=== undefined` first because the trap said nothing.
+pub(crate) const FAULT_PROPERTY_OF_NON_OBJECT: i32 = 7;
+
 /// Emitted where a host argument's tag test fails: the detail first, then
 /// the code, then the caller's `unreachable`.
 pub(crate) fn record_host_argument(detail: i32, out: &mut Vec<Ins>) {
@@ -1752,6 +1759,23 @@ fn obj_get(ctx: &Ctx) -> FnBuild {
         } else {
             store_fault(FAULT_CAPABILITY, &mut arm);
         }
+        arm.push(Ins::Unreachable);
+        arm.push(Ins::End);
+        f.body.extend(arm);
+    }
+
+    // Not an Object either -- `undefined.x`, `null.x`, `(1).x`: the same
+    // gate, the same detail word, the seventh code. `unbox_object` below
+    // would trap bare.
+    if ctx.string_member {
+        let mut arm = Vec::new();
+        is_object(0, &mut arm);
+        arm.push(Ins::I32Eqz);
+        arm.push(Ins::If(BlockType::Empty));
+        arm.push(Ins::I32Const(FAULT_THROWN));
+        arm.push(Ins::LocalGet(key));
+        arm.push(Ins::I32Store(2, 0));
+        store_fault(FAULT_PROPERTY_OF_NON_OBJECT, &mut arm);
         arm.push(Ins::Unreachable);
         arm.push(Ins::End);
         f.body.extend(arm);
