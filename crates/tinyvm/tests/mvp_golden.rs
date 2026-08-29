@@ -607,6 +607,14 @@ fn prd_path() -> PathBuf {
 
 /// `[x]` node tokens inside the first fenced tree of the PRD.
 fn parse_prd_x_leaves(prd: &str) -> Vec<String> {
+    parse_prd_leaves(prd, "[x]")
+}
+
+/// Node tokens carrying `marker` inside the PRD's fenced trees. The body is
+/// the `[x]` parser's, verbatim, with the marker parameterised: `LEAF_TESTS`
+/// keys are exact whole-line tokens, so any drift in the normalisation here
+/// would turn every forward mapping red at once.
+fn parse_prd_leaves(prd: &str, marker: &str) -> Vec<String> {
     let mut in_fence = false;
     let mut leaves = Vec::new();
     for line in prd.lines() {
@@ -615,11 +623,11 @@ fn parse_prd_x_leaves(prd: &str) -> Vec<String> {
             in_fence = !in_fence;
             continue;
         }
-        if !in_fence || !line.contains("[x]") {
+        if !in_fence || !line.contains(marker) {
             continue;
         }
         let token: String = line
-            .replace("[x]", "")
+            .replace(marker, "")
             .chars()
             .map(|c| match c {
                 '│' | '├' | '└' | '─' | '|' => ' ',
@@ -785,10 +793,7 @@ const LEAF_TESTS: [(&str, &str); 249] = [
         "a write past the end fills, no holes",
         "a_write_past_the_end_extends_the_array_with_undefined",
     ),
-    (
-        "JSON reads and writes one",
-        "json_parse_builds_an_array",
-    ),
+    ("JSON reads and writes one", "json_parse_builds_an_array"),
     (
         "methods: push / pop / map                  see below",
         "push_mutates_the_receiver_and_returns_the_new_length",
@@ -909,7 +914,6 @@ const LEAF_TESTS: [(&str, &str); 249] = [
         "adding a method costs non-callers nothing   per-method gate",
         "length_is_still_a_value_and_not_a_method",
     ),
-
     ("eval(bytes)", "eval_bytes"),
     (
         "in-guest throughput gate",
@@ -1652,6 +1656,126 @@ fn prd_x_leaves_have_suite_edges() {
     assert!(
         missing.is_empty(),
         "PRD [x] leaves with no executed backing: {missing:?}"
+    );
+}
+
+/// Leaf phrase -> the test that exists once the leaf is built. Substring on
+/// the leaf token, exact on the test name.
+///
+/// The `[ ]` line's comment column is rewritten every time a leaf is
+/// re-planned; the feature phrase is the stable part, so this table keys on
+/// the phrase rather than on the whole token the way `LEAF_TESTS` does. Add a
+/// row at the moment a `[ ]` leaf is picked up as work, before its test lands;
+/// the row then trips the day the test lands and nobody re-marks the PRD.
+///
+/// The test named must be one asserting the feature *works* -- never a test
+/// that merely mentions the topic. Two leaves in the tree make any
+/// topic-based heuristic fire wrongly: `exception handling` stays `[ ]` by
+/// design (the wasm EH proposal, not JS `throw`, see the prose below the
+/// tree), and `parse_int_is_not_silently_number` asserts a *refusal*, so
+/// neither may appear here. Same for the `*_is_refused_by_name` and
+/// `*_name_themselves` tests: a leaf whose only test is its refusal is
+/// correctly `[ ]`.
+///
+/// On 2026-08-29 four leaves were found done-but-`[ ]` (commit 7c4f9dc): two
+/// here (`break`/`continue`, `split`/`toLowerCase`), two in the downstream
+/// PRD (`push`/`map`, the production call-site migration). `push`/`map` has a
+/// row because this tree carries the same leaf; the call-site migration lives
+/// only in the other repository's tree and is out of this test's reach.
+const STALE_HINTS: &[(&str, &str)] = &[
+    // Regression rows: `[x]` today, so they match no `[ ]` token, but if a
+    // leaf is ever re-opened these fire the day its test comes back. At
+    // `7c4f9dc^` all of these tests existed while the PRD still read `[ ]`.
+    ("`break` / `continue`", "break_leaves_the_loop"), // loops_and_replace_m3.rs
+    ("split", "split_cuts_at_every_separator"),        // string_methods_m3.rs
+    ("toLowerCase", "ascii_lowercases"),               // lowercase_m3.rs
+    (
+        "push / pop / map",
+        "push_mutates_the_receiver_and_returns_the_new_length",
+    ), // method_conformance.rs
+    ("push / pop / map", "map_calls_back_into_a_function_value"), // method_conformance.rs
+    // Open leaves, test names chosen now so the row exists before the work.
+    (
+        "无声明形式 `for (x of y)`",
+        "an_assignment_target_can_be_the_loop_variable",
+    ), // for_of_m3.rs
+    ("`for … in`", "for_in_enumerates_own_properties_in_order"), // for_of_m3.rs
+    (
+        "具名导入 / 默认导出 / 再导出 / 动态 import",
+        "a_named_import_binds_one_export",
+    ), // modules_m3.rs
+    (
+        "hex / octal / binary / separators",
+        "a_hex_literal_has_the_value_of_its_digits",
+    ), // lex_m1.rs
+    ("tagged templates", "a_tag_receives_the_raw_strings_array"), // templates_m3.rs
+    ("`parseInt`", "parse_int_reads_a_prefix_in_the_given_radix"), // loops_and_replace_m3.rs
+    (
+        "every other method",
+        "every_shipped_method_has_a_row_and_a_body",
+    ), // method_conformance.rs
+    (
+        "load-time lowering / stack-top caching",
+        "a_lowered_module_runs_the_same_goldens",
+    ), // interpreter_throughput.rs
+    (
+        "typed function references",
+        "a_typed_funcref_call_checks_the_signature_at_load",
+    ), // standard_feature_matrix.rs
+    (
+        "memory64 proposal",
+        "a_memory64_module_addresses_past_four_gib",
+    ), // standard_feature_matrix.rs
+    ("exception handling", "a_try_table_catches_a_tagged_throw"), // standard_feature_matrix.rs
+    (
+        "threads/shared memory",
+        "an_atomic_rmw_on_shared_memory_is_ordered",
+    ), // standard_feature_matrix.rs
+];
+
+/// The inverse of `prd_x_leaves_have_suite_edges`: a `[ ]` leaf whose
+/// shipped-test already exists is done and nobody re-marked it.
+///
+/// "Done" is measured the same way as the forward canary measures "backed":
+/// the named test exists in `suite_test_names()`. Running it from here would
+/// be a nested `cargo test` per row and would turn a 0.02s gate into a build;
+/// a test that exists and fails is a red gate in its own suite, in the same
+/// command set the PRD's acceptance section prescribes.
+///
+/// The hygiene half: every hint's needle must still match a token in the
+/// tree under some marker, so a renamed leaf cannot silently orphan its row.
+/// The hint's test is *not* required to exist -- most rows are written
+/// before their test by design.
+#[test]
+fn prd_unchecked_leaves_are_not_already_done() {
+    let prd = fs::read_to_string(prd_path()).expect("prd/PRD.md");
+    let unchecked = parse_prd_leaves(&prd, "[ ]");
+    assert!(!unchecked.is_empty(), "PRD fence must list [ ] leaves");
+    let tests = suite_test_names();
+    let mut stale = Vec::new();
+    for leaf in &unchecked {
+        for (needle, test) in STALE_HINTS {
+            if leaf.contains(needle) && tests.contains(*test) {
+                stale.push(format!(
+                    "leaf `{leaf}` is done ({test} exists) but still [ ]"
+                ));
+            }
+        }
+    }
+    assert!(stale.is_empty(), "{}", stale.join("\n"));
+
+    let mut every_token: Vec<String> = Vec::new();
+    for marker in ["[x]", "[ ]", "[~]", "[–]"] {
+        every_token.extend(parse_prd_leaves(&prd, marker));
+    }
+    let orphaned: Vec<&str> = STALE_HINTS
+        .iter()
+        .map(|(needle, _)| *needle)
+        .filter(|needle| !every_token.iter().any(|token| token.contains(needle)))
+        .collect();
+    assert!(
+        orphaned.is_empty(),
+        "STALE_HINTS needles that match no PRD tree token: {orphaned:?}"
     );
 }
 
