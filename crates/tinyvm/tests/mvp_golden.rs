@@ -638,7 +638,129 @@ fn parse_prd_x_leaves(prd: &str) -> Vec<String> {
 /// test must exist in this package's integration tests and assert something
 /// concrete — the point of naming it here is that a leaf can no longer be
 /// satisfied by a text row.
-const LEAF_TESTS: [(&str, &str); 219] = [
+// 28 leaves added 2026-08-29, in one batch, and that batch size is the finding
+// rather than the work. This canary requires every `[x]` in the capability
+// tree to name a test that runs, and it went unrun for days of PRD edits
+// because the verification anybody actually typed was `cargo test -p
+// tinyvm-qjs` -- a package this test does not live in. The claims were true;
+// nothing was checking that they were.
+//
+// `prd/PRD.md`'s acceptance section now writes the command set down, with this
+// package in it, so the next gap is caught by the gate rather than by someone
+// deciding to look.
+const LEAF_TESTS: [(&str, &str); 247] = [
+    (
+        "`for … of` over an array (13.7.5)              折成索引循环，无新节点",
+        "it_visits_every_element_in_order",
+    ),
+    (
+        "元素每轮是新绑定                             白拿：声明在循环体里",
+        "each_pass_binds_a_new_element_so_closures_do_not_share",
+    ),
+    (
+        "length 每轮重读，body 里 pop 会被看见         与数组迭代器一致",
+        "the_length_is_read_each_pass_rather_than_cached",
+    ),
+    (
+        "字符串 / 非数组按名拒绝，可 catch             不静默跑零轮",
+        "a_non_array_is_refused_rather_than_silently_iterated_zero_times",
+    ),
+    (
+        "模块：`import * as` + `export`（16.2）          编译期取入，仍是一个 .wasm",
+        "an_exported_function_is_reachable_through_the_alias",
+    ),
+    (
+        "宿主给解析回调，编译器不碰文件系统           与「核只吃字节」同一条纪律",
+        "an_unresolvable_specifier_is_named",
+    ),
+    (
+        "命名空间双向不漏（模块↔导入者）              判据 ③，两条测试",
+        "an_unexported_name_is_not_visible_to_the_importer",
+    ),
+    (
+        "循环导入点名拒绝，不是栈溢出                 判据 ④",
+        "a_cycle_is_refused_and_both_specifiers_are_named",
+    ),
+    (
+        "无 import 的程序零字节                       判据 ②，与 closures 同一组数",
+        "a_program_without_imports_pays_nothing_for_them",
+    ),
+    (
+        "一个声明执行两次 = 两个绑定 (14.3.1)         见下",
+        "a_let_declared_in_a_loop_body_is_a_new_binding_each_pass",
+    ),
+    (
+        "函数内的 let / const（含 while / 嵌套块）  012，cell 移到声明处",
+        "a_while_body_gets_the_same_treatment_because_the_rule_is_about_declarations",
+    ),
+    (
+        "脚本层的 let / const                      012，循环内的改走捕获",
+        "the_same_holds_at_script_level_where_the_storage_differs",
+    ),
+    (
+        "不在循环里的脚本绑定仍是 global        判据 ④：不许为它涨字节",
+        "a_script_binding_read_from_a_function_outside_a_loop_still_works",
+    ),
+    (
+        "`for` 头部的 let 每轮复制 (13.7.4.7)       012，body 之后 update 之前",
+        "the_for_header_binding_is_fresh_each_pass",
+    ),
+    (
+        "`while` 闭包看到末值                  **对照**：333 是正确答案",
+        "a_while_closing_over_an_outer_variable_still_sees_the_last_value",
+    ),
+    (
+        "每多一个循环内被捕获的绑定                +83 字节（斜率，已写成测试）",
+        "what_a_per_iteration_binding_costs_is_written_down",
+    ),
+    (
+        "includes / startsWith / endsWith                需求普查前两名",
+        "includes_answers_whether_the_substring_occurs",
+    ),
+    (
+        "split（非空分隔符）+ 共享的 substr 辅助件        426 字节",
+        "split_cuts_at_every_separator",
+    ),
+    (
+        "toLowerCase（Unicode 区间表）                    **8 836 字节**，价目公开",
+        "caf_uppercase_lowercases_correctly",
+    ),
+    (
+        "不调用它的程序零字节                         表在门后",
+        "a_program_that_never_lowercases_carries_none_of_it",
+    ),
+    (
+        "中文 / emoji / 已小写：原样返回不 trap        判据 ②",
+        "text_with_no_case_passes_through_untouched",
+    ),
+    (
+        "replace（首个）/ replaceAll（全部）              525 + 515 字节，各发射一份",
+        "replace_is_first_only_and_replace_all_is_every_one",
+    ),
+    (
+        "`break` / `continue`（无标签）                   continue 自带标签，按需发射",
+        "break_leaves_the_loop",
+    ),
+    (
+        "第四类 fault code：运行期能力边界                  7 字节，只有到那条臂的程序付",
+        "a_missing_string_property_reports_a_capability_boundary",
+    ),
+    (
+        "`Number(x)`：折成 `+x`，零运行时                  缺的只是名字，转换早就有",
+        "number_converts_the_way_unary_plus_does",
+    ),
+    (
+        "空片段保留（前导 / 尾随 / 连续分隔符）       最容易漏掉的边界",
+        "empty_pieces_are_kept",
+    ),
+    (
+        "字节层比较，对多字节字符精确                é 与 😀 钉住",
+        "multi_byte_characters_match_as_characters",
+    ),
+    (
+        "includes 不经由 indexOf，因此更便宜          320 vs 440 字节",
+        "includes_is_cheaper_than_index_of_because_it_needs_no_position",
+    ),
     (
         "arrays: the eighth tag, a dense vector",
         "an_array_literal_holds_its_elements_in_source_order",

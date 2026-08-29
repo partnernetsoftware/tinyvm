@@ -148,12 +148,26 @@ fn qjs_m1_bounds_nesting_with_a_diagnostic_not_an_abort() {
 /// engine stops.
 #[test]
 fn qjs_m1_rejections_name_the_engine_boundary() {
+    // Two rows left this list on 2026-08-29, and **not** because anything was
+    // decided today: `return 1.5;` has compiled since the DecimalLiteral
+    // grammar landed at rev `ab29522`, and `return [1, 2];` since arrays
+    // landed at `048bcf2`. The test has been red since then, and nobody saw
+    // it, because the verification people actually typed was
+    // `cargo test -p tinyvm-qjs` and this file lives in the *other* package.
+    //
+    // `prd/PRD.md`'s acceptance section now writes down a command set with
+    // this package in it. That is the fix; this row edit is only the backlog
+    // it uncovered.
+    //
+    // `return obj.field;` stays, and for a reason worth keeping straight:
+    // property access landed too, so what is refused now is the undeclared
+    // `obj` rather than the `.field`. Same sentence, different boundary --
+    // which is exactly why this test asserts the *shape* of a refusal rather
+    // than its text.
     for source in [
-        "return 1.5;",
         "return 0x10;",
         "return 1_000;",
         "return 0777;",
-        "return [1, 2];",
         "return obj.field;",
         "class C {}",
         "return x; let x = 1;",

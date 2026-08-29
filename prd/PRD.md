@@ -1208,6 +1208,50 @@ an oracle and never becomes the nostalgia-arcade runtime.
 
 ## Acceptance and evidence
 
+### 验证口径（2026-08-29 立，之前没有）
+
+在此之前本仓没有写下一条「跑什么算验过」。语言侧一直跑 `cargo test -p tinyvm-qjs`，
+而 **iOS 侧那三步一次都没被任何口径引用过**——多天的编译器改动进去时，
+没有任何东西说 iOS 还编得过。所以口径写成三条，不是一条：
+
+```sh
+cargo test -p tinyvm-qjs --no-fail-fast     # 语言与编译器
+cargo test -p tinyvm --no-fail-fast         # 执行核
+sh crates/tinyvm/smoke-ios-bridge.sh        # iOS：XCFramework + Swift 包 + 冒烟
+```
+
+第三条需要 macOS + Xcode 与三个 rust target
+（`aarch64-apple-ios`、`aarch64-apple-ios-sim`、`x86_64-apple-ios`），
+**在别的平台上它跑不了，那时要如实写「未跑」而不是跳过不提**。
+它打印自己的链接尺寸，那串数字就是回归基线（见 P0 那张表）。
+
+**为什么第三条非有不可**：改编译器时不碰核，看起来与 iOS 无关——
+2026-08-29 那次确实无关，绿是运气。**但「这次无关」不是一条能被验证的性质，
+而「跑一遍」是。**
+
+**基线（2026-08-29 立）**：第一条 **980 / 0**；第二条 **296 / 16**；第三条 **exit 0**。
+
+第二条那 16 条**全部既存**，都在游戏卡带、转换器 CLI、webkit 差分与 iOS 模拟器容器上，
+需要外部工具链或夹具，本会话没碰过 `crates/tinyvm/src/`。
+判据仍是「**失败集合逐条不变**」，不是「失败数为零」。
+
+### 写下口径的第一分钟就照出两条烂账
+
+**一、PRD 金丝雀红着，而它红的正是我自己写的 `[x]`。**
+`prd_x_leaves_have_suite_edges` 要求能力树里每一个 `[x]` 叶子都指向一条**会跑的测试**。
+它一次列出 **28 片没有测试背书的叶子——全是 2026-08-29 这几天加的**。
+声称本身是真的（那些测试都存在且过），但**没有任何东西在核对它们**：
+金丝雀住在 `tinyvm` 包里，而大家手打的验证是 `cargo test -p tinyvm-qjs`。
+**一个尽职的门，问不到它就等于没有。**
+
+**二、核里的 qjs 哨兵红了很久，没人知道。**
+`qjs_m1_rejections_name_the_engine_boundary` 断言 `return 1.5;` 与 `return [1, 2];`
+会被拒——而它们分别在 `ab29522`（DecimalLiteral）与 `048bcf2`（数组）就能编了。
+**那条测试从那时起就是红的**，同样因为它住在没人跑的包里。
+
+两条是同一个病：**验证口径没写下来，于是它退化成「谁记得跑什么」。**
+这一节就是治它的药，而它开出的第一张单子就是上面这两条。
+
 The runtime foundation is complete only when all of the following are true:
 
 1. Standard modules are independently validated and every accepted proposal has decode,
