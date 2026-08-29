@@ -19,6 +19,12 @@ fn log_host() -> Vec<HostFn> {
         field: "log".to_string(),
         params: vec![HostParam::StrPtrLen, HostParam::StrPtrLen],
         result: HostResult::Void,
+    }, HostFn {
+        name: "at".to_string(),
+        module: "sys".to_string(),
+        field: "at".to_string(),
+        params: vec![HostParam::I32, HostParam::F64],
+        result: HostResult::Void,
     }]
 }
 
@@ -39,6 +45,7 @@ fn run(source: &str) -> (bool, Option<GuestFault>, Option<String>) {
     // A program that never calls `log` imports nothing; binding is then
     // nothing to do rather than a failure.
     let _ = module.bind_import_typed("sys", "log", |_args: &[Val], _memory: &mut [u8]| Ok(Vec::new()));
+    let _ = module.bind_import_typed("sys", "at", |_args: &[Val], _memory: &mut [u8]| Ok(Vec::new()));
     let mut instance = module.instantiate().expect("instantiates");
     let ok = instance.invoke_by_name("main", &Value::args(&[])).is_ok();
     let memory = instance.memory().expect("guest memory");
@@ -85,4 +92,21 @@ fn the_reader_answers_only_its_own_fault() {
     let (_, fault, detail) = run(r#"throw "log#9";"#);
     assert_eq!(fault, Some(GuestFault::UncaughtThrow));
     assert_eq!(detail, None);
+}
+
+/// Number parameters name themselves the same way: a String where the door
+/// wants an I32 or an F64.
+#[test]
+fn a_string_where_a_number_is_declared_names_the_call_and_the_argument() {
+    let (ok, fault, detail) = run(r#"let s = "3"; at(1, s);"#);
+    assert!(!ok);
+    assert_eq!(fault, Some(GuestFault::HostArgument));
+    assert_eq!(detail.as_deref(), Some("at#2"));
+    // A literal String there is refused at compile time; a variable is not.
+    let (ok, fault, detail) = run(r#"let s = "1"; at(s, 2.5);"#);
+    assert!(!ok);
+    assert_eq!(fault, Some(GuestFault::HostArgument));
+    assert_eq!(detail.as_deref(), Some("at#1"));
+    let (ok, fault, _) = run(r#"let n = 2; at(n, n / 4);"#);
+    assert!(ok, "{fault:?}");
 }

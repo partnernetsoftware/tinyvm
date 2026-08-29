@@ -325,7 +325,7 @@ pub(crate) mod m1 {
     use crate::ir::m1 as ir;
     use crate::opts::{HostFn, HostParam, HostResult, Names, Options};
     use crate::repr::{
-        self, BlockType, Ins, ValType, WIDTH, box_array, box_bool, box_function, box_number, box_object, box_string, const_bool, const_null, const_number, const_string, const_undefined, drop_value, load_local, store_local, unbox_function, unbox_number,
+        self, BlockType, Ins, ValType, WIDTH, box_array, box_bool, box_function, box_number, box_object, box_string, const_bool, const_null, const_number, const_string, const_undefined, drop_value, load_local, store_local, unbox_function, is_number,
     };
     use crate::repr::{is_array, is_object, is_string};
     use crate::runtime::{
@@ -3928,6 +3928,21 @@ pub(crate) mod m1 {
         /// runtime half of the policy whose compile-time half is
         /// [`static_type`] above: a dynamic language cannot settle every
         /// argument's type before it runs, and must not pretend to.
+        /// A Number argument for an `I32`/`F64` parameter: one tag test that,
+        /// on failure, records `"<host>#<n>"` and the sixth fault code before
+        /// the trap; then the payload as f64. Same shape as the String case.
+        fn number_argument(&mut self, slot: u32, position: usize, host: &str) {
+            is_number(slot, &mut self.f.body);
+            self.push(Ins::I32Eqz);
+            self.push(Ins::If(BlockType::Empty));
+            let detail = self.pool.intern(&format!("{host}#{}", position + 1));
+            runtime::record_host_argument(detail, &mut self.f.body);
+            self.push(Ins::Unreachable);
+            self.push(Ins::End);
+            self.push(Ins::LocalGet(slot + 1));
+            self.push(Ins::F64ReinterpretI64);
+        }
+
         fn unwrap_args(
             &mut self,
             slots: &[u32],
@@ -3970,7 +3985,7 @@ pub(crate) mod m1 {
                     // script contains.
                     HostParam::I32 => {
                         let scratch = self.f.local(ValType::F64);
-                        unbox_number(*slot, &mut self.f.body);
+                        self.number_argument(*slot, position, host);
                         self.push(Ins::LocalTee(scratch));
                         self.push(Ins::F64Trunc);
                         self.push(Ins::LocalGet(scratch));
@@ -3981,7 +3996,7 @@ pub(crate) mod m1 {
                         self.push(Ins::LocalGet(scratch));
                         self.push(Ins::I32TruncF64S);
                     }
-                    HostParam::F64 => unbox_number(*slot, &mut self.f.body),
+                    HostParam::F64 => self.number_argument(*slot, position, host),
                 }
             }
         }
