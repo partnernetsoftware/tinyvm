@@ -1820,30 +1820,24 @@ fn to_lower_case(ctx: &Ctx) -> FnBuild {
 fn slice(ctx: &Ctx, has_end: bool) -> FnBuild {
     let mut f = FnBuild::new(if has_end { 3 * WIDTH } else { 2 * WIDTH });
     let h = f.local(ValType::I32);
-    let units = f.local(ValType::I32);
     let from = f.local(ValType::I32);
     let to = f.local(ValType::I32);
     let r = f.local(ValType::F64);
-    let lenf = f.local(ValType::F64);
 
     unbox_string(0, &mut f.body);
     f.body.push(Ins::LocalSet(h));
 
     let b = &mut f.body;
-    b.push(Ins::LocalGet(h));
-    b.push(Ins::LocalGet(h));
-    b.push(Ins::I32Load(ALIGN_WORD, 0));
-    b.push(ctx.me(Me::Units));
-    b.push(Ins::LocalSet(units));
-    b.push(Ins::LocalGet(units));
-    b.push(Ins::F64ConvertI32S);
-    b.push(Ins::LocalSet(lenf));
-
-    // One relative index: NaN -> 0; clamp to [-len, len]; truncate; a
-    // negative result counts from the end.
+    // One relative index. NaN -> 0. A non-negative index needs no length at
+    // all: the core treats a position past the end as the end, so the walk
+    // stops at the index, not at the string's end -- `s.slice(0, 10)` on a
+    // 1000-char string used to cost 78 000 steps for that walk. Only a
+    // negative index counts from the end and has to know it, and it is
+    // counted then, not before.
     let relative = |b: &mut Vec<Ins>, arg: u32, into: u32| {
         unbox_number(arg, b);
         b.push(Ins::LocalSet(r));
+        // NaN -> 0; then clamp into i32 range so the truncation cannot trap.
         b.push(Ins::LocalGet(r));
         b.push(Ins::LocalGet(r));
         b.push(Ins::F64Ne);
@@ -1852,21 +1846,24 @@ fn slice(ctx: &Ctx, has_end: bool) -> FnBuild {
         b.push(Ins::LocalSet(r));
         b.push(Ins::End);
         b.push(Ins::LocalGet(r));
-        b.push(Ins::LocalGet(lenf));
-        b.push(Ins::F64Neg);
-        b.push(Ins::F64Lt);
+        b.push(Ins::F64Const(2_147_483_647.0));
+        b.push(Ins::F64Gt);
         b.push(Ins::If(BlockType::Empty));
-        b.push(Ins::LocalGet(lenf));
-        b.push(Ins::F64Neg);
+        b.push(Ins::F64Const(2_147_483_647.0));
         b.push(Ins::LocalSet(r));
         b.push(Ins::End);
         b.push(Ins::LocalGet(r));
-        b.push(Ins::LocalGet(lenf));
-        b.push(Ins::F64Gt);
+        b.push(Ins::F64Const(-2_147_483_647.0));
+        b.push(Ins::F64Lt);
         b.push(Ins::If(BlockType::Empty));
-        b.push(Ins::LocalGet(lenf));
+        b.push(Ins::F64Const(-2_147_483_647.0));
         b.push(Ins::LocalSet(r));
         b.push(Ins::End);
+        // Truncate first (ToIntegerOrInfinity: -0.5 is 0, not "negative"),
+        // then a negative integer counts from the end -- and only then is
+        // the length counted: a non-negative index needs no length at all,
+        // because the core treats a position past the end as the end.
+        // `s.slice(0, 10)` on a 1000-char string used to walk all 1000.
         b.push(Ins::LocalGet(r));
         b.push(Ins::I32TruncF64S);
         b.push(Ins::LocalSet(into));
@@ -1874,17 +1871,27 @@ fn slice(ctx: &Ctx, has_end: bool) -> FnBuild {
         b.push(Ins::I32Const(0));
         b.push(Ins::I32LtS);
         b.push(Ins::If(BlockType::Empty));
-        b.push(Ins::LocalGet(units));
+        b.push(Ins::LocalGet(h));
+        b.push(Ins::LocalGet(h));
+        b.push(Ins::I32Load(ALIGN_WORD, 0));
+        b.push(ctx.me(Me::Units));
         b.push(Ins::LocalGet(into));
         b.push(Ins::I32Add);
         b.push(Ins::LocalSet(into));
+        b.push(Ins::LocalGet(into));
+        b.push(Ins::I32Const(0));
+        b.push(Ins::I32LtS);
+        b.push(Ins::If(BlockType::Empty));
+        b.push(Ins::I32Const(0));
+        b.push(Ins::LocalSet(into));
+        b.push(Ins::End);
         b.push(Ins::End);
     };
     relative(b, WIDTH, from);
     if has_end {
         relative(b, 2 * WIDTH, to);
     } else {
-        b.push(Ins::LocalGet(units));
+        b.push(Ins::I32Const(i32::MAX));
         b.push(Ins::LocalSet(to));
     }
 
@@ -1974,6 +1981,9 @@ fn slice_core(ctx: &Ctx) -> FnBuild {
     b.push(Ins::If(BlockType::Empty));
     b.push(Ins::LocalGet(i));
     b.push(Ins::LocalSet(bt));
+    // Found the end: leave the walk. From inside two `if`s the loop is
+    // depth 2 and the block around it depth 3.
+    b.push(Ins::Br(3));
     b.push(Ins::End);
     b.push(Ins::LocalGet(byte));
     b.push(Ins::I32Const(0xf0));

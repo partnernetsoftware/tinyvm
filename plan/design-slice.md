@@ -10,8 +10,8 @@
 
 三个 `Me`：`Slice`（两参）、`SliceFrom`（一参，`end = length`）、`SliceCore`
 （内部，`(record, from_units, to_units) -> record`）。两种调用形是几条指令包着同一个
-核心，所以一个程序两种都用只付一份：**756 B / 647 B / 两者 1 029 B**（相对只用
-`.length` 的程序）。`SliceCore` 一趟走字节：前导字节算一个码元、4 字节序列算两个；
+核心，所以一个程序两种都用只付一份：**832 B / 682 B / 两者 1 138 B**（相对只用
+`.length` 的程序；第二版比第一版多 ~76 B，换来的是下面的「懒长度」）。`SliceCore` 一趟走字节：前导字节算一个码元、4 字节序列算两个；
 到达 `from`/`to` 记下字节偏移，再交给 `Substr` 拷贝。
 
 ## 语义与收窄
@@ -32,3 +32,11 @@
 `Plan::want` 只拉一层 helper；`SliceCore` 自己的 helper（`Units`、`Substr`）没进计划，
 发射 prefab 体时 `offset()` panic，信息却写着「call site asked for a method the plan
 does not carry」——不是调用点，是 prefab 体。列表照 `ToLowerCase` 的惯例写平了。
+
+## 第二版（同日）：懒长度
+
+第一版先算整串的码元长度再夹取，`s.slice(0, 10)` 对 1 000 字符的串量到 **78 000 步**
+（CLI 二分 `--max-operations`）。ECMA 的顺序是先截断再看符号；非负索引根本不需要长度——
+核心把「越过末尾」当末尾——所以只有负索引才数长度，且到那时才数。核心找到 `to` 就跳出
+循环（第一次写成 `br 2`，跳到的是 loop 标签 = continue，步数预算把它拦下来了）。
+现在同一调用 **< 3 000 步**（`a_non_negative_slice_does_not_walk_the_whole_string` 钉住）。

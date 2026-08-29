@@ -125,3 +125,24 @@ fn what_slice_costs_is_written_down() {
         "a program that never slices pays nothing"
     );
 }
+
+/// A non-negative index never walks past itself: `slice(0, 10)` on a
+/// 1000-character string fits in a budget that the whole-string walk did
+/// not (78 000 steps measured through the CLI at 1012da1).
+#[test]
+fn a_non_negative_slice_does_not_walk_the_whole_string() {
+    let source = r#"let s = ""; for (let i = 0; i < 100; i = i + 1) { s = s + "0123456789"; } return s.slice(0, 10);"#;
+    let wasm = compile_qjs_m1(source).expect("compiles");
+    // Enough for the 100-iteration build (~880 000 steps at 8 800 each) but
+    // not for 78 000 more on top: the slice itself must be a few hundred.
+    // The baseline returns the string itself: `.length` would walk it too.
+    let build_only = compile_qjs_m1(r#"let s = ""; for (let i = 0; i < 100; i = i + 1) { s = s + "0123456789"; } return s;"#).expect("compiles");
+    let steps = |wasm: &[u8]| -> u64 {
+        let module = WasmModule::from_bytes_with(wasm, Limits::default()).expect("loads");
+        let mut instance = module.instantiate().expect("instantiates");
+        instance.invoke_by_name("main", &Value::args(&[])).expect("runs");
+        instance.last_steps()
+    };
+    let slice_cost = steps(&wasm) - steps(&build_only);
+    assert!(slice_cost < 3_000, "slice(0, 10) cost {slice_cost} steps");
+}
