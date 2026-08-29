@@ -252,7 +252,11 @@ fn a_program_with_no_capture_is_byte_identical_to_what_it_was() {
             "function mk() { return function () { return 1; }; } let f = mk(); return f();",
             9_929,
         ),
-        ("return JSON.stringify({a:1});", 15_386),
+        // +23 on 2026-08-29: a program with an unwind channel now records the
+        // thrown String's address in the entry epilogue, so the host can read
+        // what an uncaught throw said. `JSON.stringify` can throw, so this row
+        // has the channel; the three rows above do not and are unchanged.
+        ("return JSON.stringify({a:1});", 15_409),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(

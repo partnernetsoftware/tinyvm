@@ -171,6 +171,41 @@ pub(crate) fn record_uncaught_throw(out: &mut Vec<Ins>) {
     store_fault(FAULT_UNCAUGHT_THROW, out);
 }
 
+/// The second word of the fault area: where the thrown value's String record
+/// is, when the uncaught throw threw a String, else 0.
+///
+/// A pointer and not a copy, because the record already lives in guest
+/// memory and there are eight bytes below the literal pool -- exactly a fault
+/// word and this. It is what turns "the script threw a value and nothing
+/// caught it" into the value: every migrated gate script reports failure as
+/// `throw "gate_id:reason"`, and a host that could not read the reason sent
+/// the author to a manifest on disk to find out what happened.
+///
+/// Written only for a String. A thrown Number or object stays unreadable,
+/// which is a narrowing worth stating rather than hiding: `String(e)` is the
+/// spelling a script has if it wants the host to see a non-string.
+pub(crate) const FAULT_THROWN: i32 = 4;
+
+/// `mem[FAULT_THROWN] = ptr` when the pair in (`tag`, `payload`) is a String,
+/// else 0. `tag` and `payload` are the unwind channel's globals.
+pub(crate) fn record_thrown_string(tag: u32, payload: u32, out: &mut Vec<Ins>) {
+    // Two plain `if`s rather than an if/else with a result: this instruction
+    // set has neither a typed block nor `else`. Clear first, then overwrite
+    // when the tag says String -- a non-String throw leaves 0.
+    out.push(Ins::I32Const(FAULT_THROWN));
+    out.push(Ins::I32Const(0));
+    out.push(Ins::I32Store(2, 0));
+    out.push(Ins::GlobalGet(tag));
+    out.push(Ins::I32Const(super::repr::TAG_STRING));
+    out.push(Ins::I32Eq);
+    out.push(Ins::If(BlockType::Empty));
+    out.push(Ins::I32Const(FAULT_THROWN));
+    out.push(Ins::GlobalGet(payload));
+    out.push(Ins::I32WrapI64);
+    out.push(Ins::I32Store(2, 0));
+    out.push(Ins::End);
+}
+
 /// The emitted runtime functions, in index order. Position in [`SET`] is the
 /// function's offset from [`Ctx::func_base`], so the list *is* the call table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

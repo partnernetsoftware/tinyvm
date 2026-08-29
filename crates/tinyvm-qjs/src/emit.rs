@@ -2229,6 +2229,9 @@ pub(crate) mod m1 {
                 // [`runtime::FAULT_UNCAUGHT_THROW`], which `crate::guest_fault`
                 // now reads back as [`crate::GuestFault::UncaughtThrow`].
                 runtime::record_uncaught_throw(&mut self.f.body);
+                if let Some(unwind) = self.unwind {
+                    runtime::record_thrown_string(unwind.tag, unwind.payload, &mut self.f.body);
+                }
                 self.push(Ins::Unreachable);
             }
             Ok(self.f)

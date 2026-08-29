@@ -260,6 +260,35 @@ pub enum GuestFault {
 ///
 /// The entry point clears the word on the way in, so the answer is about the
 /// most recent call and not an older one.
+/// The String an uncaught throw carried, if it carried one.
+///
+/// Read from the second word of the fault area, which the entry epilogue sets
+/// to the thrown record's address when the value was a String and to 0
+/// otherwise -- see `runtime::FAULT_THROWN`. `None` when there is no fault,
+/// the fault is not an uncaught throw, the value was not a String, or the
+/// record is not where the word says (a hostile module could write anything
+/// there, so every read is bounds-checked and the text is capped at 4 KiB).
+///
+/// Separate from [`guest_fault`] so that function's `#[non_exhaustive]` enum
+/// keeps carrying no payload: a host that matched on it yesterday still
+/// compiles today and gets the message by asking this.
+pub fn guest_thrown_message(memory: &[u8]) -> Option<String> {
+    if guest_fault(memory)? != GuestFault::UncaughtThrow {
+        return None;
+    }
+    let at = runtime::FAULT_THROWN as usize;
+    let word = memory.get(at..at + 4)?;
+    let ptr = u32::from_le_bytes([word[0], word[1], word[2], word[3]]) as usize;
+    if ptr == 0 {
+        return None;
+    }
+    let len_bytes = memory.get(ptr..ptr + 4)?;
+    let len = u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
+    let len = len.min(4096);
+    let text = memory.get(ptr + 4..ptr + 4 + len)?;
+    Some(String::from_utf8_lossy(text).into_owned())
+}
+
 pub fn guest_fault(memory: &[u8]) -> Option<GuestFault> {
     let at = runtime::FAULT_WORD as usize;
     let word = memory.get(at..at + 4)?;

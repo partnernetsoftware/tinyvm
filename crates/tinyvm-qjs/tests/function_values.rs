@@ -941,7 +941,7 @@ fn the_whole_fleet_library_compiles_and_its_methods_are_reachable() {
     // from none, and the string-`.length` milestone gated its body. This
     // library has no `.length` in it, so it gets the stub. `arrays_m3`'s
     // three baselines record the same 19-byte drop and the arithmetic.
-    assert_eq!(wasm.len(), 22_429, "the whole library's emitted size moved");
+    assert_eq!(wasm.len(), 22_452 /* +23 on 2026-08-29: thrown-message record in the epilogue; see arrays_m3 */, "the whole library's emitted size moved");
 }
 
 /// The same shape, reduced to what can run with no host at all: a namespace
