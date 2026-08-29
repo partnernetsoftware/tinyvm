@@ -186,6 +186,21 @@ pub(crate) fn record_uncaught_throw(out: &mut Vec<Ins>) {
 /// spelling a script has if it wants the host to see a non-string.
 pub(crate) const FAULT_THROWN: i32 = 4;
 
+/// The script read a property of a String that this engine does not have,
+/// and [`FAULT_THROWN`] holds the key's pooled String record so the host can
+/// say which one.
+///
+/// `"ab".length` is the one String property `__obj_get` answers; every other
+/// one has always trapped rather than become `undefined`, because
+/// `"ab".slice` is a real function in ECMA-262 and `undefined` there would
+/// be a wrong answer wearing a right answer's clothes. The trap was right
+/// and illegible: it was a bare `unreachable` in a program that never said
+/// `.length`, and a nameless [`FAULT_CAPABILITY`] in one that did. Every
+/// script moving from rh met it as "guest trapped: unreachable executed" on
+/// `slice`, `substr` and `substring`, and reported the three as three
+/// different bugs. The key was in a local the whole time.
+pub(crate) const FAULT_MISSING_STRING_METHOD: i32 = 5;
+
 /// `mem[FAULT_THROWN] = ptr` when the pair in (`tag`, `payload`) is a String,
 /// else 0. `tag` and `payload` are the unwind channel's globals.
 pub(crate) fn record_thrown_string(tag: u32, payload: u32, out: &mut Vec<Ins>) {
@@ -448,6 +463,10 @@ pub(crate) struct Ctx {
     /// most a gate on a *run-time* fact can be: unlike an ArrayLiteral, a
     /// String receiver is not something the source announces.
     pub(crate) string_length: Option<i32>,
+    /// Whether any program text reads a static property other than
+    /// `length`: the gate on `__obj_get`'s arm that names a missing String
+    /// property. See `Scan::string_member`.
+    pub(crate) string_member: bool,
     /// Whether any function in this program captures a binding of an
     /// enclosing one. Widens `__fn_new` by one parameter and the record it
     /// builds by one word; false leaves both exactly as they were.
@@ -1677,23 +1696,41 @@ fn obj_get(ctx: &Ctx) -> FnBuild {
     // opposite of the choice `prop_get` makes for an array index, and for a
     // reason: an absent index really is absent, an absent String method is
     // one this engine does not have yet.
-    if let Some(length) = ctx.string_length {
+    // Two shapes, chosen by what the program can reach. A program whose
+    // only static member read is `.length` keeps the arm it had: answer
+    // `length`, else a nameless capability fault. One that reads any other
+    // static property can reach this arm with a key `__obj_get` cannot
+    // answer, and for it the arm writes the key's record where the host can
+    // read it (see [`FAULT_MISSING_STRING_METHOD`]) -- 23 bytes, paid only
+    // by programs that can use them. `Rt::Len` is only called when its gate
+    // built it.
+    if ctx.string_member || ctx.string_length.is_some() {
         let mut arm = Vec::new();
         is_string(0, &mut arm);
         arm.push(Ins::If(BlockType::Empty));
-        arm.push(Ins::LocalGet(key));
-        arm.push(Ins::I32Const(length));
-        arm.push(ctx.call(Rt::StrEq));
-        arm.push(Ins::If(BlockType::Empty));
-        arm.push(Ins::LocalGet(0));
-        arm.push(Ins::LocalGet(1));
-        arm.push(ctx.call(Rt::Len));
-        arm.push(Ins::Return);
-        arm.push(Ins::End);
+        if let Some(length) = ctx.string_length {
+            arm.push(Ins::LocalGet(key));
+            arm.push(Ins::I32Const(length));
+            arm.push(ctx.call(Rt::StrEq));
+            arm.push(Ins::If(BlockType::Empty));
+            arm.push(Ins::LocalGet(0));
+            arm.push(Ins::LocalGet(1));
+            arm.push(ctx.call(Rt::Len));
+            arm.push(Ins::Return);
+            arm.push(Ins::End);
+        }
         // The write has to come first: after the trap there is no guest
         // instruction left to run, which is the same argument `alloc` makes
-        // about recording heap exhaustion before failing.
-        store_fault(FAULT_CAPABILITY, &mut arm);
+        // about recording heap exhaustion before failing. Key before code,
+        // the order `record_thrown_string` uses.
+        if ctx.string_member {
+            arm.push(Ins::I32Const(FAULT_THROWN));
+            arm.push(Ins::LocalGet(key));
+            arm.push(Ins::I32Store(2, 0));
+            store_fault(FAULT_MISSING_STRING_METHOD, &mut arm);
+        } else {
+            store_fault(FAULT_CAPABILITY, &mut arm);
+        }
         arm.push(Ins::Unreachable);
         arm.push(Ins::End);
         f.body.extend(arm);

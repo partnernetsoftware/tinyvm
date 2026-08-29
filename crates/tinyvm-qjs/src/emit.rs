@@ -622,6 +622,7 @@ pub(crate) mod m1 {
             heap_global: HEAP_GLOBAL,
             type_names: scan.type_of.then(|| runtime::TypeNames::intern(&mut pool)),
             string_length: scan.string_length.then(|| pool.intern("length")),
+            string_member: scan.string_member,
             prim_names: runtime::PrimNames::intern(&mut pool),
             conversions: Conversions {
                 num_to_string: convert_base + convert::Cv::NumToString.offset(),
@@ -1362,6 +1363,13 @@ pub(crate) mod m1 {
         /// which is the one that matters -- a program with no `.length` and no
         /// `o[k]` in it is byte-identical to what it was.
         string_length: bool,
+        /// Whether the program reads a static property other than `length`
+        /// anywhere. Only such a program can reach `__obj_get`'s String arm
+        /// with a key it cannot answer, so only such a program carries the
+        /// arm that names the key (23 bytes). `"return 1;"` and every
+        /// program whose only member read is `.length` are byte-identical to
+        /// what they were.
+        string_member: bool,
         /// Whether the program can produce an Array, which is exactly: it
         /// writes an ArrayLiteral, or it names `JSON`.
         ///
@@ -1693,6 +1701,11 @@ pub(crate) mod m1 {
                 match key {
                     ast::MemberKey::Static(name) => {
                         scan.string_length |= name == "length";
+                        // `JSON.parse` is a Member too, and `JSON` is never
+                        // a String receiver: the arm would be dead weight.
+                        let json = matches!(&object.kind,
+                            ast::ExprKind::Name(n) if matches!(n.res, ast::Res::Json));
+                        scan.string_member |= name != "length" && !json;
                         Ok(())
                     }
                     ast::MemberKey::Computed(key) => {

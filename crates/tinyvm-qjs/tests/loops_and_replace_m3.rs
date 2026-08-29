@@ -199,7 +199,7 @@ fn multi_byte_patterns_and_replacements_work() {
 fn a_program_using_neither_pays_for_neither() {
     for (source, want) in [
         ("return 1;", 9_765),
-        ("let o = {a:1}; o.b = 2; return o.a;", 9_886),
+        ("let o = {a:1}; o.b = 2; return o.a;", 9_909) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(n, want, "{source:?} is {n} bytes");
@@ -316,8 +316,9 @@ fn a_missing_string_property_reports_a_capability_boundary() {
     let memory = instance.memory().expect("guest memory");
     assert_eq!(
         tinyvm_qjs::guest_fault(&memory),
-        Some(tinyvm_qjs::GuestFault::CapabilityBoundary),
-        "the fault word must say which of the four kinds this was"
+        Some(tinyvm_qjs::GuestFault::MissingStringMethod),
+        "the fault word must say which kind this was -- and since 2026-08-29 \
+         a missing String property is its own kind, one that names itself"
     );
 }
 

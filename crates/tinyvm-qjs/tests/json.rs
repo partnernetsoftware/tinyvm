@@ -133,6 +133,7 @@ impl Bases {
             // These build the runtime directly; no program, so nothing captures.
             captures: false,
             string_length: None,
+            string_member: false,
         };
         let cv = convert::Ctx {
             func_base: convert_base,

@@ -111,6 +111,7 @@ impl Prog {
                 // These build the runtime directly; no program, so nothing captures.
                 captures: false,
                 string_length: length_name,
+                string_member: false,
             },
             cv: convert::Ctx {
                 func_base: CONVERT_BASE,
@@ -505,6 +506,7 @@ fn add_tests_number_before_string() {
         // These build the runtime directly; no program, so nothing captures.
         captures: false,
         string_length: None,
+        string_member: false,
     };
     let funcs = runtime::build(&ctx);
     let add = funcs
@@ -556,6 +558,7 @@ fn a_new_type_costs_nothing_at_a_site_that_never_sees_it() {
         // These build the runtime directly; no program, so nothing captures.
         captures: false,
         string_length: None,
+        string_member: false,
     };
     let arms: Vec<&'static str> = runtime::build(&ctx)
         .iter()
@@ -770,6 +773,7 @@ fn typeof_costs_nothing_in_a_program_that_never_asks() {
         // These build the runtime directly; no program, so nothing captures.
         captures: false,
         string_length: None,
+        string_member: false,
     };
     let built = runtime::build(&ctx);
     let quiet_typeof = built

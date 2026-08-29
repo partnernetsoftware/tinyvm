@@ -656,7 +656,7 @@ fn parse_prd_leaves(prd: &str, marker: &str) -> Vec<String> {
 // `prd/PRD.md`'s acceptance section now writes the command set down, with this
 // package in it, so the next gap is caught by the gate rather than by someone
 // deciding to look.
-const LEAF_TESTS: [(&str, &str); 252] = [
+const LEAF_TESTS: [(&str, &str); 253] = [
     (
         "`break` / `continue`                           见下方方法段的同名行",
         "break_leaves_the_loop",
@@ -1018,6 +1018,10 @@ const LEAF_TESTS: [(&str, &str); 252] = [
     (
         "the thrown String itself is host-readable (`FAULT_THROWN` pointer, `guest_thrown_message`)  94237cb；下游 agenterm `2cde8b63` 打印它",
         "a_thrown_string_is_readable_from_the_host",
+    ),
+    (
+        "a missing String property names itself at run time (`FAULT_MISSING_STRING_METHOD`), not a bare trap  2026-08-29；`slice`/`substr`/`substring` 曾是三个「不同的 bug」",
+        "a_missing_string_method_names_itself",
     ),
     ("iOS runtime boundary", "native_interpreter_boundary"),
     ("interpret wasm", "eval_bytes"),

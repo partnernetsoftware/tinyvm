@@ -602,7 +602,7 @@ fn a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was() {
     // for anything -- the opposite.
     for (source, want) in [
         ("return 1;", 9_765),
-        ("let o = {a:1}; o.b = 2; return o.a;", 9_886),
+        ("let o = {a:1}; o.b = 2; return o.a;", 9_909) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
         // A computed key whose *value* the text does not settle. This one
         // moved **up** by 117, and not for arrays: a computed key could
         // evaluate to `"length"`, so it turns on the string-`.length` arm of

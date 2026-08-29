@@ -228,6 +228,12 @@ pub enum GuestFault {
     /// other than `length` from a String, where answering `undefined` would be
     /// wrong because `"ab".toUpperCase` is a real function in ECMA-262.
     CapabilityBoundary,
+    /// The script read a property of a String that this engine does not
+    /// have -- `"ab".slice`, say -- and the engine trapped rather than answer
+    /// `undefined` for something ECMA-262 defines. An engine boundary, like
+    /// [`CapabilityBoundary`](Self::CapabilityBoundary), but one that names
+    /// itself: [`guest_missing_string_method`] reads the property's name.
+    MissingStringMethod,
 }
 
 /// Read the guest's own account of why it trapped, out of its linear memory.
@@ -276,6 +282,22 @@ pub fn guest_thrown_message(memory: &[u8]) -> Option<String> {
     if guest_fault(memory)? != GuestFault::UncaughtThrow {
         return None;
     }
+    fault_detail_string(memory)
+}
+
+/// The name of the String property the script asked for and this engine does
+/// not have, after a [`GuestFault::MissingStringMethod`]; `None` for any
+/// other fault. Same word, same record shape as [`guest_thrown_message`]:
+/// `__obj_get` had the interned key in a local and now writes it there.
+pub fn guest_missing_string_method(memory: &[u8]) -> Option<String> {
+    if guest_fault(memory)? != GuestFault::MissingStringMethod {
+        return None;
+    }
+    fault_detail_string(memory)
+}
+
+/// The String record the fault area's second word points at, if any.
+fn fault_detail_string(memory: &[u8]) -> Option<String> {
     let at = runtime::FAULT_THROWN as usize;
     let word = memory.get(at..at + 4)?;
     let ptr = u32::from_le_bytes([word[0], word[1], word[2], word[3]]) as usize;
@@ -297,6 +319,7 @@ pub fn guest_fault(memory: &[u8]) -> Option<GuestFault> {
         runtime::FAULT_HEAP_EXHAUSTED => Some(GuestFault::HeapExhausted),
         runtime::FAULT_UNCAUGHT_THROW => Some(GuestFault::UncaughtThrow),
         runtime::FAULT_CAPABILITY => Some(GuestFault::CapabilityBoundary),
+        runtime::FAULT_MISSING_STRING_METHOD => Some(GuestFault::MissingStringMethod),
         _ => None,
     }
 }
