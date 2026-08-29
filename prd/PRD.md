@@ -1122,6 +1122,32 @@ processing/installability followed by physical-iPhone lifecycle, frame-time, res
 input feel and audio-session evidence. Simulator and archive evidence cannot close these
 leaves.
 
+#### P0 的实际状态（2026-08-29 逐步实测，不是「挂起」也不是「已降级」）
+
+这条 P0 被反复问成「挂起还是已降级」，**而那是个假二选一**。逐步跑一遍就散了：
+
+| 步骤 | 需要设备 / Apple 账号？ | 2026-08-29 实测 |
+|------|------------------------|----------------|
+| 当前 main 为 arm64 iOS 编译 | 否 | ✅ `cargo build -p tinyvm --target aarch64-apple-ios --features ios-c-api` |
+| XCFramework 打包（设备 + 两个模拟器切片） | 否 | ✅ `sh crates/tinyvm/build-xcframework.sh <out>` |
+| Swift package + Swift/C 冒烟（经 xcodebuild） | 否（模拟器级） | ✅ `sh crates/tinyvm/smoke-ios-bridge.sh` 退出 0 |
+| 被一个真实 App target 消费 | 需要一个 Xcode app 工程 | **仓里没有**（可在此机做，只是不存在） |
+| TestFlight 处理与可安装 | **是（Apple）** | 外部阻塞 |
+| 真机 iPhone 生命周期 / 帧时 / 音频 | **是（设备）** | 外部阻塞 |
+
+链接尺寸（该脚本自己打印，作为回归基线）：
+`arm64=1793000 x86_64=1897760 profile-catalog=1625288 replay=1599816
+private=1618432 session=1618032 completion=1279504` 字节。
+
+**结论：P0 的前三步是绿的且今天可复跑，第四步只是没人做，只有最后两步是外部阻塞。**
+所以正确的记法不是一个状态词，是这张表。
+
+**同时暴露一条真空缺：常规测试口径里没有任何一条跑上面三步。**
+2026-08-29 之前连着改了多天 `tinyvm-qjs`，**没有任何检查说 iOS 那侧还编得过**——
+今天是绿的，但那是「没碰到核」的运气，不是门在挡。
+`smoke-ios-bridge.sh` 一直在仓里，只是没被任何口径引用。
+**一个存在但没人跑的门，和没有门的区别，只在于出事时你会更意外。**
+
 ### P1 — native modules without a hidden copy tax
 
 The existing synchronous host door already lends memory zero directly, without copying the
@@ -1219,7 +1245,12 @@ Current evidence owners:
 - [Real-cartridge feature usage](../docs/tinyvm-feature-usage.md)
 - [Accepted standard-feature matrix](../docs/tinyvm-standard-feature-matrix.md)
 - `crates/tinyvm/tests/` — public Rust black boxes and independent fixtures
-- `crates/tinyvm/ios/` — C/Swift package and platform smoke gates
+- `crates/tinyvm/tests/ios/` — twelve Swift/C smoke sources; `crates/tinyvm/include/`
+  — the C headers; `crates/tinyvm/build-xcframework.sh` and
+  `crates/tinyvm/smoke-ios-bridge.sh` — the packaging and the gate that runs it.
+  (This line said `crates/tinyvm/ios/` until 2026-08-29. That path **has never
+  existed** -- `git log --diff-filter=A` finds no commit that added it -- so
+  the pointer was to nothing while the artifacts sat one directory over.)
 
 ## Explicit non-goals
 
