@@ -125,6 +125,29 @@ pub(crate) const FAULT_HEAP_EXHAUSTED: i32 = 1;
 /// three apart at the door and not only in the emitted bytes.
 pub(crate) const FAULT_UNCAUGHT_THROW: i32 = 2;
 
+/// The script asked for something this engine does not have, and the answer
+/// was only knowable at run time.
+///
+/// A **fourth** code for the same reason there is a third: a host that cannot
+/// tell "your script threw" from "your script is broken" tells the author the
+/// wrong thing -- and until this existed, "this engine has no such String
+/// property" arrived as the bare `unreachable` that a genuine engine defect
+/// executes. Those need different sentences: one is a boundary the author can
+/// work around or ask to have moved, the other is a bug report.
+///
+/// It is a *class* rather than an instance, so a second producer joins it
+/// rather than adding a fifth code. The distinction the word exists to carry
+/// is what the **host** must say, and a host says the same thing about every
+/// capability this engine lacks.
+///
+/// One producer today: `__obj_get`'s String arm. `"ab".length` is the only
+/// property this engine answers, and the others keep trapping rather than
+/// becoming `undefined` -- `"ab".toUpperCase` is a real function in ECMA-262,
+/// so `undefined` would be a wrong answer wearing a right answer's clothes.
+/// That decision is unchanged; what changes is that the trap now says which
+/// kind of thing happened.
+pub(crate) const FAULT_CAPABILITY: i32 = 3;
+
 /// `mem[FAULT_WORD] = code`.
 fn store_fault(code: i32, out: &mut Vec<Ins>) {
     out.push(Ins::I32Const(FAULT_WORD));
@@ -1632,6 +1655,10 @@ fn obj_get(ctx: &Ctx) -> FnBuild {
         arm.push(ctx.call(Rt::Len));
         arm.push(Ins::Return);
         arm.push(Ins::End);
+        // The write has to come first: after the trap there is no guest
+        // instruction left to run, which is the same argument `alloc` makes
+        // about recording heap exhaustion before failing.
+        store_fault(FAULT_CAPABILITY, &mut arm);
         arm.push(Ins::Unreachable);
         arm.push(Ins::End);
         f.body.extend(arm);

@@ -288,3 +288,53 @@ fn parse_int_is_not_silently_number() {
     let error = compile_qjs_m1("return parseInt(\"42abc\");").expect_err("unbound");
     assert!(error.message.contains("parseInt"), "{}", error.message);
 }
+
+// ---- the fourth fault code ---------------------------------------------
+
+/// A String property this engine does not have stops with a fault that names
+/// the *kind* of thing that happened.
+///
+/// The decision it reports is unchanged and was already argued in
+/// `runtime.rs`: `"ab".length` is the only property answered, and the rest
+/// trap rather than becoming `undefined`, because `"ab".toUpperCase` is a real
+/// function in ECMA-262 and `undefined` there is a wrong answer wearing a
+/// right answer's clothes.
+///
+/// What changed is that the trap used to arrive as the bare `unreachable` a
+/// genuine engine defect executes, so a host could not tell "this engine does
+/// not have that" from "this engine is broken" -- the same confusion
+/// `UncaughtThrow` was added to prevent for its own case.
+#[test]
+fn a_missing_string_property_reports_a_capability_boundary() {
+    let wasm = compile_qjs_m1("return \"ab\".length + (\"cd\".nosuch ? 1 : 0);")
+        .expect("it compiles: the receiver's type is a run-time fact");
+    let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
+    let mut instance = module.instantiate().expect("instantiates");
+    let outcome = instance.invoke_by_name("main", &Value::args(&[]));
+    assert!(outcome.is_err(), "it must stop");
+
+    let memory = instance.memory().expect("guest memory");
+    assert_eq!(
+        tinyvm_qjs::guest_fault(&memory),
+        Some(tinyvm_qjs::GuestFault::CapabilityBoundary),
+        "the fault word must say which of the four kinds this was"
+    );
+}
+
+/// The other three codes still mean what they meant.
+///
+/// A fourth code is only worth having if it is *distinct*, so the test that
+/// matters is the one showing an ordinary uncaught throw did not start
+/// reporting the new one.
+#[test]
+fn an_uncaught_throw_is_still_its_own_kind() {
+    let wasm = compile_qjs_m1("throw \"x\"; return 1;").expect("compiles");
+    let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
+    let mut instance = module.instantiate().expect("instantiates");
+    let _ = instance.invoke_by_name("main", &Value::args(&[]));
+    let memory = instance.memory().expect("guest memory");
+    assert_eq!(
+        tinyvm_qjs::guest_fault(&memory),
+        Some(tinyvm_qjs::GuestFault::UncaughtThrow)
+    );
+}

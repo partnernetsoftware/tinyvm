@@ -608,7 +608,14 @@ fn a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was() {
         // evaluate to `"length"`, so it turns on the string-`.length` arm of
         // `obj_get`. The row below is the same program with the key written
         // out, where the text settles it and nothing turns on.
-        ("let o = {a:1}; let k = \"a\"; return o[k];", 9_982),
+        //
+        // It moved up another **7** on 2026-08-29, and the number is the point
+        // rather than the change: that arm's trap now writes a fault code
+        // first, so a host can tell "this engine has no such String property"
+        // from "this engine is broken". Seven bytes buys the difference
+        // between a sentence and a bare `unreachable`, and only programs that
+        // reach the arm pay it -- the row below still does not.
+        ("let o = {a:1}; let k = \"a\"; return o[k];", 9_989),
         ("let o = {a:1}; return o[\"a\"];", 9_828),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();

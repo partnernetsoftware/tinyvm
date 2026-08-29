@@ -211,6 +211,23 @@ pub enum GuestFault {
     /// point's results, and both are decisions about the host boundary rather
     /// than about throwing.
     UncaughtThrow,
+    /// The script asked for something this engine does not have, and it was
+    /// only knowable at run time.
+    ///
+    /// Neither a budget to raise nor a defect to report: the author wrote
+    /// valid JavaScript this engine has not implemented, and the useful
+    /// sentence names the capability rather than the crash. Before this
+    /// existed such a stop arrived as the same bare `unreachable` a genuine
+    /// engine bug executes, which sends the reader to the wrong place --
+    /// exactly what [`GuestFault::UncaughtThrow`] was added to prevent for its
+    /// own case.
+    ///
+    /// A **class**, not an instance, so a second producer joins it rather than
+    /// adding a fifth code: what a host must *say* is the same for every
+    /// capability this engine lacks. One producer today -- reading a property
+    /// other than `length` from a String, where answering `undefined` would be
+    /// wrong because `"ab".toUpperCase` is a real function in ECMA-262.
+    CapabilityBoundary,
 }
 
 /// Read the guest's own account of why it trapped, out of its linear memory.
@@ -250,6 +267,7 @@ pub fn guest_fault(memory: &[u8]) -> Option<GuestFault> {
     match code {
         runtime::FAULT_HEAP_EXHAUSTED => Some(GuestFault::HeapExhausted),
         runtime::FAULT_UNCAUGHT_THROW => Some(GuestFault::UncaughtThrow),
+        runtime::FAULT_CAPABILITY => Some(GuestFault::CapabilityBoundary),
         _ => None,
     }
 }
