@@ -1743,10 +1743,10 @@ const STALE_HINTS: &[(&str, &str)] = &[
         "具名导入 / 默认导出 / 再导出 / 动态 import",
         "a_named_import_binds_one_export",
     ), // modules_m3.rs
-    (
-        "hex / octal / binary / separators",
-        "a_hex_literal_has_the_value_of_its_digits",
-    ), // lex_m1.rs
+    // Regression row since 2026-08-29: hex/octal/binary lower (b7e757c);
+    // numeric separators are the leaf that stays open.
+    ("`0x`/`0o`/`0b` number literals", "the_three_radices_answer"), // radix_literals.rs
+    ("numeric separators", "a_separator_is_dropped_from_the_digits"), // lex_m1.rs
     ("tagged templates", "a_tag_receives_the_raw_strings_array"), // templates_m3.rs
     ("`parseInt`", "parse_int_reads_a_prefix_in_the_given_radix"), // loops_and_replace_m3.rs
     (
