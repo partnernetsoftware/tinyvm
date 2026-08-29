@@ -621,8 +621,13 @@ fn a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was() {
     // `try` and property reads, so it carries the TypeError text and the throw
     // arm in `__obj_get`. A JSON-only program did not move.
     for (source, want) in [
-        ("return 1;", 9_940),
-        ("let o = {a:1}; o.b = 2; return o.a;", 10_108) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
+        // +85 on 2026-08-30: `__str_concat` copies eight bytes a step and
+        // then the tail, two loops where there was one. Every program carries
+        // `__str_concat`, so every row here moved by the same 85; one append
+        // to a 1 000-character string fell 17 178 -> 2 569 steps
+        // (tests/concat_cost.rs).
+        ("return 1;", 10_025),
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_193) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
         // A computed key whose *value* the text does not settle. This one
         // moved **up** by 117, and not for arrays: a computed key could
         // evaluate to `"length"`, so it turns on the string-`.length` arm of
@@ -635,8 +640,8 @@ fn a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was() {
         // from "this engine is broken". Seven bytes buys the difference
         // between a sentence and a bare `unreachable`, and only programs that
         // reach the arm pay it -- the row below still does not.
-        ("let o = {a:1}; let k = \"a\"; return o[k];", 10_164),
-        ("let o = {a:1}; return o[\"a\"];", 10_003),
+        ("let o = {a:1}; let k = \"a\"; return o[k];", 10_249),
+        ("let o = {a:1}; return o[\"a\"];", 10_088),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(
@@ -655,7 +660,7 @@ fn naming_json_brings_the_array_set_because_parse_can_return_one() {
         .expect("compiles")
         .len();
     assert_eq!(
-        n, 16_245,
+        n, 16_330,
         "the array set costs 1 130 bytes on top of the JSON set's 14 284 -- 753 for the \
          type and 377 more for `JSON.parse`/`JSON.stringify` of one. That arithmetic is \
          unchanged; the total went down by 28 on 2026-08-28 because `__len`'s dead body \

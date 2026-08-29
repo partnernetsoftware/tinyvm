@@ -1454,18 +1454,56 @@ fn str_concat(ctx: &Ctx) -> FnBuild {
     f
 }
 
-/// `dst[shift + k] = src[k]` for `k < len`, one byte at a time. A byte loop
-/// rather than `memory.copy`: bulk memory is post-MVP, and this compiler's
-/// output has to clear tinyvm's load gate on MVP terms.
+/// `dst[shift + k] = src[k]` for `k < len`: eight bytes at a time while
+/// eight remain, then the byte tail. Loops rather than `memory.copy`: bulk
+/// memory is post-MVP, and this compiler's output has to clear tinyvm's load
+/// gate on MVP terms. The wide loads carry alignment hint 0, which MVP allows
+/// at any address.
 fn copy_loop(b: &mut Vec<Ins>, src: u32, len: u32, dst: u32, shift: Option<u32>, i: u32) {
     b.push(Ins::I32Const(0));
     b.push(Ins::LocalSet(i));
+    // Whole words: while i + 8 <= len, spelled !(len < i + 8).
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(len));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(8));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32LtU);
+    b.push(Ins::BrIf(1));
+    copy_addresses(b, src, dst, shift, i);
+    b.push(Ins::I64Load(0, 4));
+    b.push(Ins::I64Store(0, 4));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(8));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    // The tail, a byte at a time.
     b.push(Ins::Block(BlockType::Empty));
     b.push(Ins::Loop(BlockType::Empty));
     b.push(Ins::LocalGet(i));
     b.push(Ins::LocalGet(len));
     b.push(Ins::I32GeU);
     b.push(Ins::BrIf(1));
+    copy_addresses(b, src, dst, shift, i);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::I32Store8(0, 4));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+}
+
+/// Pushes `dst [+ shift] + i` then `src + i`: the store address under the
+/// load address, as a store wants them. Offset 4 on both sides is the byte
+/// after the length header, and the callers' memargs carry it.
+fn copy_addresses(b: &mut Vec<Ins>, src: u32, dst: u32, shift: Option<u32>, i: u32) {
     b.push(Ins::LocalGet(dst));
     if let Some(shift) = shift {
         b.push(Ins::LocalGet(shift));
@@ -1476,16 +1514,6 @@ fn copy_loop(b: &mut Vec<Ins>, src: u32, len: u32, dst: u32, shift: Option<u32>,
     b.push(Ins::LocalGet(src));
     b.push(Ins::LocalGet(i));
     b.push(Ins::I32Add);
-    // Offset 4 on both sides: the byte after the length header.
-    b.push(Ins::I32Load8U(0, 4));
-    b.push(Ins::I32Store8(0, 4));
-    b.push(Ins::LocalGet(i));
-    b.push(Ins::I32Const(1));
-    b.push(Ins::I32Add);
-    b.push(Ins::LocalSet(i));
-    b.push(Ins::Br(0));
-    b.push(Ins::End);
-    b.push(Ins::End);
 }
 
 /// Byte equality. Not pointer equality: there is no interning, so two equal

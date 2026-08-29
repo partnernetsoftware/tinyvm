@@ -246,11 +246,11 @@ fn a_build_without_a_resolver_says_that_is_what_happened() {
 #[test]
 fn a_program_without_imports_pays_nothing_for_them() {
     for (source, want) in [
-        ("return 1;", 9_940),
-        ("let o = {a:1}; o.b = 2; return o.a;", 10_108) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
+        ("return 1;", 10_025),
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_193) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
         (
             "function mk() { return function () { return 1; }; } let f = mk(); return f();",
-            10_104,
+            10_189,
         ),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();

@@ -124,8 +124,8 @@ fn the_wrong_arity_is_refused_by_name() {
 #[test]
 fn a_program_that_never_asks_for_keys_pays_nothing() {
     for (source, want) in [
-        ("return 1;", 9_940),
-        ("let o = {a:1}; o.b = 2; return o.a;", 10_108) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
+        ("return 1;", 10_025),
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_193) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(n, want, "{source:?} is {n} bytes");

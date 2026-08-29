@@ -246,17 +246,17 @@ fn a_program_with_no_capture_is_byte_identical_to_what_it_was() {
     // weight than the byte-count body it replaced. Nothing here started paying
     // for anything -- the opposite.
     for (source, want) in [
-        ("return 1;", 9_940),
-        ("let o = {a:1}; o.b = 2; return o.a;", 10_108) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
+        ("return 1;", 10_025),
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_193) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
         (
             "function mk() { return function () { return 1; }; } let f = mk(); return f();",
-            10_104,
+            10_189,
         ),
         // +23 on 2026-08-29: a program with an unwind channel now records the
         // thrown String's address in the entry epilogue, so the host can read
         // what an uncaught throw said. `JSON.stringify` can throw, so this row
         // has the channel; the three rows above do not and are unchanged.
-        ("return JSON.stringify({a:1});", 16_245),
+        ("return JSON.stringify({a:1});", 16_330),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(

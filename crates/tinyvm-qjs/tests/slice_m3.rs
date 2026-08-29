@@ -121,7 +121,7 @@ fn what_slice_costs_is_written_down() {
     assert!(both - base < (two - base) + (one - base), "the two forms must share the core");
     assert_eq!(
         compile_qjs_m1("return 1;").expect("compiles").len(),
-        9_940,
+        10_025,
         "a program that never slices pays nothing"
     );
 }
