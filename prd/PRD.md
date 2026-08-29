@@ -629,7 +629,7 @@ tinyvm (35)                                      [~]
 │   │   │   └── `parseInt`（前缀解析 + 基数）                [ ] 不同函数，按名等需求
 │   │   └── spread · switch · do-while · 解构 · 默认参数     [–] 语料**零使用**（假阳性已更正）
 │   │   │   ├── 空片段保留（前导 / 尾随 / 连续分隔符）      [x] 最容易漏掉的边界
-│   │   │   └── split("") **trap**：孤立代理 UTF-8 表示不了 [具名] 不是未实现
+│   │   │   └── split("") **trap**：孤立代理 UTF-8 表示不了 [具名] **应带第四类 fault code**：下游第一个真脚本撞上时只见裸 unreachable
 │   │   │   ├── 字节层比较，对多字节字符精确               [x] é 与 😀 钉住
 │   │   │   └── includes 不经由 indexOf，因此更便宜         [x] 320 vs 440 字节
 │   │   ├── split [x] · toLowerCase [x] · toUpperCase      [–] 前两个已落地，后者零使用
