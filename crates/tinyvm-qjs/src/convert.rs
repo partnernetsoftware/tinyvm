@@ -3938,6 +3938,7 @@ pub(crate) mod json {
         let i = f.local(ValType::I32);
         let c = f.local(ValType::I32);
         let h = f.local(ValType::I32);
+        let j = f.local(ValType::I32);
         let b = &mut f.body;
         let buf = 1;
 
@@ -3951,11 +3952,41 @@ pub(crate) mod json {
             b,
             |b| lt(b, i, n),
             |b| {
-                b.push(ld(0));
+                // A run of bytes that are copied through as themselves:
+                // everything at or above U+0020 other than the quote and the
+                // backslash, which is also every byte of a multi-byte UTF-8
+                // sequence. The run goes to `__jb_bytes` whole; one
+                // `__jb_byte` call per character was ~117 steps a byte.
                 b.push(ld(i));
-                b.push(Ins::I32Add);
-                b.push(Ins::I32Load8U(0, STRING_HEADER as u32));
-                b.push(st(c));
+                b.push(st(j));
+                while_loop(
+                    b,
+                    |b| lt(b, i, n),
+                    |b| {
+                        b.push(ld(0));
+                        b.push(ld(i));
+                        b.push(Ins::I32Add);
+                        b.push(Ins::I32Load8U(0, STRING_HEADER as u32));
+                        b.push(st(c));
+                        // Leave the run at the first byte that needs an escape:
+                        // `if` is depth 0, the loop 1, its block 2.
+                        b.extend_from_slice(&[ld(c), ic(0x20), Ins::I32LtU, ld(c), ic(0x22), Ins::I32Eq, Ins::I32Or, ld(c), ic(0x5c), Ins::I32Eq, Ins::I32Or]);
+                        b.push(Ins::If(BlockType::Empty));
+                        b.push(Ins::Br(2));
+                        b.push(Ins::End);
+                        bump(b, i, 1);
+                    },
+                );
+                b.extend_from_slice(&[ld(j), ld(i), Ins::I32LtU]);
+                b.push(Ins::If(BlockType::Empty));
+                b.push(ld(buf));
+                b.extend_from_slice(&[ld(0), ld(j), Ins::I32Add, ic(STRING_HEADER), Ins::I32Add]);
+                b.extend_from_slice(&[ld(i), ld(j), Ins::I32Sub]);
+                b.push(ctx.call(Js::JbBytes));
+                b.push(Ins::End);
+                // The byte that stopped the run, if one did: `c` still holds it.
+                b.extend_from_slice(&[ld(i), ld(n), Ins::I32LtU]);
+                b.push(Ins::If(BlockType::Empty));
                 // One `block` whose every arm leaves it, so that the last line is
                 // the default and not a chain of negated conditions.
                 b.push(Ins::Block(BlockType::Empty));
@@ -4003,6 +4034,7 @@ pub(crate) mod json {
                 b.push(ctx.call(Js::JbByte));
                 b.push(Ins::End);
                 bump(b, i, 1);
+                b.push(Ins::End);
             },
         );
         put(ctx, b, buf, 0x22);

@@ -256,7 +256,11 @@ fn a_program_with_no_capture_is_byte_identical_to_what_it_was() {
         // thrown String's address in the entry epilogue, so the host can read
         // what an uncaught throw said. `JSON.stringify` can throw, so this row
         // has the channel; the three rows above do not and are unchanged.
-        ("return JSON.stringify({a:1});", 16_330),
+        // +83 on 2026-08-30: `__json_quote` copies runs of plain bytes
+        // through `__jb_bytes` and escapes only the byte that stopped the
+        // run (117 -> 39 steps a byte, tests/json_stringify_cost.rs). Only
+        // programs that name JSON carry it; "return 1;" above did not move.
+        ("return JSON.stringify({a:1});", 16_413),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(
