@@ -606,6 +606,12 @@ fn a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was() {
     // integer fast path -- `"" + n` went from ~5 200 steps to ~540. A
     // price every program pays for a speed every program uses; see
     // plan/design-num-to-string-fast.md.
+    //
+    // The JSON set moved up by 329 on 2026-08-29 (15 584 -> 15 913; the fleet
+    // library 22 650 -> 22 981): `__jb_bytes` and the plain-ASCII run scan in
+    // `__json_pstr`, paid only by programs that name JSON. `"return 1;"` did
+    // not move. And by 244 more the same night: the scan and both copies
+    // went four bytes at a time (29 steps a byte on a long string, from 119).
     for (source, want) in [
         ("return 1;", 9_940),
         ("let o = {a:1}; o.b = 2; return o.a;", 10_084) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
@@ -641,7 +647,7 @@ fn naming_json_brings_the_array_set_because_parse_can_return_one() {
         .expect("compiles")
         .len();
     assert_eq!(
-        n, 15_584,
+        n, 16_157,
         "the array set costs 1 130 bytes on top of the JSON set's 14 284 -- 753 for the \
          type and 377 more for `JSON.parse`/`JSON.stringify` of one. That arithmetic is \
          unchanged; the total went down by 28 on 2026-08-28 because `__len`'s dead body \

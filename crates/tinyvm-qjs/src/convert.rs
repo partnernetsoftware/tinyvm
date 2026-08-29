@@ -3210,6 +3210,7 @@ pub(crate) mod json {
         JbRoom,
         JbByte,
         JbStr,
+        JbBytes,
         JbTake,
         // 25.5.2, SerializeJSONProperty and friends
         Quote,
@@ -3241,6 +3242,7 @@ pub(crate) mod json {
         Js::JbRoom,
         Js::JbByte,
         Js::JbStr,
+        Js::JbBytes,
         Js::JbTake,
         Js::Quote,
         Js::Ser,
@@ -3272,6 +3274,7 @@ pub(crate) mod json {
                 Js::JbRoom => "__jb_room",
                 Js::JbByte => "__jb_byte",
                 Js::JbStr => "__jb_str",
+                Js::JbBytes => "__jb_bytes",
                 Js::JbTake => "__jb_take",
                 Js::Quote => "__json_quote",
                 Js::Ser => "__json_ser",
@@ -3455,6 +3458,7 @@ pub(crate) mod json {
             Js::JbRoom => (vec![I32, I32], vec![], jb_room(ctx)),
             Js::JbByte => (vec![I32, I32], vec![], jb_byte(ctx)),
             Js::JbStr => (vec![I32, I32], vec![], jb_str(ctx)),
+            Js::JbBytes => (vec![I32, I32, I32], vec![], jb_bytes(ctx)),
             Js::JbTake => (vec![I32], vec![I32], jb_take(ctx)),
             Js::Quote => (vec![I32, I32], vec![], json_quote(ctx)),
             Js::Ser => (vec![I32, I64, I32, I32], vec![I32], json_ser(ctx)),
@@ -3801,6 +3805,63 @@ pub(crate) mod json {
         f
     }
 
+    /// `__jb_bytes(p, ptr, n)`: append `n` raw bytes at `ptr`. The string
+    /// parser hands whole runs of plain ASCII here instead of one `__jb_byte`
+    /// call per character, which was ~80 steps a byte on a long string.
+    fn jb_bytes(ctx: &JsonCtx) -> FnBuild {
+        let mut f = FnBuild::new(3);
+        let dst = f.local(ValType::I32);
+        let i = f.local(ValType::I32);
+        let b = &mut f.body;
+        b.push(ld(0));
+        b.push(ld(2));
+        b.push(ctx.call(Js::JbRoom));
+        field_get(b, 0, JB_DATA);
+        field_get(b, 0, JB_LEN);
+        b.push(Ins::I32Add);
+        b.push(st(dst));
+        b.push(ic(0));
+        b.push(st(i));
+        // Whole words first, then the byte tail.
+        while_loop(
+            b,
+            // while i + 4 <= n, spelled !(n < i + 4)
+            |b| b.extend_from_slice(&[ld(2), ld(i), ic(4), Ins::I32Add, Ins::I32LtU, Ins::I32Eqz]),
+            |b| {
+                b.push(ld(dst));
+                b.push(ld(i));
+                b.push(Ins::I32Add);
+                b.push(ld(1));
+                b.push(ld(i));
+                b.push(Ins::I32Add);
+                b.push(Ins::I32Load(0, 0));
+                b.push(Ins::I32Store(0, 0));
+                bump(b, i, 4);
+            },
+        );
+        while_loop(
+            b,
+            |b| lt(b, i, 2),
+            |b| {
+                b.push(ld(dst));
+                b.push(ld(i));
+                b.push(Ins::I32Add);
+                b.push(ld(1));
+                b.push(ld(i));
+                b.push(Ins::I32Add);
+                b.push(Ins::I32Load8U(0, 0));
+                b.push(Ins::I32Store8(0, 0));
+                bump(b, i, 1);
+            },
+        );
+        field_set(b, 0, JB_LEN, |b| {
+            field_get(b, 0, JB_LEN);
+            b.push(ld(2));
+            b.push(Ins::I32Add);
+        });
+        f
+    }
+
     /// `__jb_take(p) -> string record`. The buffer is not reusable afterwards and
     /// nothing tries: a bump heap has no free, so the copy is the honest cost of
     /// handing out a record whose header is a length and not a capacity.
@@ -3826,6 +3887,23 @@ pub(crate) mod json {
         b.push(st(src));
         b.push(ic(0));
         b.push(st(i));
+        // Whole words first, then the byte tail.
+        while_loop(
+            b,
+            // while i + 4 <= n, spelled !(n < i + 4)
+            |b| b.extend_from_slice(&[ld(n), ld(i), ic(4), Ins::I32Add, Ins::I32LtU, Ins::I32Eqz]),
+            |b| {
+                b.push(ld(q));
+                b.push(ld(i));
+                b.push(Ins::I32Add);
+                b.push(ld(src));
+                b.push(ld(i));
+                b.push(Ins::I32Add);
+                b.push(Ins::I32Load(0, 0));
+                b.push(Ins::I32Store(0, STRING_HEADER as u32));
+                bump(b, i, 4);
+            },
+        );
         while_loop(
             b,
             |b| lt(b, i, n),
@@ -4661,6 +4739,14 @@ pub(crate) mod json {
         let e = f.local(ValType::I32);
         let u = f.local(ValType::I32);
         let v = f.local(ValType::I32);
+        // The plain-ASCII run scan's own locals.
+        let run_src = f.local(ValType::I32);
+        let run_pos = f.local(ValType::I32);
+        let run_len = f.local(ValType::I32);
+        let run_k = f.local(ValType::I32);
+        let run_ok = f.local(ValType::I32);
+        let run_w = f.local(ValType::I32);
+        let run_t = f.local(ValType::I32);
         let names = ctx.names;
         let b = &mut f.body;
 
@@ -4687,6 +4773,149 @@ pub(crate) mod json {
         b.push(ld(buf));
         b.push(ctx.call(Js::JbTake));
         b.push(Ins::Return);
+        b.push(Ins::End);
+
+        // A run of plain ASCII -- printable, not `"`, not `\` -- is copied
+        // whole: scan its length reading the source directly, append it in
+        // one `__jb_bytes`, and continue. Everything else takes the
+        // per-character paths below.
+        b.push(ld(c));
+        b.push(ic(0x20));
+        b.push(Ins::I32GeU);
+        b.push(ld(c));
+        b.push(ic(0x7f));
+        b.push(Ins::I32LtU);
+        b.push(Ins::I32And);
+        b.push(ld(c));
+        b.push(ic(0x22));
+        b.push(Ins::I32Ne);
+        b.push(Ins::I32And);
+        b.push(ld(c));
+        b.push(ic(0x5c));
+        b.push(Ins::I32Ne);
+        b.push(Ins::I32And);
+        b.push(Ins::If(BlockType::Empty));
+        {
+            // Inside: 0 = this `if`, 1 = the loop.
+            b.push(ld(0));
+            b.push(Ins::I32Load(ALIGN_WORD, PS_SRC));
+            b.push(st(run_src));
+            b.push(ld(0));
+            b.push(Ins::I32Load(ALIGN_WORD, PS_POS));
+            b.push(st(run_pos));
+            b.push(ld(run_src));
+            b.push(Ins::I32Load(ALIGN_WORD, 0));
+            b.push(st(run_len));
+            // k = 1: the byte in `c` is already known plain.
+            b.push(ic(1));
+            b.push(st(run_k));
+            // Four bytes at a time while four remain: a word is plain when no
+            // byte is below 0x20, none has its high bit, and none is `"` or
+            // `\`. The instruction set has no xor and no not, so
+            // `a ^ b` is `(a | b) - (a & b)` and `~x` is `-1 - x`; "has a zero
+            // byte" is the usual `(x - 0x01010101) & ~x & 0x80808080`.
+            let has_zero = |b: &mut Vec<Ins>, x: u32| {
+                b.extend_from_slice(&[ld(x), ic(0x0101_0101), Ins::I32Sub, ic(-1), ld(x), Ins::I32Sub, Ins::I32And, ic(0x8080_8080u32 as i32), Ins::I32And]);
+            };
+            let xor_into = |b: &mut Vec<Ins>, x: u32, k: i32, into: u32| {
+                b.extend_from_slice(&[ld(x), ic(k), Ins::I32Or, ld(x), ic(k), Ins::I32And, Ins::I32Sub, st(into)]);
+            };
+            b.push(Ins::Block(BlockType::Empty));
+            b.push(Ins::Loop(BlockType::Empty));
+            // len < pos + k + 4 -> not a whole word left
+            b.push(ld(run_len));
+            b.push(ld(run_pos));
+            b.push(ld(run_k));
+            b.push(Ins::I32Add);
+            b.push(ic(4));
+            b.push(Ins::I32Add);
+            b.push(Ins::I32LtU);
+            b.push(Ins::BrIf(1));
+            b.push(ld(run_src));
+            b.push(ld(run_pos));
+            b.push(Ins::I32Add);
+            b.push(ld(run_k));
+            b.push(Ins::I32Add);
+            b.push(Ins::I32Load(0, STRING_HEADER as u32));
+            b.push(st(run_w));
+            // bad = hasless(w, 0x20) | (w & 0x80808080) | haszero(w ^ '"'*4) | haszero(w ^ '\\'*4)
+            b.extend_from_slice(&[ld(run_w), ic(0x2020_2020), Ins::I32Sub, ic(-1), ld(run_w), Ins::I32Sub, Ins::I32And, ic(0x8080_8080u32 as i32), Ins::I32And]);
+            b.extend_from_slice(&[ld(run_w), ic(0x8080_8080u32 as i32), Ins::I32And, Ins::I32Or]);
+            xor_into(b, run_w, 0x2222_2222, run_t);
+            has_zero(b, run_t);
+            b.push(Ins::I32Or);
+            xor_into(b, run_w, 0x5c5c_5c5c, run_t);
+            has_zero(b, run_t);
+            b.push(Ins::I32Or);
+            b.push(Ins::BrIf(1));
+            bump(b, run_k, 4);
+            b.push(Ins::Br(0));
+            b.push(Ins::End);
+            b.push(Ins::End);
+            // The tail, a byte at a time: at most three plain bytes and the
+            // one that ended the run. The loop's condition is computed into
+            // `run_ok` first: the instruction set has no `if` that yields a
+            // value.
+            while_loop(
+                b,
+                |b| {
+                    b.push(ic(0));
+                    b.push(st(run_ok));
+                    if_then(
+                        b,
+                        |b| {
+                            b.push(ld(run_pos));
+                            b.push(ld(run_k));
+                            b.push(Ins::I32Add);
+                            b.push(ld(run_len));
+                            b.push(Ins::I32LtU);
+                        },
+                        |b| {
+                            b.push(ld(run_src));
+                            b.push(ld(run_pos));
+                            b.push(Ins::I32Add);
+                            b.push(ld(run_k));
+                            b.push(Ins::I32Add);
+                            b.push(Ins::I32Load8U(0, STRING_HEADER as u32));
+                            b.push(st(e));
+                            // plain = (e - 0x20) <u 0x5f && e != '"' && e != '\\'
+                            b.push(ld(e));
+                            b.push(ic(0x20));
+                            b.push(Ins::I32Sub);
+                            b.push(ic(0x5f));
+                            b.push(Ins::I32LtU);
+                            b.push(ld(e));
+                            b.push(ic(0x22));
+                            b.push(Ins::I32Ne);
+                            b.push(Ins::I32And);
+                            b.push(ld(e));
+                            b.push(ic(0x5c));
+                            b.push(Ins::I32Ne);
+                            b.push(Ins::I32And);
+                            b.push(st(run_ok));
+                        },
+                    );
+                    b.push(ld(run_ok));
+                },
+                |b| bump(b, run_k, 1),
+            );
+            b.push(ld(buf));
+            b.push(ld(run_src));
+            b.push(ld(run_pos));
+            b.push(Ins::I32Add);
+            b.push(ic(STRING_HEADER));
+            b.push(Ins::I32Add);
+            b.push(ld(run_k));
+            b.push(ctx.call(Js::JbBytes));
+            // state.pos += k
+            b.push(ld(0));
+            b.push(ld(0));
+            b.push(Ins::I32Load(ALIGN_WORD, PS_POS));
+            b.push(ld(run_k));
+            b.push(Ins::I32Add);
+            b.push(Ins::I32Store(ALIGN_WORD, PS_POS));
+            b.push(Ins::Br(1));
+        }
         b.push(Ins::End);
 
         b.push(ld(c));
@@ -4834,6 +5063,12 @@ pub(crate) mod json {
         let q = f.local(ValType::I32);
         let i = f.local(ValType::I32);
         let c = f.local(ValType::I32);
+        // The integer fast path's state: sign, digit count, value so far,
+        // and whether a fraction or exponent made it a general number.
+        let neg = f.local(ValType::I32);
+        let nd = f.local(ValType::I32);
+        let val = f.local(ValType::F64);
+        let general = f.local(ValType::I32);
         let names = ctx.names;
         let b = &mut f.body;
 
@@ -4851,7 +5086,10 @@ pub(crate) mod json {
                 b.push(ic(0x2d));
                 b.push(Ins::I32Eq);
             },
-            |b| advance(b, 0, 1),
+            |b| {
+                advance(b, 0, 1);
+                b.extend_from_slice(&[ic(1), st(neg)]);
+            },
         );
 
         // DecimalIntegerLiteral: `0`, or a non-zero digit and more. `01` is not a
@@ -4864,6 +5102,7 @@ pub(crate) mod json {
         b.push(Ins::I32Eq);
         b.push(Ins::If(BlockType::Empty));
         advance(b, 0, 1);
+        b.extend_from_slice(&[ic(1), st(nd)]);
         b.push(Ins::Br(1));
         b.push(Ins::End);
         digit(b, c);
@@ -4871,7 +5110,19 @@ pub(crate) mod json {
         b.push(Ins::If(BlockType::Empty));
         fail(ctx, b, names.syntax, Ret::F64);
         b.push(Ins::End);
-        while_loop(b, |b| digit_at(ctx, b, 0, c), |b| advance(b, 0, 1));
+        // The value accumulates as the digits are validated: exact while
+        // there are at most fifteen of them (Clinger's exact case, as
+        // `__digits_to_f64` puts it), which is the fast path below.
+        while_loop(
+            b,
+            |b| digit_at(ctx, b, 0, c),
+            |b| {
+                b.extend_from_slice(&[ld(val), Ins::F64Const(10.0), Ins::F64Mul]);
+                b.extend_from_slice(&[ld(c), ic(0x30), Ins::I32Sub, Ins::F64ConvertI32S, Ins::F64Add, st(val)]);
+                bump(b, nd, 1);
+                advance(b, 0, 1);
+            },
+        );
         b.push(Ins::End);
 
         // A fraction, if there is a point, and at least one digit after it.
@@ -4883,6 +5134,7 @@ pub(crate) mod json {
                 b.push(Ins::I32Eq);
             },
             |b| {
+                b.extend_from_slice(&[ic(1), st(general)]);
                 advance(b, 0, 1);
                 digit_at(ctx, b, 0, c);
                 b.push(Ins::I32Eqz);
@@ -4909,6 +5161,7 @@ pub(crate) mod json {
                 b.push(Ins::I32Or);
             },
             |b| {
+                b.extend_from_slice(&[ic(1), st(general)]);
                 advance(b, 0, 1);
                 at_byte(ctx, b, 0);
                 b.push(st(c));
@@ -4931,6 +5184,22 @@ pub(crate) mod json {
                 fail(ctx, b, names.syntax, Ret::F64);
                 b.push(Ins::End);
                 while_loop(b, |b| digit_at(ctx, b, 0, c), |b| advance(b, 0, 1));
+            },
+        );
+
+        // Fast path: an integer of at most fifteen digits is exact in the
+        // value accumulated above -- no copy, no second parse. A JSON
+        // document is mostly such numbers, and `__str_to_num` over a fresh
+        // record cost ~1 600 steps for a five-digit one.
+        if_then(
+            b,
+            |b| {
+                b.extend_from_slice(&[ld(general), Ins::I32Eqz, ld(nd), ic(15), Ins::I32LtS, ld(nd), ic(15), Ins::I32Eq, Ins::I32Or, Ins::I32And]);
+            },
+            |b| {
+                if_then(b, |b| b.push(ld(neg)), |b| b.extend_from_slice(&[ld(val), Ins::F64Neg, st(val)]));
+                b.push(ld(val));
+                b.push(Ins::Return);
             },
         );
 
