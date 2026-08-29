@@ -348,6 +348,14 @@ pub(crate) mod m1 {
             update: Option<Expr>,
             body: Box<Stmt>,
         },
+        /// `break` and `continue`, ECMA-262 14.9 and 14.8 -- unlabelled only.
+        ///
+        /// Two variants rather than one with a flag: they branch to different
+        /// labels of the same loop, and the lowering asks which. No label
+        /// field, because the corpus that asked for these writes none: 50
+        /// `break`s and 48 `continue`s downstream, zero of them labelled.
+        Break,
+        Continue,
         Return(Option<Expr>),
         /// `throw e`, ECMA-262 14.14. A statement and not an expression: its
         /// completion is abrupt, so there is no value for it to be.

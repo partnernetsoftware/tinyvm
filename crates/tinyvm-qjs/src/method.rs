@@ -119,6 +119,11 @@ pub(crate) enum Me {
     Encode,
     /// `lower_cp(cp) -> cp`: the Unicode simple lowercase mapping.
     LowerCp,
+    /// `s.replace(from, to)` -- ECMA-262 22.1.3.19, first occurrence only.
+    Replace,
+    /// `s.replaceAll(from, to)` -- ECMA-262 22.1.3.20. What the corpus means
+    /// when it writes `.replace`, which is why both ship.
+    ReplaceAll,
     /// `s.toLowerCase()` -- ECMA-262 22.1.3.29. Fourth in the second survey,
     /// and the one whose price was measured before it was chosen: see
     /// `plan/design-case-mapping-decision.md`.
@@ -158,6 +163,8 @@ pub(crate) const SET: &[Me] = &[
     Me::Encode,
     Me::LowerCp,
     Me::ToLowerCase,
+    Me::Replace,
+    Me::ReplaceAll,
     Me::Push,
     Me::Pop,
     Me::MapBound,
@@ -247,6 +254,8 @@ impl Me {
             Me::Encode => "__m_encode",
             Me::LowerCp => "__m_lower_cp",
             Me::ToLowerCase => "__m_to_lower_case",
+            Me::Replace => "__m_replace",
+            Me::ReplaceAll => "__m_replace_all",
             Me::Push => "__m_push",
             Me::Pop => "__m_pop",
             Me::MapBound => "__m_map_bound",
@@ -266,6 +275,8 @@ impl Me {
             ("endsWith", 1) => Some(Me::EndsWith),
             ("split", 1) => Some(Me::Split),
             ("toLowerCase", 0) => Some(Me::ToLowerCase),
+            ("replace", 2) => Some(Me::Replace),
+            ("replaceAll", 2) => Some(Me::ReplaceAll),
             ("push", 1) => Some(Me::Push),
             ("pop", 0) => Some(Me::Pop),
             ("map", 1) => Some(Me::MapBound),
@@ -302,6 +313,7 @@ impl Me {
             Me::Split => vec![Me::Substr],
             Me::ToLowerCase => vec![Me::Decode, Me::Encode, Me::LowerCp],
             Me::Decode | Me::Encode | Me::LowerCp => Vec::new(),
+            Me::Replace | Me::ReplaceAll => Vec::new(),
             Me::WsWidth | Me::Units | Me::Push | Me::Pop | Me::MapBound => Vec::new(),
         }
     }
@@ -343,6 +355,8 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
         ),
         Me::LowerCp => (vec![ValType::I32], vec![ValType::I32], lower_cp(ctx)),
         Me::ToLowerCase => (values(1), values(1), to_lower_case(ctx)),
+        Me::Replace => (values(3), values(1), replace(ctx, Reach::First)),
+        Me::ReplaceAll => (values(3), values(1), replace(ctx, Reach::All)),
         Me::Push => (values(2), values(1), push(ctx)),
         Me::Pop => (values(1), values(1), pop()),
         Me::MapBound => (values(2), values(1), map_bound(ctx)),
@@ -1728,6 +1742,269 @@ fn to_lower_case(ctx: &Ctx) -> FnBuild {
     b.push(Ins::LocalGet(w));
     b.push(Ins::I32Add);
     b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Store(ALIGN_WORD, 0));
+
+    let inner = vec![Ins::LocalGet(out)];
+    let mut boxed = Vec::new();
+    box_string(&inner, &mut boxed);
+    f.body.extend(boxed);
+    f
+}
+
+
+/// Whether an occurrence loop stops after the first match.
+#[derive(Clone, Copy, PartialEq)]
+enum Reach {
+    First,
+    All,
+}
+
+/// `s.replace(from, to)` and `s.replaceAll(from, to)` -- ECMA-262 22.1.3.19
+/// and 22.1.3.20, for string patterns.
+///
+/// # Both, because the corpus means one and JavaScript authors write the other
+///
+/// `.replace(` is 17% of downstream scripts but **142 uses**, the widest gap
+/// between "how many are blocked" and "how much it hurts" in the second
+/// survey. Every one of them looks like `.replace("\r\n", "\n")` -- normalising
+/// line endings, which means *every* occurrence.
+///
+/// In JavaScript that is `replaceAll`. `replace` with a string pattern
+/// replaces **only the first** match, which is a difference a script written
+/// against the corpus's habits would meet as a silent wrong answer. So both
+/// ship, each with its own name and its own meaning.
+///
+/// # They share this function and **not** the bytes
+///
+/// [`Reach`] is decided at compile time, so each name emits its own copy.
+/// Measured: `replace` is 525 bytes and adding `replaceAll` costs 515 more --
+/// the second is not "nearly free", which is what this comment claimed before
+/// the number existed. **Sharing a Rust function shares maintenance, not
+/// emitted code**, and in a prefab layer those are different currencies.
+///
+/// Merging them into one emitted function with a runtime flag was considered
+/// and not done: it would save 515 bytes for a program that uses both, and
+/// charge every program that uses only one for a parameter and a branch it
+/// cannot take. The gate is per method precisely so the common case pays for
+/// what it uses.
+///
+/// # The empty pattern
+///
+/// `"abc".replaceAll("", "-")` is `"-a-b-c-"` in ECMA-262: the empty string
+/// matches at every position including the ends. Unlike `split("")`, that is
+/// representable here -- no lone surrogates are involved -- so it is
+/// implemented rather than refused. `replace("", "-")` inserts once, at 0.
+fn replace(ctx: &Ctx, reach: Reach) -> FnBuild {
+    let mut f = FnBuild::new(3 * WIDTH);
+    let h = f.local(ValType::I32);
+    let nd = f.local(ValType::I32);
+    let rp = f.local(ValType::I32);
+    let hl = f.local(ValType::I32);
+    let nl = f.local(ValType::I32);
+    let rl = f.local(ValType::I32);
+    let out = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+    let o = f.local(ValType::I32);
+    let j = f.local(ValType::I32);
+    let ok = f.local(ValType::I32);
+    let done = f.local(ValType::I32);
+
+    unbox_string(0, &mut f.body);
+    f.body.push(Ins::LocalSet(h));
+    unbox_string(WIDTH, &mut f.body);
+    f.body.push(Ins::LocalSet(nd));
+    unbox_string(2 * WIDTH, &mut f.body);
+    f.body.push(Ins::LocalSet(rp));
+
+    let b = &mut f.body;
+    for (src, dst) in [(h, hl), (nd, nl), (rp, rl)] {
+        b.push(Ins::LocalGet(src));
+        b.push(Ins::I32Load(ALIGN_WORD, 0));
+        b.push(Ins::LocalSet(dst));
+    }
+
+    // The output cannot exceed one replacement per input byte plus one for the
+    // empty-pattern match at each position, plus the tail: `(hl + 1) * rl + hl`
+    // is a bound rather than a guess, and the record's length is written from
+    // what was produced. Over-allocation is bump-heap slack nothing observes.
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(rl));
+    b.push(Ins::I32Mul);
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32Add);
+    b.push(ctx.rt(Rt::Alloc));
+    b.push(Ins::LocalSet(out));
+
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    // `i > hl`, written as `hl < i`: no unsigned `>` here, and swapping the
+    // operands of the `<` there is says the same thing. The bound is `>` and
+    // not `>=` because an empty pattern matches at `hl` too -- the position
+    // after the last byte is a real match site.
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32LtU);
+    b.push(Ins::BrIf(1));
+
+    // Does the pattern match here? An empty pattern matches everywhere, and
+    // one that would run past the end does not.
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(ok));
+    b.push(Ins::LocalGet(done));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32LtU);
+    b.push(Ins::I32Eqz);
+    b.push(Ins::I32And);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::LocalSet(ok));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(j));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::LocalGet(nd));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::I32Ne);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(ok));
+    b.push(Ins::Br(2));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(j));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(ok));
+    b.push(Ins::If(BlockType::Empty));
+    // Copy the replacement.
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(j));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::LocalGet(rl));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(rp));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::I32Store8(0, 4));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(j));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::LocalGet(rl));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(o));
+    if reach == Reach::First {
+        b.push(Ins::I32Const(1));
+        b.push(Ins::LocalSet(done));
+    }
+    // An empty pattern must still advance, or the loop never ends: copy the
+    // character it matched before and step past it.
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::I32Store8(0, 4));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(o));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::End);
+    // The non-empty arm, as a second `if`: this instruction set has no `else`.
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    // No match here: copy one byte and step.
+    b.push(Ins::LocalGet(ok));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::I32Store8(0, 4));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(o));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::End);
+
     b.push(Ins::Br(0));
     b.push(Ins::End);
     b.push(Ins::End);

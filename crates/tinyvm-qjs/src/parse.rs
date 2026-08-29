@@ -1187,6 +1187,16 @@ pub(crate) mod m1 {
                 TokenKind::Unsupported(word) if word.phrase.contains("`export`") => {
                     self.export_statement()?
                 }
+                TokenKind::Unsupported(word) if word.phrase.contains("`break`") => {
+                    self.advance();
+                    self.semicolon()?;
+                    StmtKind::Break
+                }
+                TokenKind::Unsupported(word) if word.phrase.contains("`continue`") => {
+                    self.advance();
+                    self.semicolon()?;
+                    StmtKind::Continue
+                }
                 TokenKind::While => self.while_statement()?,
                 TokenKind::For => self.for_statement()?,
                 TokenKind::Return => {
@@ -3153,7 +3163,12 @@ pub(crate) mod m1 {
     fn fill_stmts(stmts: &mut [Stmt], res: &[Res]) {
         for stmt in stmts {
             match &mut stmt.kind {
-                StmtKind::Empty | StmtKind::Func { .. } => {}
+                // No names and no subtree, so the pass that writes
+                // resolutions back has nothing to visit.
+                StmtKind::Empty
+                | StmtKind::Func { .. }
+                | StmtKind::Break
+                | StmtKind::Continue => {}
                 StmtKind::Expr(e) => fill_expr(e, res),
                 StmtKind::Decl(decls) => {
                     for decl in decls {

@@ -1524,8 +1524,23 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     // phrase for a front end that cannot build the concatenation.
     // -- syntax whole milestones away ---------------------------------------
     ("eval(\"1\");", "the `eval` function"),
-    ("while (true) { break; }", "the `break` keyword"),
-    ("while (true) { continue; }", "the `continue` keyword"),
+    // `break` and `continue` left this table on 2026-08-29: both compile.
+    // What is still a capability boundary is one that would leave a `finally`
+    // block unrun, which needs the `pending` machinery `return` already uses.
+    // The nesting is this way round on purpose. `try { while … break } finally`
+    // is **fine** and compiles: the `break` leaves the loop, control reaches
+    // the end of the try block, and the `finally` runs as it should. What
+    // cannot be lowered is a `break` *inside* the `finally`'s reach that jumps
+    // past it -- and getting that backwards is exactly the mistake this row
+    // was written after making.
+    (
+        "while (true) { try { break; } finally { } }",
+        "a `break` that would leave a `finally` block",
+    ),
+    (
+        "while (true) { try { continue; } finally { } }",
+        "a `continue` that would leave a `finally` block",
+    ),
     ("do { } while (false);", "the `do` keyword"),
     ("switch (1) { }", "the `switch` keyword"),
     ("class C { }", "the `class` keyword"),

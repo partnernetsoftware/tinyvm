@@ -320,7 +320,7 @@ pub(crate) mod m1 {
     use crate::array::{self, Ar};
     use crate::ast::m1 as ast;
     use crate::convert;
-    use crate::diag::{Boundary, CompileError, host_table, unsupported};
+    use crate::diag::{Boundary, CompileError, host_table, malformed, unsupported};
     use crate::method;
     use crate::ir::m1 as ir;
     use crate::opts::{HostFn, HostParam, HostResult, Names, Options};
@@ -1524,7 +1524,12 @@ pub(crate) mod m1 {
         scan: &mut Scan,
     ) -> Result<(), CompileError> {
         match &stmt.kind {
-            ast::StmtKind::Empty | ast::StmtKind::Func { .. } => Ok(()),
+            ast::StmtKind::Empty
+            | ast::StmtKind::Func { .. }
+            // Neither names anything and neither has a subtree, so the scan
+            // that collects host names and capabilities has nothing to do.
+            | ast::StmtKind::Break
+            | ast::StmtKind::Continue => Ok(()),
             ast::StmtKind::Expr(e) => host_expr(e, scan),
             ast::StmtKind::Decl(declarators) => declarators.iter().try_for_each(|d| {
                 match (&d.init, program.binding(d.binding).kind) {
@@ -1830,6 +1835,53 @@ pub(crate) mod m1 {
         Pair { slot: u32, base: u32 },
     }
 
+    /// Where a `break` and a `continue` in this loop's body branch to.
+    ///
+    /// `exit` is the enclosing `block`, whose end is past the loop; `back` is
+    /// the `loop` itself, and branching to a loop label jumps to its top.
+    /// `finalizers` is how many `finally` blocks were open when the loop
+    /// started, which is what tells a `break` inside one that it would skip
+    /// the `finally` -- see `Lower::loop_target`.
+    #[derive(Clone, Copy)]
+    struct Loop {
+        exit: u32,
+        back: u32,
+        finalizers: usize,
+    }
+
+    /// Whether this loop body contains a `continue` that belongs to **this**
+    /// loop.
+    ///
+    /// Does not descend into a nested loop -- a `continue` in there is that
+    /// loop's -- and does not descend into a function body, which is a
+    /// different function entirely. Over-answering `true` costs two bytes
+    /// and under-answering costs an infinite loop, so the walk errs by
+    /// visiting everything else, including both arms of an `if` and every
+    /// part of a `try`.
+    fn body_has_continue(stmt: &ast::Stmt) -> bool {
+        match &stmt.kind {
+            ast::StmtKind::Continue => true,
+            ast::StmtKind::Block(body) => body.iter().any(body_has_continue),
+            ast::StmtKind::If { then, alt, .. } => {
+                body_has_continue(then) || alt.as_deref().is_some_and(body_has_continue)
+            }
+            ast::StmtKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                block.iter().any(body_has_continue)
+                    || handler
+                        .as_ref()
+                        .is_some_and(|c| c.body.iter().any(body_has_continue))
+                    || finalizer
+                        .as_ref()
+                        .is_some_and(|f| f.iter().any(body_has_continue))
+            }
+            _ => false,
+        }
+    }
+
     struct Lower<'a> {
         program: &'a ast::Program,
         ctx: &'a Ctx,
@@ -1888,6 +1940,14 @@ pub(crate) mod m1 {
         /// The enclosing `finally` blocks a `return` has to run on its way
         /// out, innermost last.
         finalizers: Vec<Finalizer>,
+        /// The enclosing loops a `break` or `continue` may reach, innermost
+        /// last.
+        ///
+        /// Modelled on `handlers` above, and for the same reason: `push`
+        /// already maintains `self.depth` for every `block`, `loop` and `if`,
+        /// so a construct that wants to be branched to only has to remember
+        /// what the depth was when it opened. Nothing else needs instrumenting.
+        loops: Vec<Loop>,
         /// The script's completion value, per ECMA-262 -- see [`Lower::stmt`].
         /// `None` in every other function, where only `return` produces one.
         completion: Option<u32>,
@@ -1976,6 +2036,7 @@ pub(crate) mod m1 {
                 depth: 0,
                 handlers: Vec::new(),
                 finalizers: Vec::new(),
+                loops: Vec::new(),
                 completion,
                 free: Vec::new(),
                 free_raw: Vec::new(),
@@ -2572,6 +2633,16 @@ pub(crate) mod m1 {
                 // so nothing can branch to a block's label, and the front end
                 // has already turned block scoping into distinct bindings.
                 ast::StmtKind::Block(stmts) => self.stmts(stmts),
+                ast::StmtKind::Break => {
+                    let target = self.loop_target("break", stmt.span)?;
+                    self.push(Ins::Br(self.depth - target.exit));
+                    Ok(())
+                }
+                ast::StmtKind::Continue => {
+                    let target = self.loop_target("continue", stmt.span)?;
+                    self.push(Ins::Br(self.depth - target.back));
+                    Ok(())
+                }
                 ast::StmtKind::If { test, then, alt } => self.if_stmt(test, then, alt.as_deref()),
                 // `while` gets no per-iteration bindings, and that is the
                 // specification rather than a shortcut: 13.7.4.7 gives the
@@ -3067,7 +3138,30 @@ pub(crate) mod m1 {
         ) -> Result<(), CompileError> {
             self.reset_completion();
             self.push(Ins::Block(BlockType::Empty));
+            let exit = self.depth;
             self.push(Ins::Loop(BlockType::Empty));
+            // A `continue` cannot branch to the loop label: that jumps to the
+            // loop's *top*, which re-runs the test and **skips the update** --
+            // so `for (…; i = i + 1)` would spin forever. It needs a label
+            // whose end is after the body and before the update, which is one
+            // more block:
+            //
+            //     block            ;; break
+            //       loop
+            //         <test>
+            //         block        ;; continue
+            //           <body>
+            //         end
+            //         <update>
+            //         br 0
+            //       end
+            //     end
+            //
+            // Emitted only when the body actually contains one, so a loop
+            // without `continue` is byte-identical to what it was. Two bytes,
+            // but the rule here is zero and a rule with an exception is not
+            // one.
+            let wants_continue = body_has_continue(body);
             // A missing test is `true`, which is a loop with no exit edge
             // other than a `return` inside it.
             if let Some(test) = test {
@@ -3075,7 +3169,20 @@ pub(crate) mod m1 {
                 self.push(Ins::I32Eqz);
                 self.push(Ins::BrIf(1));
             }
+            if wants_continue {
+                self.push(Ins::Block(BlockType::Empty));
+            }
+            let back = self.depth;
+            self.loops.push(Loop {
+                exit,
+                back,
+                finalizers: self.finalizers.len(),
+            });
             self.stmt(body)?;
+            self.loops.pop();
+            if wants_continue {
+                self.push(Ins::End);
+            }
             // Between the body and the update, which is where 13.7.4.7 puts
             // it: the pass that just ran keeps the cell its closures captured,
             // and the update writes to the copy the next pass will use. Doing
@@ -3092,6 +3199,36 @@ pub(crate) mod m1 {
             self.push(Ins::End);
             self.push(Ins::End);
             Ok(())
+        }
+
+
+
+        /// Where a `break` or a `continue` branches, or why it cannot.
+        ///
+        /// Two refusals, and both are the alternative to a silently wrong
+        /// jump. Outside any loop there is no label to reach, which ECMA-262
+        /// 14.9.1 makes an early error. Inside a `finally` that the loop
+        /// encloses, a plain branch would leave the `finally` **unrun** --
+        /// exactly the kind of legal-looking wrong answer this engine has
+        /// refused for `.wasm` routing, the `for … of` guards, `split("")` and
+        /// case mapping. Carrying it out properly needs the `pending` machinery
+        /// `try_finally` uses for `return`, and that is a separate piece of
+        /// work rather than a line here.
+        fn loop_target(&self, keyword: &str, span: ast::Span) -> Result<Loop, CompileError> {
+            let Some(&target) = self.loops.last() else {
+                return Err(malformed(
+                    &format!("finds a `{keyword}` outside any loop, which has nothing to branch to"),
+                    span.offset(),
+                ));
+            };
+            if self.finalizers.len() > target.finalizers {
+                return Err(unsupported(
+                    Boundary::FullJs,
+                    &format!("a `{keyword}` that would leave a `finally` block"),
+                    span.offset(),
+                ));
+            }
+            Ok(target)
         }
 
         /// `UpdateEmpty(V, undefined)`: a control-flow statement whose body
