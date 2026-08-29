@@ -490,6 +490,15 @@ pub(crate) mod m1 {
         scope: usize,
         func: FuncId,
         role: Role,
+        /// The expression that held this occurrence was folded away, so there
+        /// is nothing left to resolve.
+        ///
+        /// Only `Number(x)` sets it today. A fold that removes a *name* has to
+        /// say so: the occurrence was recorded when the name was read, before
+        /// the `(` that makes it foldable was seen, and resolution otherwise
+        /// runs on it and reports an undeclared `Number` for a program that no
+        /// longer mentions one.
+        folded: bool,
     }
 
     /// What the occurrence does to the binding. The three answers differ:
@@ -812,6 +821,7 @@ pub(crate) mod m1 {
                 scope: self.scope(),
                 func: self.func(),
                 role,
+                folded: false,
             });
             Name {
                 text: text.to_string(),
@@ -1398,6 +1408,86 @@ pub(crate) mod m1 {
             self.leave();
             self.shallower(2);
             parts
+        }
+
+        /// `Number(x)` folded to `+x`, or the arguments handed back untouched.
+        ///
+        /// ECMA-262 21.1.1.1 is ToNumber and nothing else, and unary `+` is
+        /// ToNumber -- 13.5.4.1 says so in as many words. So this is the same
+        /// fold template literals and `for … of` get: a global that already
+        /// has an operator spelling costs no runtime function, no gate and no
+        /// name binding.
+        ///
+        /// `Number()` with no argument is `+0` by 21.1.1.1 step 1, not `NaN` --
+        /// `Number(undefined)` is the `NaN` one, and the difference is easy to
+        /// get backwards.
+        ///
+        /// # Why this was the only thing missing
+        ///
+        /// String-to-number conversion has worked since the conversions
+        /// landed: `+x`, `x * 1` and `x - 0` all reach it. The survey's
+        /// `parse_int` row -- 7 downstream scripts, 17 uses -- was never
+        /// asking for the conversion, only for a name to call it by.
+        ///
+        /// # What is deliberately *not* folded
+        ///
+        /// `parseInt` is a different function: it parses a *prefix*, takes a
+        /// radix, and answers `42` for `"42abc"` where `Number` answers `NaN`.
+        /// The corpus's `parse_int` is strict -- it reads whole integers out of
+        /// arguments and config -- so `Number` is the honest match, and
+        /// `parseInt` stays unbound until something asks for prefix parsing by
+        /// name rather than by resemblance.
+        ///
+        /// A source that declares its own `Number`, or a host table that does,
+        /// wins: a declaration is a deliberate act and this fold is a default,
+        /// which is the same precedence `JSON` follows.
+        fn fold_number_call(
+            &mut self,
+            callee: &Expr,
+            args: Vec<Expr>,
+            span: Span,
+        ) -> Result<Result<Expr, Vec<Expr>>, CompileError> {
+            let ExprKind::Name(name) = &callee.kind else {
+                return Ok(Err(args));
+            };
+            if name.text != NUMBER || declared(&self.options.names, NUMBER) {
+                return Ok(Err(args));
+            }
+            if self.is_declared_in_scope(NUMBER) {
+                return Ok(Err(args));
+            }
+            self.pending[name.occurrence as usize].folded = true;
+            let mut args = args;
+            match args.len() {
+                0 => Ok(Ok(Expr {
+                    kind: ExprKind::Int(0),
+                    span,
+                })),
+                1 => Ok(Ok(Expr {
+                    kind: ExprKind::Unary(UnaryOp::Plus, Box::new(args.remove(0))),
+                    span,
+                })),
+                n => Err(unsupported(
+                    Boundary::FullJs,
+                    &format!("`Number` called with {n} arguments; it takes one"),
+                    span.offset(),
+                )),
+            }
+        }
+
+        /// Whether some enclosing scope declares this name.
+        ///
+        /// The escape hatch that keeps `Number` a *default*: a script that
+        /// writes `const Number = …` means its own, and gets it.
+        fn is_declared_in_scope(&self, name: &str) -> bool {
+            let mut scope = self.open.last().copied();
+            while let Some(id) = scope {
+                if self.lookup(id, name).is_some() {
+                    return true;
+                }
+                scope = self.scopes[id].parent;
+            }
+            false
         }
 
         /// Whether the header reads `let`/`const`/`var` NAME `of`.
@@ -2370,12 +2460,15 @@ pub(crate) mod m1 {
                         // run-time TypeError rather than a syntax one.
                         self.relabel(&expr, Role::Call);
                         let args = self.arguments()?;
-                        expr = Expr {
-                            kind: ExprKind::Call {
-                                callee: Box::new(expr),
-                                args,
+                        expr = match self.fold_number_call(&expr, args, span)? {
+                            Ok(folded) => folded,
+                            Err(args) => Expr {
+                                kind: ExprKind::Call {
+                                    callee: Box::new(expr),
+                                    args,
+                                },
+                                span,
                             },
-                            span,
                         };
                     }
                     TokenKind::PlusPlus | TokenKind::MinusMinus => {
@@ -2809,7 +2902,19 @@ pub(crate) mod m1 {
             let resolved: Vec<Res> = self
                 .pending
                 .iter()
-                .map(|p| self.resolve_one(p))
+                .map(|p| {
+                    if p.folded {
+                        // Nothing reads this answer: the tree that held the
+                        // occurrence is gone. `Unresolved` is what the parser
+                        // starts every occurrence at, and the invariant it
+                        // breaks -- "never present in a `Program` the parser
+                        // returned" -- is about occurrences that *are* in the
+                        // tree. This one is not.
+                        Ok(Res::Unresolved)
+                    } else {
+                        self.resolve_one(p)
+                    }
+                })
                 .collect::<Result<_, _>>()?;
             self.record_captures(&resolved);
             Ok(resolved)
@@ -3022,6 +3127,9 @@ pub(crate) mod m1 {
     ///
     /// Only [`Names::Declared`] has a table; the other two modes never take a
     /// name away from the engine's own -- see [`Parser::resolve_one`].
+    /// The name a global `Number(x)` is spelled with.
+    const NUMBER: &str = "Number";
+
     fn declared(names: &Names, name: &str) -> bool {
         match names {
             Names::Declared(decls) => decls.iter().any(|d| d.name == name),

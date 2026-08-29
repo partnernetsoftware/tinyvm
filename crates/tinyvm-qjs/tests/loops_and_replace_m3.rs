@@ -221,3 +221,70 @@ fn what_the_pair_costs_is_written_down() {
     println!("replace: {one} bytes; adding replaceAll: {} more", both - one);
     assert!(one > 0 && one < 900, "replace is {one} bytes");
 }
+
+// ---- Number() -----------------------------------------------------------
+
+/// `Number(x)` is ToNumber, which is what unary `+` already was.
+///
+/// The survey's last unbuilt row with real demand: `parse_int` in 7 downstream
+/// scripts, 17 uses. Probing first showed the *conversion* had worked since it
+/// landed -- `+x`, `x * 1` and `x - 0` all reach it -- and only the name was
+/// missing. So this is a fold, not a function: no runtime code, no gate, no
+/// binding.
+#[test]
+fn number_converts_the_way_unary_plus_does() {
+    assert_eq!(run("return Number(\"42\");"), "42");
+    assert_eq!(run("return Number(\"3.5\");"), "3.5");
+    assert_eq!(run("return Number(\"-7\");"), "-7");
+    assert_eq!(run("return Number(true);"), "1");
+    assert_eq!(run("return Number(5);"), "5");
+    assert_eq!(run("return Number(\"\");"), "0");
+}
+
+/// `Number()` with no argument is `+0`, not `NaN`.
+///
+/// ECMA-262 21.1.1.1 step 1. `Number(undefined)` is the `NaN` one, and the two
+/// are easy to get backwards -- which is why both are here.
+#[test]
+fn number_of_nothing_is_zero_and_number_of_undefined_is_not() {
+    assert_eq!(run("return Number();"), "0");
+    assert_eq!(run("return Number(undefined) === Number(undefined);"), "false");
+}
+
+/// It reads the way the corpus does: text out of an argument, into a count.
+#[test]
+fn it_reads_the_way_the_corpus_parses_arguments() {
+    let source = "const args = [\"12\", \"7\", \"x\"];
+    let total = 0;
+    for (const a of args) {
+        const n = Number(a);
+        if (n === n) { total = total + n; }
+    }
+    return total;";
+    assert_eq!(run(source), "19");
+}
+
+/// A script that declares its own `Number` gets its own.
+///
+/// The fold is a *default*, and a declaration is a deliberate act -- the same
+/// precedence `JSON` follows. Without this the fold would be a reserved word
+/// nobody declared.
+#[test]
+fn a_script_that_declares_number_gets_its_own() {
+    let source = "function Number(x) { return 99; }
+    return Number(\"42\");";
+    assert_eq!(run(source), "99");
+}
+
+/// `parseInt` stays unbound, and the diagnostic says the name rather than
+/// pretending.
+///
+/// It is a different function: prefix parsing with a radix, answering `42` for
+/// `"42abc"` where `Number` answers `NaN`. The corpus's `parse_int` is strict,
+/// so `Number` is the honest match and this waits for somebody to ask for
+/// prefix parsing by name.
+#[test]
+fn parse_int_is_not_silently_number() {
+    let error = compile_qjs_m1("return parseInt(\"42abc\");").expect_err("unbound");
+    assert!(error.message.contains("parseInt"), "{}", error.message);
+}
