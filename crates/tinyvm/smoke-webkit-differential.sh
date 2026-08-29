@@ -9,6 +9,18 @@ CARGO=${CARGO:-cargo}
 ORACLE="$TEMP/TinyArcadeWebKitOracle"
 ADAPTER="$CRATE/tests/webkit/TinyArcadeWebKitOracle.js"
 H5="$CRATE/tests/webkit/TinyArcadeH5Oracle.html"
+# Any Chromium-family browser drives the H5 oracle; the first one present
+# wins unless H5_BROWSER names one.
+if [ -z "${H5_BROWSER:-}" ]; then
+  for candidate in \
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+    "/Applications/Chromium.app/Contents/MacOS/Chromium" \
+    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" \
+    "/Applications/Brave Origin.app/Contents/MacOS/Brave Origin" \
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"; do
+    if [ -x "$candidate" ]; then H5_BROWSER=$candidate; break; fi
+  done
+fi
 H5_BROWSER=${H5_BROWSER:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}
 
 if [ ! -x "$H5_BROWSER" ]; then
