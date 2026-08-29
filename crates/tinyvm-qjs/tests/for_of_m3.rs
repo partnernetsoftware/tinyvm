@@ -260,11 +260,11 @@ fn the_refusal_is_a_throw_a_catch_can_see() {
 #[test]
 fn a_program_without_for_of_pays_nothing_for_it() {
     for (source, want) in [
-        ("return 1;", 9_765),
-        ("let o = {a:1}; o.b = 2; return o.a;", 9_909) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
+        ("return 1;", 9_940),
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_084) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
         (
             "function mk() { return function () { return 1; }; } let f = mk(); return f();",
-            9_929,
+            10_104,
         ),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();

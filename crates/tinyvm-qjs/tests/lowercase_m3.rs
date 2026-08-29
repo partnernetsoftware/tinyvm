@@ -179,11 +179,11 @@ fn it_reads_the_way_the_corpus_uses_it() {
 #[test]
 fn a_program_that_never_lowercases_carries_none_of_it() {
     for (source, want) in [
-        ("return 1;", 9_765),
-        ("let o = {a:1}; o.b = 2; return o.a;", 9_909) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
+        ("return 1;", 9_940),
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_084) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
         (
             "function mk() { return function () { return 1; }; } let f = mk(); return f();",
-            9_929,
+            10_104,
         ),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();

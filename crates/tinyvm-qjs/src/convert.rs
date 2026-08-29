@@ -1438,6 +1438,57 @@ fn num_to_string(ctx: &Ctx) -> FnBuild {
         },
     );
 
+    // Fast path, ahead of Dragon4: an integer below 2^31 prints as its
+    // digits (steps 6-7 with k == n, no exponent, no point), and the general
+    // path cost ~5 200 steps for `"" + n` -- the single most expensive thing
+    // a migrated script did per line. Measured through the CLI at 1012da1.
+    if_then(
+        b,
+        |b| {
+            b.extend_from_slice(&[ld(x), Ins::F64Const(2_147_483_648.0), Ins::F64Lt]);
+            b.extend_from_slice(&[ld(x), ld(x), Ins::F64Trunc, Ins::F64Eq, Ins::I32And]);
+        },
+        |b| {
+            b.extend_from_slice(&[ld(x), Ins::I32TruncF64S, st(n)]);
+            b.extend_from_slice(&[ic(STRING_HEADER + 12), ctx.alloc(), st(p)]);
+            b.extend_from_slice(&[ic(0), st(w)]);
+            if_then(
+                b,
+                |b| b.push(ld(neg)),
+                |b| {
+                    b.extend_from_slice(&[ld(p), ld(w), Ins::I32Add, ic(45)]);
+                    b.push(Ins::I32Store8(0, STRING_HEADER as u32));
+                    bump(b, w, 1);
+                },
+            );
+            // How many digits: at least one, so 0 prints as "0".
+            b.extend_from_slice(&[ld(n), st(k), ic(0), st(i)]);
+            while_loop(
+                b,
+                |b| b.extend_from_slice(&[ld(k), ic(0), Ins::I32Ne, ld(i), Ins::I32Eqz, Ins::I32Or]),
+                |b| {
+                    bump(b, i, 1);
+                    b.extend_from_slice(&[ld(k), ic(10), Ins::I32DivS, st(k)]);
+                },
+            );
+            // Written from the end, least significant digit first.
+            b.extend_from_slice(&[ld(w), ld(i), Ins::I32Add, st(w), ld(w), st(k)]);
+            while_loop(
+                b,
+                |b| b.extend_from_slice(&[ld(i), ic(0), Ins::I32Ne]),
+                |b| {
+                    bump(b, k, -1);
+                    bump(b, i, -1);
+                    b.extend_from_slice(&[ld(p), ld(k), Ins::I32Add]);
+                    b.extend_from_slice(&[ld(n), ic(10), Ins::I32RemS, ic(48), Ins::I32Add]);
+                    b.push(Ins::I32Store8(0, STRING_HEADER as u32));
+                    b.extend_from_slice(&[ld(n), ic(10), Ins::I32DivS, st(n)]);
+                },
+            );
+            b.extend_from_slice(&[ld(p), ld(w), Ins::I32Store(ALIGN_WORD, 0), ld(p), Ins::Return]);
+        },
+    );
+
     b.extend_from_slice(&[ic(24), ctx.alloc(), st(digits)]);
     b.extend_from_slice(&[ld(x), ld(digits), ctx.call(Cv::Dragon4)]);
     b.extend_from_slice(&[st(n), st(k)]);
