@@ -1931,28 +1931,185 @@ fn obj_new(ctx: &Ctx) -> FnBuild {
 /// or the digits `__num_to_string` just allocated -- is a fresh record. Comparing
 /// pointers would make `o[1]` and `o["1"]` two properties, which is the exact
 /// thing ECMA-262 7.1.19 says they are not.
+///
+/// # The scan is linear, so the miss has to be cheap
+///
+/// Every entry ahead of the answer is a miss, and a miss through `__str_eq`
+/// cost ~130 steps when the keys shared a prefix (`key000`..`key019`): the
+/// call, the length test, then the bytes up to the first that differs. A
+/// 20-key object paid ~2 800 steps to read its last property and ~27 600 to
+/// be built (2026-08-31). So the entry's key is now rejected *here* first,
+/// on what one load each can tell: the same pointer is a hit outright (an
+/// interned literal against the literal that stored it); a different length
+/// is a miss; a different first word -- masked to the length when it is
+/// under four, since the record is padded to a word but the padding is not
+/// promised to be anything -- is a miss. Only an entry that passes all
+/// three goes to the last word (keys built the same way -- `key000`,
+/// `key019` -- share their first bytes and differ at the end), and only
+/// then to `__str_eq`, which is the byte-for-byte answer it always was.
+/// ~30 steps a miss. The empty key skips the word: `alloc(4)` is four
+/// bytes and the word after it may be past the end of memory.
+///
+/// A program that can hold no object never calls this; it keeps the old
+/// body, so its bytes do not move (`ctx.object_names` is the same gate the
+/// kind names use).
 fn obj_find(ctx: &Ctx) -> FnBuild {
     let mut f = FnBuild::new(3);
     let i = f.local(ValType::I32);
+    if ctx.object_names.is_none() {
+        let b = &mut f.body;
+        b.push(Ins::I32Const(0));
+        b.push(Ins::LocalSet(i));
+        b.push(Ins::Block(BlockType::Empty));
+        b.push(Ins::Loop(BlockType::Empty));
+        b.push(Ins::LocalGet(i));
+        b.push(Ins::LocalGet(1));
+        b.push(Ins::I32GeU);
+        b.push(Ins::BrIf(1));
+        entry_at(b, 0, i);
+        b.push(Ins::I32Load(ALIGN_WORD, ENTRY_KEY));
+        b.push(Ins::LocalGet(2));
+        b.push(ctx.call(Rt::StrEq));
+        b.push(Ins::If(BlockType::Empty));
+        b.push(Ins::LocalGet(i));
+        b.push(Ins::Return);
+        b.push(Ins::End);
+        b.push(Ins::LocalGet(i));
+        b.push(Ins::I32Const(1));
+        b.push(Ins::I32Add);
+        b.push(Ins::LocalSet(i));
+        b.push(Ins::Br(0));
+        b.push(Ins::End);
+        b.push(Ins::End);
+        b.push(Ins::I32Const(-1));
+        return f;
+    }
+    // `i` is the entry's address here, not its index.
+    let end = f.local(ValType::I32);
+    let klen = f.local(ValType::I32);
+    let kw = f.local(ValType::I32);
+    let mask = f.local(ValType::I32);
+    let ek = f.local(ValType::I32);
+    let hit = f.local(ValType::I32);
+    let long = f.local(ValType::I32);
+    let kl = f.local(ValType::I32);
     let b = &mut f.body;
-    b.push(Ins::I32Const(0));
+    // klen = key.len; mask = klen < 4 ? (1 << 8*klen) - 1 : -1;
+    // kw = klen != 0 ? key.word0 & mask : 0; long = klen >= 4;
+    // kl = long ? the key's last word : 0.
+    b.push(Ins::LocalGet(2));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalSet(klen));
+    b.push(Ins::I32Const(-1));
+    b.push(Ins::LocalSet(mask));
+    b.push(Ins::LocalGet(klen));
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::LocalGet(klen));
+    b.push(Ins::I32Const(3));
+    b.push(Ins::I32Shl);
+    b.push(Ins::I32Shl);
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Sub);
+    b.push(Ins::LocalSet(mask));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(klen));
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(2));
+    b.push(Ins::I32Load(ALIGN_WORD, STRING_HEADER as u32));
+    b.push(Ins::LocalGet(mask));
+    b.push(Ins::I32And);
+    b.push(Ins::LocalSet(kw));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(klen));
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32GeU);
+    b.push(Ins::LocalSet(long));
+    b.push(Ins::LocalGet(long));
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(2));
+    b.push(Ins::LocalGet(klen));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load(0, 0));
+    b.push(Ins::LocalSet(kl));
+    b.push(Ins::End);
+    // i = entries; end = entries + len * ENTRY_BYTES.
+    b.push(Ins::LocalGet(0));
     b.push(Ins::LocalSet(i));
+    entry_at(b, 0, 1);
+    b.push(Ins::LocalSet(end));
     b.push(Ins::Block(BlockType::Empty));
     b.push(Ins::Loop(BlockType::Empty));
     b.push(Ins::LocalGet(i));
-    b.push(Ins::LocalGet(1));
+    b.push(Ins::LocalGet(end));
     b.push(Ins::I32GeU);
     b.push(Ins::BrIf(1));
-    entry_at(b, 0, i);
+    b.push(Ins::LocalGet(i));
     b.push(Ins::I32Load(ALIGN_WORD, ENTRY_KEY));
+    b.push(Ins::LocalSet(ek));
+    // The same record: a hit with no bytes read.
+    b.push(Ins::LocalGet(ek));
+    b.push(Ins::LocalGet(2));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Sub);
+    b.push(Ins::I32Const(ENTRY_BYTES));
+    b.push(Ins::I32DivS);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+    // hit = ek.len == klen; then, for a non-empty key, the first word.
+    b.push(Ins::LocalGet(ek));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalGet(klen));
+    b.push(Ins::I32Eq);
+    b.push(Ins::LocalSet(hit));
+    b.push(Ins::LocalGet(hit));
+    b.push(Ins::LocalGet(klen));
+    b.push(Ins::I32And);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(ek));
+    b.push(Ins::I32Load(ALIGN_WORD, STRING_HEADER as u32));
+    b.push(Ins::LocalGet(mask));
+    b.push(Ins::I32And);
+    b.push(Ins::LocalGet(kw));
+    b.push(Ins::I32Eq);
+    b.push(Ins::LocalSet(hit));
+    b.push(Ins::End);
+    // Then the last word, when there is one the first did not cover:
+    // keys built the same way share their first bytes (`key000`,
+    // `key019`) and differ at the end.
+    b.push(Ins::LocalGet(hit));
+    b.push(Ins::LocalGet(long));
+    b.push(Ins::I32And);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(ek));
+    b.push(Ins::LocalGet(klen));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load(0, 0));
+    b.push(Ins::LocalGet(kl));
+    b.push(Ins::I32Eq);
+    b.push(Ins::LocalSet(hit));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(hit));
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(ek));
     b.push(Ins::LocalGet(2));
     b.push(ctx.call(Rt::StrEq));
     b.push(Ins::If(BlockType::Empty));
     b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Sub);
+    b.push(Ins::I32Const(ENTRY_BYTES));
+    b.push(Ins::I32DivS);
     b.push(Ins::Return);
     b.push(Ins::End);
+    b.push(Ins::End);
     b.push(Ins::LocalGet(i));
-    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Const(ENTRY_BYTES));
     b.push(Ins::I32Add);
     b.push(Ins::LocalSet(i));
     b.push(Ins::Br(0));
