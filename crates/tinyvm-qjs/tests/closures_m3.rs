@@ -263,7 +263,12 @@ fn a_program_with_no_capture_is_byte_identical_to_what_it_was() {
         // through `__jb_bytes` and escapes only the byte that stopped the
         // run (117 -> 39 steps a byte, tests/json_stringify_cost.rs). Only
         // programs that name JSON carry it; "return 1;" above did not move.
-        ("return JSON.stringify({a:1});", 16_743),
+        // +353 on 2026-08-30 (late): `JSON.parse` skips whitespace by the
+        // word and builds a plain string straight from the text (`__jp_run`
+        // measures the run once for both call sites); real broker answers
+        // 58-64 -> 34-42 steps a byte (tests/json_parse_cost.rs,
+        // plan/design-json-parse-fast.md). Same rule: only JSON programs.
+        ("return JSON.stringify({a:1});", 17_096),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(

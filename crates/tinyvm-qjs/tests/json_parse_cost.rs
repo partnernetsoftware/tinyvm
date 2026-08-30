@@ -149,7 +149,9 @@ fn a_pretty_broker_answer_has_a_known_price_per_byte() {
     // server-smoke's bill, profiled 2026-08-30 (`plan/design-host-op-budget.md`
     // §7 downstream): 225 KB of such answers cost 13.56M steps, 43% of the
     // journey, at 58-64 steps a byte -- 39 of them on every indentation
-    // byte, ~760 fixed on every key and string.
+    // byte, ~760 fixed on every key and string. Whitespace by the word and
+    // strings built straight from the text (the same night) brought the
+    // real answers to 34-42 a byte; this synthetic one reads ~49.
     let small = pretty_answer(8);
     let large = pretty_answer(200);
     let per_small = parse_cost_of(&small) / small.len() as u64;
@@ -160,18 +162,30 @@ fn a_pretty_broker_answer_has_a_known_price_per_byte() {
         large.len()
     );
     assert!(
-        per_large < 90,
-        "a pretty answer byte cost {per_large} steps"
+        per_large < 60,
+        "a pretty answer byte cost {per_large} steps; it was ~72"
     );
 }
 
 #[test]
 fn json_whitespace_has_a_known_price() {
-    let spaces = parse_cost_of(&format!("{}1", " ".repeat(1000)));
     let one = parse_cost_of("1");
+    let spaces = parse_cost_of(&format!("{}1", " ".repeat(1000)));
     let per_byte = (spaces - one) / 1000;
     println!("JSON.parse over 1 000 spaces: {per_byte} steps per byte");
-    assert!(per_byte < 50, "a whitespace byte cost {per_byte} steps");
+    assert!(
+        per_byte < 20,
+        "a whitespace byte cost {per_byte} steps; it was 39"
+    );
+    // Indentation the way a pretty printer writes it: a line feed and a run
+    // of spaces, taken by the word.
+    let lines = parse_cost_of(&format!("{}1", "\n        ".repeat(100)));
+    let per_byte = (lines - one) / 900;
+    println!("JSON.parse over 100 indented lines: {per_byte} steps per byte");
+    assert!(
+        per_byte < 12,
+        "an indentation byte cost {per_byte} steps; it was 39"
+    );
 }
 
 #[test]
@@ -181,7 +195,7 @@ fn a_short_string_has_a_known_fixed_price() {
     let per = (strings - empty) / 200;
     println!("JSON.parse of \"ab\" in an array: {per} steps each");
     assert!(
-        per < 900,
-        "a two-character string cost {per} steps to parse"
+        per < 700,
+        "a two-character string cost {per} steps to parse; it was ~760"
     );
 }

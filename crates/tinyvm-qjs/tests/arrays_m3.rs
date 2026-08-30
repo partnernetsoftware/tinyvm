@@ -687,8 +687,12 @@ fn naming_json_brings_the_array_set_because_parse_can_return_one() {
     let n = compile_qjs_m1("return JSON.stringify({a:1});")
         .expect("compiles")
         .len();
+    // +353 on 2026-08-30 (late): the JSON set's parse fast paths (`__jp_ws`
+    // by the word, `__jp_run` + a direct string build in `__json_pstr`);
+    // see closures_m3 and plan/design-json-parse-fast.md. The array-set
+    // arithmetic below is unchanged.
     assert_eq!(
-        n, 16_743,
+        n, 17_096,
         "the array set costs 1 130 bytes on top of the JSON set's 14 284 -- 753 for the \
          type and 377 more for `JSON.parse`/`JSON.stringify` of one. That arithmetic is \
          unchanged; the total went down by 28 on 2026-08-28 because `__len`'s dead body \

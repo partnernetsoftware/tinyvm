@@ -3229,6 +3229,8 @@ pub(crate) mod json {
         // 25.5.1, the JSON grammar
         PAt,
         PWs,
+        /// The length of the plain-ASCII run at the cursor.
+        PRun,
         PLit,
         PHex4,
         PUtf8,
@@ -3259,6 +3261,7 @@ pub(crate) mod json {
         Js::Stringify,
         Js::PAt,
         Js::PWs,
+        Js::PRun,
         Js::PLit,
         Js::PHex4,
         Js::PUtf8,
@@ -3291,6 +3294,7 @@ pub(crate) mod json {
                 Js::Stringify => "__json_stringify",
                 Js::PAt => "__jp_at",
                 Js::PWs => "__jp_ws",
+                Js::PRun => "__jp_run",
                 Js::PLit => "__jp_lit",
                 Js::PHex4 => "__jp_hex4",
                 Js::PUtf8 => "__jp_utf8",
@@ -3482,6 +3486,7 @@ pub(crate) mod json {
             Js::Stringify => (jvalues(3), jvalues(1), json_stringify(ctx)),
             Js::PAt => (vec![I32], vec![I32], jp_at()),
             Js::PWs => (vec![I32], vec![], jp_ws(ctx)),
+            Js::PRun => (vec![I32], vec![I32], jp_run()),
             Js::PLit => (vec![I32, I32], vec![I32], jp_lit()),
             Js::PHex4 => (vec![I32], vec![I32], jp_hex4(ctx)),
             Js::PUtf8 => (vec![I32, I32], vec![], jp_utf8(ctx)),
@@ -4555,26 +4560,108 @@ pub(crate) mod json {
     /// feed, carriage return and space. Not `StrWhiteSpace`: 25.5.1's grammar is
     /// its own, and `__skip_ws` next door would accept NBSP, the Zs category and
     /// the line separators, none of which JSON has.
-    fn jp_ws(ctx: &JsonCtx) -> FnBuild {
+    ///
+    /// Reads the text directly instead of asking `__jp_at` for every byte:
+    /// that loop cost 39 steps a byte, and a broker answer printed with
+    /// two-space indentation is 40-60% whitespace (server-smoke's 225 KB of
+    /// answers carried 123 KB of it, 4.8M steps). The run of spaces after a
+    /// line feed -- the indentation -- goes four at a time while four remain,
+    /// then two, then the outer loop takes the odd one.
+    fn jp_ws(_ctx: &JsonCtx) -> FnBuild {
         let mut f = FnBuild::new(1);
+        let src = f.local(ValType::I32);
+        let len = f.local(ValType::I32);
+        let pos = f.local(ValType::I32);
         let c = f.local(ValType::I32);
+        let w = f.local(ValType::I32);
         let b = &mut f.body;
-        while_loop(
-            b,
-            |b| {
-                at_byte(ctx, b, 0);
-                b.push(st(c));
-                for (index, ch) in [0x20, 0x09, 0x0a, 0x0d].into_iter().enumerate() {
-                    b.push(ld(c));
-                    b.push(ic(ch));
-                    b.push(Ins::I32Eq);
-                    if index > 0 {
-                        b.push(Ins::I32Or);
-                    }
-                }
-            },
-            |b| advance(b, 0, 1),
-        );
+        b.extend_from_slice(&[ld(0), Ins::I32Load(ALIGN_WORD, PS_SRC), st(src)]);
+        b.extend_from_slice(&[ld(0), Ins::I32Load(ALIGN_WORD, PS_POS), st(pos)]);
+        b.extend_from_slice(&[ld(src), Ins::I32Load(ALIGN_WORD, 0), st(len)]);
+        // Inside the loop: 0 = the loop (another byte), 1 = the block (done).
+        b.push(Ins::Block(BlockType::Empty));
+        b.push(Ins::Loop(BlockType::Empty));
+        b.extend_from_slice(&[ld(pos), ld(len), Ins::I32GeU, Ins::BrIf(1)]);
+        b.extend_from_slice(&[
+            ld(src),
+            ld(pos),
+            Ins::I32Add,
+            Ins::I32Load8U(0, STRING_HEADER as u32),
+            st(c),
+        ]);
+        // A space: one byte, and back for the next.
+        b.extend_from_slice(&[ld(c), ic(0x20), Ins::I32Eq, Ins::If(BlockType::Empty)]);
+        bump(b, pos, 1);
+        b.push(Ins::Br(1));
+        b.push(Ins::End);
+        // A line feed: what follows is indentation.
+        b.extend_from_slice(&[ld(c), ic(0x0a), Ins::I32Eq, Ins::If(BlockType::Empty)]);
+        {
+            // Inside: 0 = this `if`, 1 = the loop, 2 = the block.
+            bump(b, pos, 1);
+            b.push(Ins::Block(BlockType::Empty));
+            b.push(Ins::Loop(BlockType::Empty));
+            // Inside: 0 = this loop, 1 = its block, 2 = the `if`, 3 = the
+            // outer loop. Fewer than four bytes left: out.
+            b.extend_from_slice(&[
+                ld(len),
+                ld(pos),
+                ic(4),
+                Ins::I32Add,
+                Ins::I32LtU,
+                Ins::BrIf(1),
+            ]);
+            b.extend_from_slice(&[
+                ld(src),
+                ld(pos),
+                Ins::I32Add,
+                Ins::I32Load(0, STRING_HEADER as u32),
+                st(w),
+            ]);
+            b.extend_from_slice(&[
+                ld(w),
+                ic(0x2020_2020),
+                Ins::I32Eq,
+                Ins::If(BlockType::Empty),
+            ]);
+            bump(b, pos, 4);
+            b.push(Ins::Br(1));
+            b.push(Ins::End);
+            // Not four spaces; the first two? Then the outer loop takes any
+            // odd one.
+            b.extend_from_slice(&[
+                ld(w),
+                ic(0xffff),
+                Ins::I32And,
+                ic(0x2020),
+                Ins::I32Eq,
+                Ins::If(BlockType::Empty),
+            ]);
+            bump(b, pos, 2);
+            b.push(Ins::End);
+            b.push(Ins::Br(1));
+            b.push(Ins::End);
+            b.push(Ins::End);
+            b.push(Ins::Br(1));
+        }
+        b.push(Ins::End);
+        // A tab or a carriage return: one byte. Anything else ends the run.
+        b.extend_from_slice(&[
+            ld(c),
+            ic(0x09),
+            Ins::I32Eq,
+            ld(c),
+            ic(0x0d),
+            Ins::I32Eq,
+            Ins::I32Or,
+            Ins::I32Eqz,
+            Ins::BrIf(1),
+        ]);
+        bump(b, pos, 1);
+        b.push(Ins::Br(0));
+        b.push(Ins::End);
+        b.push(Ins::End);
+        b.extend_from_slice(&[ld(0), ld(pos), Ins::I32Store(ALIGN_WORD, PS_POS)]);
         f
     }
 
@@ -4785,6 +4872,156 @@ pub(crate) mod json {
         f
     }
 
+    /// `__jp_run(state) -> k`: how many plain ASCII bytes -- printable, not
+    /// `"`, not `\` -- start at the cursor. The cursor does not move.
+    ///
+    /// Four bytes at a time while four remain, then one at a time. One
+    /// function rather than the scan inlined at its two call sites (the
+    /// direct string build and the general loop's run), so a program that
+    /// names `JSON` carries the ~200 bytes once.
+    fn jp_run() -> FnBuild {
+        let mut f = FnBuild::new(1);
+        let run_src = f.local(ValType::I32);
+        let run_pos = f.local(ValType::I32);
+        let run_len = f.local(ValType::I32);
+        let run_k = f.local(ValType::I32);
+        let run_w = f.local(ValType::I32);
+        let run_t = f.local(ValType::I32);
+        let run_ok = f.local(ValType::I32);
+        let e = f.local(ValType::I32);
+        let b = &mut f.body;
+        b.extend_from_slice(&[ld(0), Ins::I32Load(ALIGN_WORD, PS_SRC), st(run_src)]);
+        b.extend_from_slice(&[ld(0), Ins::I32Load(ALIGN_WORD, PS_POS), st(run_pos)]);
+        b.extend_from_slice(&[ld(run_src), Ins::I32Load(ALIGN_WORD, 0), st(run_len)]);
+        b.extend_from_slice(&[ic(0), st(run_k)]);
+        // Four bytes at a time while four remain: a word is plain when no
+        // byte is below 0x20, none has its high bit, and none is `"` or
+        // `\`. The instruction set has no xor and no not, so
+        // `a ^ b` is `(a | b) - (a & b)` and `~x` is `-1 - x`; "has a zero
+        // byte" is the usual `(x - 0x01010101) & ~x & 0x80808080`.
+        let has_zero = |b: &mut Vec<Ins>, x: u32| {
+            b.extend_from_slice(&[
+                ld(x),
+                ic(0x0101_0101),
+                Ins::I32Sub,
+                ic(-1),
+                ld(x),
+                Ins::I32Sub,
+                Ins::I32And,
+                ic(0x8080_8080u32 as i32),
+                Ins::I32And,
+            ]);
+        };
+        let xor_into = |b: &mut Vec<Ins>, x: u32, k: i32, into: u32| {
+            b.extend_from_slice(&[
+                ld(x),
+                ic(k),
+                Ins::I32Or,
+                ld(x),
+                ic(k),
+                Ins::I32And,
+                Ins::I32Sub,
+                st(into),
+            ]);
+        };
+        b.push(Ins::Block(BlockType::Empty));
+        b.push(Ins::Loop(BlockType::Empty));
+        // len < pos + k + 4 -> not a whole word left
+        b.push(ld(run_len));
+        b.push(ld(run_pos));
+        b.push(ld(run_k));
+        b.push(Ins::I32Add);
+        b.push(ic(4));
+        b.push(Ins::I32Add);
+        b.push(Ins::I32LtU);
+        b.push(Ins::BrIf(1));
+        b.push(ld(run_src));
+        b.push(ld(run_pos));
+        b.push(Ins::I32Add);
+        b.push(ld(run_k));
+        b.push(Ins::I32Add);
+        b.push(Ins::I32Load(0, STRING_HEADER as u32));
+        b.push(st(run_w));
+        // bad = hasless(w, 0x20) | (w & 0x80808080) | haszero(w ^ '"'*4) | haszero(w ^ '\\'*4)
+        b.extend_from_slice(&[
+            ld(run_w),
+            ic(0x2020_2020),
+            Ins::I32Sub,
+            ic(-1),
+            ld(run_w),
+            Ins::I32Sub,
+            Ins::I32And,
+            ic(0x8080_8080u32 as i32),
+            Ins::I32And,
+        ]);
+        b.extend_from_slice(&[
+            ld(run_w),
+            ic(0x8080_8080u32 as i32),
+            Ins::I32And,
+            Ins::I32Or,
+        ]);
+        xor_into(b, run_w, 0x2222_2222, run_t);
+        has_zero(b, run_t);
+        b.push(Ins::I32Or);
+        xor_into(b, run_w, 0x5c5c_5c5c, run_t);
+        has_zero(b, run_t);
+        b.push(Ins::I32Or);
+        b.push(Ins::BrIf(1));
+        bump(b, run_k, 4);
+        b.push(Ins::Br(0));
+        b.push(Ins::End);
+        b.push(Ins::End);
+        // The tail, a byte at a time: at most three plain bytes and the
+        // one that ended the run. The loop's condition is computed into
+        // `run_ok` first: the instruction set has no `if` that yields a
+        // value.
+        while_loop(
+            b,
+            |b| {
+                b.push(ic(0));
+                b.push(st(run_ok));
+                if_then(
+                    b,
+                    |b| {
+                        b.push(ld(run_pos));
+                        b.push(ld(run_k));
+                        b.push(Ins::I32Add);
+                        b.push(ld(run_len));
+                        b.push(Ins::I32LtU);
+                    },
+                    |b| {
+                        b.push(ld(run_src));
+                        b.push(ld(run_pos));
+                        b.push(Ins::I32Add);
+                        b.push(ld(run_k));
+                        b.push(Ins::I32Add);
+                        b.push(Ins::I32Load8U(0, STRING_HEADER as u32));
+                        b.push(st(e));
+                        // plain = (e - 0x20) <u 0x5f && e != '"' && e != '\\'
+                        b.push(ld(e));
+                        b.push(ic(0x20));
+                        b.push(Ins::I32Sub);
+                        b.push(ic(0x5f));
+                        b.push(Ins::I32LtU);
+                        b.push(ld(e));
+                        b.push(ic(0x22));
+                        b.push(Ins::I32Ne);
+                        b.push(Ins::I32And);
+                        b.push(ld(e));
+                        b.push(ic(0x5c));
+                        b.push(Ins::I32Ne);
+                        b.push(Ins::I32And);
+                        b.push(st(run_ok));
+                    },
+                );
+                b.push(ld(run_ok));
+            },
+            |b| bump(b, run_k, 1),
+        );
+        b.push(ld(run_k));
+        f
+    }
+
     /// `__json_pstr(state) -> string record`: 25.5.1's JSONString, whole.
     ///
     /// The three refusals that make this the JSON grammar and not JavaScript's:
@@ -4804,12 +5041,126 @@ pub(crate) mod json {
         let run_len = f.local(ValType::I32);
         let run_k = f.local(ValType::I32);
         let run_ok = f.local(ValType::I32);
-        let run_w = f.local(ValType::I32);
-        let run_t = f.local(ValType::I32);
+        let q = f.local(ValType::I32);
+        let i = f.local(ValType::I32);
         let names = ctx.names;
         let b = &mut f.body;
 
         advance(b, 0, 1);
+        // The common string -- a run of plain ASCII closed by the quote, which
+        // is every key and most values of a broker answer -- is built straight
+        // from the text: measure the run, allocate a record of exactly that
+        // length, copy it by the word. No buffer, no second copy: the buffer's
+        // two allocations and the copy through it were ~460 of the ~760 steps
+        // a short string cost (2026-08-30 profile, `json_parse_cost.rs`).
+        // Anything else -- an escape, a control byte, a non-ASCII byte --
+        // falls through to the general loop below, which scans the run again.
+        b.extend_from_slice(&[ld(0), Ins::I32Load(ALIGN_WORD, PS_SRC), st(run_src)]);
+        b.extend_from_slice(&[ld(0), Ins::I32Load(ALIGN_WORD, PS_POS), st(run_pos)]);
+        b.extend_from_slice(&[ld(run_src), Ins::I32Load(ALIGN_WORD, 0), st(run_len)]);
+        b.extend_from_slice(&[ld(0), ctx.call(Js::PRun), st(run_k)]);
+        // Closed by a quote? `run_ok` is the answer.
+        b.extend_from_slice(&[ic(0), st(run_ok)]);
+        if_then(
+            b,
+            |b| {
+                b.extend_from_slice(&[
+                    ld(run_pos),
+                    ld(run_k),
+                    Ins::I32Add,
+                    ld(run_len),
+                    Ins::I32LtU,
+                ]);
+            },
+            |b| {
+                b.extend_from_slice(&[
+                    ld(run_src),
+                    ld(run_pos),
+                    Ins::I32Add,
+                    ld(run_k),
+                    Ins::I32Add,
+                    Ins::I32Load8U(0, STRING_HEADER as u32),
+                    ic(0x22),
+                    Ins::I32Eq,
+                    st(run_ok),
+                ]);
+            },
+        );
+        if_then(
+            b,
+            |b| b.push(ld(run_ok)),
+            |b| {
+                b.extend_from_slice(&[
+                    ic(STRING_HEADER),
+                    ld(run_k),
+                    Ins::I32Add,
+                    ctx.alloc(),
+                    st(q),
+                ]);
+                b.extend_from_slice(&[ld(q), ld(run_k), Ins::I32Store(ALIGN_WORD, 0)]);
+                b.extend_from_slice(&[ic(0), st(i)]);
+                // Whole words first, then the byte tail -- `__jb_take`'s copy.
+                while_loop(
+                    b,
+                    |b| {
+                        b.extend_from_slice(&[
+                            ld(run_k),
+                            ld(i),
+                            ic(4),
+                            Ins::I32Add,
+                            Ins::I32LtU,
+                            Ins::I32Eqz,
+                        ])
+                    },
+                    |b| {
+                        b.extend_from_slice(&[
+                            ld(q),
+                            ld(i),
+                            Ins::I32Add,
+                            ld(run_src),
+                            ld(run_pos),
+                            Ins::I32Add,
+                            ld(i),
+                            Ins::I32Add,
+                            Ins::I32Load(0, STRING_HEADER as u32),
+                            Ins::I32Store(0, STRING_HEADER as u32),
+                        ]);
+                        bump(b, i, 4);
+                    },
+                );
+                while_loop(
+                    b,
+                    |b| lt(b, i, run_k),
+                    |b| {
+                        b.extend_from_slice(&[
+                            ld(q),
+                            ld(i),
+                            Ins::I32Add,
+                            ld(run_src),
+                            ld(run_pos),
+                            Ins::I32Add,
+                            ld(i),
+                            Ins::I32Add,
+                            Ins::I32Load8U(0, STRING_HEADER as u32),
+                            Ins::I32Store8(0, STRING_HEADER as u32),
+                        ]);
+                        bump(b, i, 1);
+                    },
+                );
+                // state.pos = pos + k + 1: past the closing quote.
+                b.extend_from_slice(&[
+                    ld(0),
+                    ld(run_pos),
+                    ld(run_k),
+                    Ins::I32Add,
+                    ic(1),
+                    Ins::I32Add,
+                    Ins::I32Store(ALIGN_WORD, PS_POS),
+                ]);
+                b.push(ld(q));
+                b.push(Ins::Return);
+            },
+        );
         b.push(ctx.call(Js::JbNew));
         b.push(st(buf));
         // Depth 0 inside the body is this loop; `br 0` is another character.
@@ -4855,143 +5206,17 @@ pub(crate) mod json {
         b.push(Ins::I32And);
         b.push(Ins::If(BlockType::Empty));
         {
-            // Inside: 0 = this `if`, 1 = the loop.
+            // Inside: 0 = this `if`, 1 = the loop. The byte in `c` is
+            // plain, so the run is at least one long.
             b.push(ld(0));
             b.push(Ins::I32Load(ALIGN_WORD, PS_SRC));
             b.push(st(run_src));
             b.push(ld(0));
             b.push(Ins::I32Load(ALIGN_WORD, PS_POS));
             b.push(st(run_pos));
-            b.push(ld(run_src));
-            b.push(Ins::I32Load(ALIGN_WORD, 0));
-            b.push(st(run_len));
-            // k = 1: the byte in `c` is already known plain.
-            b.push(ic(1));
+            b.push(ld(0));
+            b.push(ctx.call(Js::PRun));
             b.push(st(run_k));
-            // Four bytes at a time while four remain: a word is plain when no
-            // byte is below 0x20, none has its high bit, and none is `"` or
-            // `\`. The instruction set has no xor and no not, so
-            // `a ^ b` is `(a | b) - (a & b)` and `~x` is `-1 - x`; "has a zero
-            // byte" is the usual `(x - 0x01010101) & ~x & 0x80808080`.
-            let has_zero = |b: &mut Vec<Ins>, x: u32| {
-                b.extend_from_slice(&[
-                    ld(x),
-                    ic(0x0101_0101),
-                    Ins::I32Sub,
-                    ic(-1),
-                    ld(x),
-                    Ins::I32Sub,
-                    Ins::I32And,
-                    ic(0x8080_8080u32 as i32),
-                    Ins::I32And,
-                ]);
-            };
-            let xor_into = |b: &mut Vec<Ins>, x: u32, k: i32, into: u32| {
-                b.extend_from_slice(&[
-                    ld(x),
-                    ic(k),
-                    Ins::I32Or,
-                    ld(x),
-                    ic(k),
-                    Ins::I32And,
-                    Ins::I32Sub,
-                    st(into),
-                ]);
-            };
-            b.push(Ins::Block(BlockType::Empty));
-            b.push(Ins::Loop(BlockType::Empty));
-            // len < pos + k + 4 -> not a whole word left
-            b.push(ld(run_len));
-            b.push(ld(run_pos));
-            b.push(ld(run_k));
-            b.push(Ins::I32Add);
-            b.push(ic(4));
-            b.push(Ins::I32Add);
-            b.push(Ins::I32LtU);
-            b.push(Ins::BrIf(1));
-            b.push(ld(run_src));
-            b.push(ld(run_pos));
-            b.push(Ins::I32Add);
-            b.push(ld(run_k));
-            b.push(Ins::I32Add);
-            b.push(Ins::I32Load(0, STRING_HEADER as u32));
-            b.push(st(run_w));
-            // bad = hasless(w, 0x20) | (w & 0x80808080) | haszero(w ^ '"'*4) | haszero(w ^ '\\'*4)
-            b.extend_from_slice(&[
-                ld(run_w),
-                ic(0x2020_2020),
-                Ins::I32Sub,
-                ic(-1),
-                ld(run_w),
-                Ins::I32Sub,
-                Ins::I32And,
-                ic(0x8080_8080u32 as i32),
-                Ins::I32And,
-            ]);
-            b.extend_from_slice(&[
-                ld(run_w),
-                ic(0x8080_8080u32 as i32),
-                Ins::I32And,
-                Ins::I32Or,
-            ]);
-            xor_into(b, run_w, 0x2222_2222, run_t);
-            has_zero(b, run_t);
-            b.push(Ins::I32Or);
-            xor_into(b, run_w, 0x5c5c_5c5c, run_t);
-            has_zero(b, run_t);
-            b.push(Ins::I32Or);
-            b.push(Ins::BrIf(1));
-            bump(b, run_k, 4);
-            b.push(Ins::Br(0));
-            b.push(Ins::End);
-            b.push(Ins::End);
-            // The tail, a byte at a time: at most three plain bytes and the
-            // one that ended the run. The loop's condition is computed into
-            // `run_ok` first: the instruction set has no `if` that yields a
-            // value.
-            while_loop(
-                b,
-                |b| {
-                    b.push(ic(0));
-                    b.push(st(run_ok));
-                    if_then(
-                        b,
-                        |b| {
-                            b.push(ld(run_pos));
-                            b.push(ld(run_k));
-                            b.push(Ins::I32Add);
-                            b.push(ld(run_len));
-                            b.push(Ins::I32LtU);
-                        },
-                        |b| {
-                            b.push(ld(run_src));
-                            b.push(ld(run_pos));
-                            b.push(Ins::I32Add);
-                            b.push(ld(run_k));
-                            b.push(Ins::I32Add);
-                            b.push(Ins::I32Load8U(0, STRING_HEADER as u32));
-                            b.push(st(e));
-                            // plain = (e - 0x20) <u 0x5f && e != '"' && e != '\\'
-                            b.push(ld(e));
-                            b.push(ic(0x20));
-                            b.push(Ins::I32Sub);
-                            b.push(ic(0x5f));
-                            b.push(Ins::I32LtU);
-                            b.push(ld(e));
-                            b.push(ic(0x22));
-                            b.push(Ins::I32Ne);
-                            b.push(Ins::I32And);
-                            b.push(ld(e));
-                            b.push(ic(0x5c));
-                            b.push(Ins::I32Ne);
-                            b.push(Ins::I32And);
-                            b.push(st(run_ok));
-                        },
-                    );
-                    b.push(ld(run_ok));
-                },
-                |b| bump(b, run_k, 1),
-            );
             b.push(ld(buf));
             b.push(ld(run_src));
             b.push(ld(run_pos));
