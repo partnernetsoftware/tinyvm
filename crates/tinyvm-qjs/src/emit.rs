@@ -853,10 +853,13 @@ pub(crate) mod m1 {
             // The script's line is always its first, which says nothing a
             // reader does not already know from `main`; leaving it out is
             // also what keeps a program with no functions byte-identical.
-            let line = (id != ast::Program::SCRIPT).then_some(function.line);
+            let site = (id != ast::Program::SCRIPT).then_some(ir::Site {
+                line: function.line,
+                column: function.column,
+            });
             funcs.push(func(
                 debug_name(program, id),
-                line,
+                site,
                 type_index,
                 built.local_groups(),
                 built.body,
@@ -1201,18 +1204,18 @@ pub(crate) mod m1 {
     }
 
     /// One built function, moved from `repr`'s vocabulary into the IR's.
-    /// `line` is where the author wrote it -- `None` for the runtime's own
+    /// `site` is where the author wrote it -- `None` for the runtime's own
     /// functions, which were written nowhere the author can open.
     fn func(
         name: String,
-        line: Option<u32>,
+        site: Option<ir::Site>,
         type_index: u32,
         locals: Vec<(u32, repr::ValType)>,
         body: Vec<Ins>,
     ) -> ir::Func {
         ir::Func {
             name: Some(name),
-            line,
+            site,
             type_index,
             locals: locals
                 .into_iter()

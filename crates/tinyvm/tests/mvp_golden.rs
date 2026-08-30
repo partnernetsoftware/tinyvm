@@ -1086,7 +1086,7 @@ const LEAF_TESTS: [(&str, &str); 262] = [
         "standard_function_expression_structure_is_canonical",
     ),
     (
-        "a refusal names the function, its name and its source line  `from_bytes_explained`：`name` 段 + `qjs.lines` 段，静态核不读",
+        "a refusal names the function, its name, its source line and column  `from_bytes_explained`：`name` 段 + `qjs.lines` 段（行 + UTF-16 列），静态核不读",
         "a_lines_section_puts_the_source_line_on_the_refusal",
     ),
     (

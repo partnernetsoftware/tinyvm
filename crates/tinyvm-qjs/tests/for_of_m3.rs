@@ -279,7 +279,7 @@ fn a_program_without_for_of_pays_nothing_for_it() {
         ("let o = {a:1}; o.b = 2; return o.a;", 10_580), /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
         (
             "function mk() { return function () { return 1; }; } let f = mk(); return f();",
-            10_527, /* +17 on 2026-08-30: the `qjs.lines` section, paid by every program that declares a function; see arrays_m3 */
+            10_529, /* +17 on 2026-08-30: the `qjs.lines` section, paid by every program that declares a function; see arrays_m3; +2 the same night: the section carries the column beside the line */
         ),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();

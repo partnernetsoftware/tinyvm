@@ -155,6 +155,8 @@ pub(crate) mod m1 {
         /// the compiled module (`ir`'s `qjs.lines` section) so a refusal of
         /// this function's body can say where the author wrote it.
         pub(crate) line: u32,
+        /// The 1-based column on that line, in UTF-16 code units.
+        pub(crate) column: u32,
         /// Bindings of an *enclosing* function that this one reads, in the
         /// order they became its environment.
         ///

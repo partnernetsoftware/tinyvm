@@ -231,10 +231,10 @@ pub(crate) mod m1 {
     #[derive(Debug, Clone, PartialEq)]
     pub(crate) struct Func {
         pub(crate) name: Option<String>,
-        /// The 1-based source line the function was written on, for the
-        /// `qjs.lines` custom section; `None` for a function that has no
-        /// line an author could open (the runtime's, the script's own).
-        pub(crate) line: Option<u32>,
+        /// Where the function was written, for the `qjs.lines` custom
+        /// section; `None` for a function that has no place an author could
+        /// open (the runtime's, the script's own).
+        pub(crate) site: Option<Site>,
         pub(crate) type_index: u32,
         pub(crate) locals: Vec<(u32, ValType)>,
         pub(crate) body: Vec<Ins>,
@@ -443,31 +443,40 @@ pub(crate) mod m1 {
         out
     }
 
-    /// The `qjs.lines` custom section: which source line each function was
-    /// written on, as a vector of `(function index, 1-based line)` pairs in
-    /// index order, beside the `name` section and read the same way --
+    /// Where a function was written: the 1-based line, and the 1-based
+    /// column on it in UTF-16 code units, the way an editor counts.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub(crate) struct Site {
+        pub(crate) line: u32,
+        pub(crate) column: u32,
+    }
+
+    /// The `qjs.lines` custom section: where each function was written, as
+    /// a vector of `(function index, 1-based line, 1-based column)` triples
+    /// in index order, beside the `name` section and read the same way --
     /// tinyvm's `from_bytes_explained` looks it up only after a body has
     /// failed validation, so a refusal can say `in function \`f\` (#12)
-    /// (line 7)` instead of sending the author to bisect. Absent when no
-    /// function has a line, which keeps a program without functions
+    /// (line 7, column 12)` instead of sending the author to bisect. Absent
+    /// when no function has a site, which keeps a program without functions
     /// byte-identical to what it was before the section existed.
     fn lines_section(out: &mut Vec<u8>, module: &Module) {
-        let lined: Vec<(u32, u32)> = module
+        let sited: Vec<(u32, Site)> = module
             .funcs
             .iter()
             .enumerate()
             .filter_map(|(position, f)| {
-                let line = f.line?;
-                Some(((module.imports.len() + position) as u32, line))
+                let site = f.site?;
+                Some(((module.imports.len() + position) as u32, site))
             })
             .collect();
-        if lined.is_empty() {
+        if sited.is_empty() {
             return;
         }
         let mut contents = Vec::new();
-        encode::vector(&mut contents, &lined, |body, (index, line)| {
+        encode::vector(&mut contents, &sited, |body, (index, site)| {
             encode::unsigned(body, *index);
-            encode::unsigned(body, *line);
+            encode::unsigned(body, site.line);
+            encode::unsigned(body, site.column);
         });
         encode::custom_section(out, LINES_SECTION, &contents);
     }

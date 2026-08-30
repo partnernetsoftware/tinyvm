@@ -253,7 +253,7 @@ fn a_program_with_no_capture_is_byte_identical_to_what_it_was() {
             // +153 on 2026-08-30: a program with an indirect call carries `__call_check`
             // and its trampoline (a call on a non-function is a named refusal,
             // tests/not_a_function.rs); "return 1;" did not move.
-            10_527, /* +17 on 2026-08-30: the `qjs.lines` section, paid by every program that declares a function; see arrays_m3 */
+            10_529, /* +17 on 2026-08-30: the `qjs.lines` section, paid by every program that declares a function; see arrays_m3; +2 the same night: the section carries the column beside the line */
         ),
         // +23 on 2026-08-29: a program with an unwind channel now records the
         // thrown String's address in the entry epilogue, so the host can read

@@ -2018,10 +2018,10 @@ pub(crate) mod m1 {
             // in offset order, so the first token at or past it is the one
             // the span names -- of the module's own stream while one is
             // swapped in, which is the line the module's author sees.
-            let line = self
+            let (line, column) = self
                 .tokens
                 .get(self.tokens.partition_point(|t| t.offset < span.offset()))
-                .map_or(1, |t| t.line);
+                .map_or((1, 1), |t| (t.line, t.column));
             self.functions.push(Function {
                 name,
                 params: Vec::new(),
@@ -2029,6 +2029,7 @@ pub(crate) mod m1 {
                 body: Vec::new(),
                 span,
                 line,
+                column,
                 captures: Vec::new(),
             });
             id

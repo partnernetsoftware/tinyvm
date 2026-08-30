@@ -912,7 +912,7 @@ fn function_names(wasm: &[u8]) -> Option<Vec<(u32, String)>> {
 }
 
 /// Beside the names, the `qjs.lines` custom section says which source line
-/// each of the author's functions was written on -- what tinyvm's
+/// and column each of the author's functions was written at -- what tinyvm's
 /// `from_bytes_explained` puts on a refusal so the author opens the `.qjs`
 /// at the right place. The script and the runtime's own functions are not
 /// listed: the script is always line 1, and the runtime was written nowhere
@@ -931,30 +931,56 @@ fn the_lines_section_says_where_each_function_was_written() {
 
     let names = function_names(&wasm).expect("a name section");
     let lines = function_lines(&wasm).expect("a lines section");
-    let line_of = |name: &str| {
+    let site_of = |name: &str| {
         let (index, _) = names
             .iter()
             .find(|(_, n)| n == name)
             .unwrap_or_else(|| panic!("no name for {name:?} in {names:?}"));
-        lines.iter().find(|(i, _)| i == index).map(|(_, l)| *l)
+        lines
+            .iter()
+            .find(|(i, _, _)| i == index)
+            .map(|(_, l, c)| (*l, *c))
     };
     // `\r\n` is one terminator; the block comment's own line break counts;
     // the template literal's break moves only what comes after it (the
-    // arrow, two lines below `inner` rather than one).
-    assert_eq!(line_of("outer"), Some(2));
-    assert_eq!(line_of("inner"), Some(6));
-    assert_eq!(line_of("main"), None, "the script is always line 1");
-    assert_eq!(line_of("__add"), None, "the runtime has no line");
-    let anon: Vec<u32> = names
+    // arrow, two lines below `inner` rather than one). The column is where
+    // the `function` keyword (or the arrow's first token) starts, 1-based:
+    // `inner` follows ` comment */ ` on its line.
+    assert_eq!(site_of("outer"), Some((2, 1)));
+    assert_eq!(site_of("inner"), Some((6, 13)));
+    assert_eq!(site_of("main"), None, "the script is always line 1");
+    assert_eq!(site_of("__add"), None, "the runtime has no line");
+    let anon: Vec<(u32, u32)> = names
         .iter()
         .filter(|(_, n)| n.starts_with("<anonymous@"))
-        .filter_map(|(i, _)| lines.iter().find(|(j, _)| j == i).map(|(_, l)| *l))
+        .filter_map(|(i, _)| {
+            lines
+                .iter()
+                .find(|(j, _, _)| j == i)
+                .map(|(_, l, c)| (*l, *c))
+        })
         .collect();
-    assert_eq!(anon, vec![8], "the arrow is on line 8");
+    assert_eq!(
+        anon,
+        vec![(8, 9)],
+        "the arrow is on line 8 after `let f = `"
+    );
     assert!(
         lines.windows(2).all(|w| w[0].0 < w[1].0),
         "the line map is not in index order: {lines:?}"
     );
+
+    // Columns count UTF-16 code units, the way an editor does: a
+    // non-BMP character before the function is two of them.
+    let wide = compile("let s = \"\u{1F600}\"; function g() { return s; } return g();");
+    let names = function_names(&wide).expect("a name section");
+    let lines = function_lines(&wide).expect("a lines section");
+    let (g, _) = names.iter().find(|(_, n)| n == "g").expect("g is named");
+    let site = lines
+        .iter()
+        .find(|(i, _, _)| i == g)
+        .map(|(_, l, c)| (*l, *c));
+    assert_eq!(site, Some((1, 15)), "`function` starts after 14 code units");
 
     // A program with no functions has no section, so its bytes are what
     // they were before the section existed.
@@ -962,8 +988,8 @@ fn the_lines_section_says_where_each_function_was_written() {
 }
 
 /// The `qjs.lines` custom section decoded by an independent reader: a vector
-/// of `(function index, line)` pairs.
-fn function_lines(wasm: &[u8]) -> Option<Vec<(u32, u32)>> {
+/// of `(function index, line, column)` triples.
+fn function_lines(wasm: &[u8]) -> Option<Vec<(u32, u32, u32)>> {
     let mut at = 8;
     while at < wasm.len() {
         let id = wasm[at];
@@ -988,7 +1014,9 @@ fn function_lines(wasm: &[u8]) -> Option<Vec<(u32, u32)>> {
             cursor += used;
             let (line, used) = leb(payload, cursor)?;
             cursor += used;
-            out.push((index, line));
+            let (column, used) = leb(payload, cursor)?;
+            cursor += used;
+            out.push((index, line, column));
         }
         assert_eq!(cursor, payload.len(), "trailing bytes in the lines section");
         return Some(out);

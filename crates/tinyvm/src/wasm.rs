@@ -1252,6 +1252,9 @@ pub struct FunctionSite {
     /// author who has the `.qjs` and not the `.wasm`. `None` for a module
     /// without that section or one that does not list this function.
     pub line: Option<u32>,
+    /// The 1-based column on that line, in UTF-16 code units the way an
+    /// editor counts them, from the same section; `None` with `line`.
+    pub column: Option<u32>,
 }
 
 /// A refused module, with where it was refused when that is a function.
@@ -1280,9 +1283,10 @@ impl core::fmt::Display for LoadError {
             Some(name) => write!(f, "{text} in function `{name}` (#{})", site.index)?,
             None => write!(f, "{text} in function #{}", site.index)?,
         }
-        match site.line {
-            Some(line) => write!(f, " (line {line})"),
-            None => Ok(()),
+        match (site.line, site.column) {
+            (Some(line), Some(column)) => write!(f, " (line {line}, column {column})"),
+            (Some(line), None) => write!(f, " (line {line})"),
+            _ => Ok(()),
         }
     }
 }
@@ -1317,19 +1321,20 @@ fn custom_section_payload<'a>(wasm: &'a [u8], wanted: &[u8]) -> Option<&'a [u8]>
     None
 }
 
-/// The function's source line from the module's `qjs.lines` custom section
-/// -- a vector of `(function index, 1-based line)` pairs, the shape
-/// `tinyvm-qjs` writes -- or `None` when the module has no such section or
-/// does not list that index.
+/// The function's source line and column from the module's `qjs.lines`
+/// custom section -- a vector of `(function index, 1-based line, 1-based
+/// column)` triples, the shape `tinyvm-qjs` writes -- or `None` when the
+/// module has no such section or does not list that index.
 #[cfg(not(all(feature = "staticcore", not(feature = "std"))))]
-fn function_line_from_lines_section(wasm: &[u8], index: u32) -> Option<u32> {
+fn function_site_from_lines_section(wasm: &[u8], index: u32) -> Option<(u32, u32)> {
     let map = custom_section_payload(wasm, b"qjs.lines")?;
     let (count, mut q) = leb_u32(map, 0).ok()?;
     for _ in 0..count {
         let (idx, nq) = leb_u32(map, q).ok()?;
         let (line, nq) = leb_u32(map, nq).ok()?;
+        let (column, nq) = leb_u32(map, nq).ok()?;
         if idx == index {
-            return Some(line);
+            return Some((line, column));
         }
         q = nq;
     }
@@ -4945,7 +4950,8 @@ impl Module {
     /// [`from_bytes_with`](Self::from_bytes_with), and when the module is
     /// refused *while validating a function body*, which body: its function
     /// index and, when the module carries a `name` custom section, its name
-    /// -- and, when it carries a `qjs.lines` section, the source line.
+    /// -- and, when it carries a `qjs.lines` section, the source line and
+    /// column.
     ///
     /// The plain entry points keep [`WasmError`] -- `Copy`, allocation-free,
     /// two `&'static str` variants -- because that is what a trap-and-fault
@@ -4960,10 +4966,14 @@ impl Module {
         let mut site = None;
         Self::decode(wasm, limits, &mut site).map_err(|error| LoadError {
             error,
-            function: site.map(|index| FunctionSite {
-                index,
-                name: function_name_from_name_section(wasm, index),
-                line: function_line_from_lines_section(wasm, index),
+            function: site.map(|index| {
+                let written = function_site_from_lines_section(wasm, index);
+                FunctionSite {
+                    index,
+                    name: function_name_from_name_section(wasm, index),
+                    line: written.map(|(line, _)| line),
+                    column: written.map(|(_, column)| column),
+                }
             }),
         })
     }

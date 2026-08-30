@@ -34,6 +34,11 @@ pub(crate) struct Token {
     /// tinyvm's refusal of a function body, hours later -- carries instead of
     /// a byte offset.
     pub(crate) line: u32,
+    /// The 1-based column `offset` is at on that line, in UTF-16 code units
+    /// -- what an editor's status bar shows, and what the `qjs.lines`
+    /// section carries beside the line so a refusal reads
+    /// `(line 7, column 12)`.
+    pub(crate) column: u32,
     /// A LineTerminator stood between this token and the one before it --
     /// written directly, or inside a multi-line comment, which ECMA-262 12.4
     /// says counts the same. This is the raw fact all of ASI is built on.
@@ -364,6 +369,7 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Token>, CompileError> {
     };
     let mut tokens = Vec::new();
     let mut line = 1;
+    let mut line_start = 0;
     let mut counted_to = 0;
     loop {
         let newline_before = lexer.skip_trivia()?;
@@ -371,13 +377,19 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Token>, CompileError> {
         // Counted over everything since the previous token, so a lexeme
         // that spans lines (a template literal) moves the *next* token's
         // line, and trivia and lexemes are never counted twice.
-        line += line_terminators(&source[counted_to..offset]);
+        let (terminators, after_last) = line_terminators(&source[counted_to..offset]);
+        line += terminators;
+        if let Some(after) = after_last {
+            line_start = counted_to + after;
+        }
         counted_to = offset;
+        let column = source[line_start..offset].encode_utf16().count() as u32 + 1;
         if offset >= lexer.bytes.len() {
             tokens.push(Token {
                 kind: TokenKind::Eof,
                 offset,
                 line,
+                column,
                 newline_before,
                 inserted: false,
             });
@@ -388,6 +400,7 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Token>, CompileError> {
             kind,
             offset,
             line,
+            column,
             newline_before,
             inserted: false,
         });
@@ -397,24 +410,30 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Token>, CompileError> {
 }
 
 /// How many ECMA-262 LineTerminatorSequences `text` holds: `\r\n` is one,
-/// as are `\n`, a lone `\r`, U+2028 and U+2029.
-fn line_terminators(text: &str) -> u32 {
+/// as are `\n`, a lone `\r`, U+2028 and U+2029 -- and the byte index just
+/// past the last of them, where the final line starts, when there is one.
+fn line_terminators(text: &str) -> (u32, Option<usize>) {
     let mut count = 0;
     let mut after_cr = false;
-    for c in text.chars() {
+    let mut last_end = None;
+    for (at, c) in text.char_indices() {
         match c {
             '\r' => {
                 count += 1;
                 after_cr = true;
+                last_end = Some(at + 1);
                 continue;
             }
-            '\n' if after_cr => {}
-            '\n' | '\u{2028}' | '\u{2029}' => count += 1,
+            '\n' if after_cr => last_end = Some(at + 1),
+            '\n' | '\u{2028}' | '\u{2029}' => {
+                count += 1;
+                last_end = Some(at + c.len_utf8());
+            }
             _ => {}
         }
         after_cr = false;
     }
-    count
+    (count, last_end)
 }
 
 struct Lexer<'a> {
@@ -1211,12 +1230,14 @@ fn insert_restricted_semicolons(tokens: &mut Vec<Token>) {
         if tokens[i].newline_before && is_restricted(&tokens[i - 1].kind, &tokens[i].kind) {
             let offset = tokens[i].offset;
             let line = tokens[i].line;
+            let column = tokens[i].column;
             tokens.insert(
                 i,
                 Token {
                     kind: TokenKind::Semi,
                     offset,
                     line,
+                    column,
                     newline_before: false,
                     inserted: true,
                 },
