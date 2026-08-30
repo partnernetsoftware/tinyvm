@@ -1934,21 +1934,25 @@ fn obj_new(ctx: &Ctx) -> FnBuild {
 ///
 /// # The scan is linear, so the miss has to be cheap
 ///
-/// Every entry ahead of the answer is a miss, and a miss through `__str_eq`
-/// cost ~130 steps when the keys shared a prefix (`key000`..`key019`): the
-/// call, the length test, then the bytes up to the first that differs. A
-/// 20-key object paid ~2 800 steps to read its last property and ~27 600 to
-/// be built (2026-08-31). So the entry's key is now rejected *here* first,
-/// on what one load each can tell: the same pointer is a hit outright (an
-/// interned literal against the literal that stored it); a different length
-/// is a miss; a different first word -- masked to the length when it is
-/// under four, since the record is padded to a word but the padding is not
-/// promised to be anything -- is a miss. Only an entry that passes all
-/// three goes to the last word (keys built the same way -- `key000`,
-/// `key019` -- share their first bytes and differ at the end), and only
-/// then to `__str_eq`, which is the byte-for-byte answer it always was.
-/// ~30 steps a miss. The empty key skips the word: `alloc(4)` is four
-/// bytes and the word after it may be past the end of memory.
+/// Every entry ahead of the answer is a miss, and every miss went through
+/// `__str_eq`: the call, the length test, then the bytes up to the first
+/// that differs -- 28 steps when the lengths differed, ~130 when the keys
+/// shared a prefix (`key000`..`key019`). Now the entry's length is read
+/// here and a different one is the whole of the miss: 16 steps. Only an
+/// entry of the key's own length goes further -- the same pointer is a
+/// hit outright (an interned literal against the literal that stored it);
+/// then, for a key of four bytes or more, the first word and the last
+/// word (keys built the same way share their first bytes and differ at
+/// the end); only then `__str_eq`, which is the byte-for-byte answer it
+/// always was, and the only one for a key under a word, whose padding is
+/// not promised to be anything. ~33 steps for a same-length miss.
+///
+/// The first draft (2026-08-31, morning) masked the first word for short
+/// keys and tested the pointer before the length; its prelude and its
+/// per-entry tests cost more than the old `__str_eq` call on keys of
+/// *different* lengths, which is what real records have, and the two
+/// downstream journeys got 1% slower. The length test is first for that
+/// reason, and the prelude reads nothing a short key will not use.
 ///
 /// A program that can hold no object never calls this; it keeps the old
 /// body, so its bytes do not move (`ctx.object_names` is the same gate the
@@ -1988,47 +1992,27 @@ fn obj_find(ctx: &Ctx) -> FnBuild {
     let end = f.local(ValType::I32);
     let klen = f.local(ValType::I32);
     let kw = f.local(ValType::I32);
-    let mask = f.local(ValType::I32);
+    let kl = f.local(ValType::I32);
+    let long = f.local(ValType::I32);
     let ek = f.local(ValType::I32);
     let hit = f.local(ValType::I32);
-    let long = f.local(ValType::I32);
-    let kl = f.local(ValType::I32);
     let b = &mut f.body;
-    // klen = key.len; mask = klen < 4 ? (1 << 8*klen) - 1 : -1;
-    // kw = klen != 0 ? key.word0 & mask : 0; long = klen >= 4;
-    // kl = long ? the key's last word : 0.
+    // klen = key.len; long = klen >= 4; when long, kw and kl are the key's
+    // first and last words. Nothing else is read ahead: most lookups are
+    // settled on the length alone, and every step here is paid once a
+    // lookup whether or not an entry ever needs it.
     b.push(Ins::LocalGet(2));
     b.push(Ins::I32Load(ALIGN_WORD, 0));
     b.push(Ins::LocalSet(klen));
-    b.push(Ins::I32Const(-1));
-    b.push(Ins::LocalSet(mask));
-    b.push(Ins::LocalGet(klen));
-    b.push(Ins::I32Const(4));
-    b.push(Ins::I32LtU);
-    b.push(Ins::If(BlockType::Empty));
-    b.push(Ins::I32Const(1));
-    b.push(Ins::LocalGet(klen));
-    b.push(Ins::I32Const(3));
-    b.push(Ins::I32Shl);
-    b.push(Ins::I32Shl);
-    b.push(Ins::I32Const(1));
-    b.push(Ins::I32Sub);
-    b.push(Ins::LocalSet(mask));
-    b.push(Ins::End);
-    b.push(Ins::LocalGet(klen));
-    b.push(Ins::If(BlockType::Empty));
-    b.push(Ins::LocalGet(2));
-    b.push(Ins::I32Load(ALIGN_WORD, STRING_HEADER as u32));
-    b.push(Ins::LocalGet(mask));
-    b.push(Ins::I32And);
-    b.push(Ins::LocalSet(kw));
-    b.push(Ins::End);
     b.push(Ins::LocalGet(klen));
     b.push(Ins::I32Const(4));
     b.push(Ins::I32GeU);
     b.push(Ins::LocalSet(long));
     b.push(Ins::LocalGet(long));
     b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(2));
+    b.push(Ins::I32Load(ALIGN_WORD, STRING_HEADER as u32));
+    b.push(Ins::LocalSet(kw));
     b.push(Ins::LocalGet(2));
     b.push(Ins::LocalGet(klen));
     b.push(Ins::I32Add);
@@ -2046,9 +2030,14 @@ fn obj_find(ctx: &Ctx) -> FnBuild {
     b.push(Ins::LocalGet(end));
     b.push(Ins::I32GeU);
     b.push(Ins::BrIf(1));
+    // A different length is the whole of most misses: 16 steps.
     b.push(Ins::LocalGet(i));
     b.push(Ins::I32Load(ALIGN_WORD, ENTRY_KEY));
-    b.push(Ins::LocalSet(ek));
+    b.push(Ins::LocalTee(ek));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalGet(klen));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
     // The same record: a hit with no bytes read.
     b.push(Ins::LocalGet(ek));
     b.push(Ins::LocalGet(2));
@@ -2061,30 +2050,20 @@ fn obj_find(ctx: &Ctx) -> FnBuild {
     b.push(Ins::I32DivS);
     b.push(Ins::Return);
     b.push(Ins::End);
-    // hit = ek.len == klen; then, for a non-empty key, the first word.
-    b.push(Ins::LocalGet(ek));
-    b.push(Ins::I32Load(ALIGN_WORD, 0));
-    b.push(Ins::LocalGet(klen));
-    b.push(Ins::I32Eq);
+    // The first word, then the last: keys built the same way (`key000`,
+    // `key019`) share their first bytes and differ at the end. A key under
+    // a word goes straight to the bytes; its padding is not promised to be
+    // anything, and there are at most three bytes to compare.
+    b.push(Ins::I32Const(1));
     b.push(Ins::LocalSet(hit));
-    b.push(Ins::LocalGet(hit));
-    b.push(Ins::LocalGet(klen));
-    b.push(Ins::I32And);
+    b.push(Ins::LocalGet(long));
     b.push(Ins::If(BlockType::Empty));
     b.push(Ins::LocalGet(ek));
     b.push(Ins::I32Load(ALIGN_WORD, STRING_HEADER as u32));
-    b.push(Ins::LocalGet(mask));
-    b.push(Ins::I32And);
     b.push(Ins::LocalGet(kw));
     b.push(Ins::I32Eq);
     b.push(Ins::LocalSet(hit));
-    b.push(Ins::End);
-    // Then the last word, when there is one the first did not cover:
-    // keys built the same way share their first bytes (`key000`,
-    // `key019`) and differ at the end.
     b.push(Ins::LocalGet(hit));
-    b.push(Ins::LocalGet(long));
-    b.push(Ins::I32And);
     b.push(Ins::If(BlockType::Empty));
     b.push(Ins::LocalGet(ek));
     b.push(Ins::LocalGet(klen));
@@ -2093,6 +2072,7 @@ fn obj_find(ctx: &Ctx) -> FnBuild {
     b.push(Ins::LocalGet(kl));
     b.push(Ins::I32Eq);
     b.push(Ins::LocalSet(hit));
+    b.push(Ins::End);
     b.push(Ins::End);
     b.push(Ins::LocalGet(hit));
     b.push(Ins::If(BlockType::Empty));
@@ -2106,6 +2086,7 @@ fn obj_find(ctx: &Ctx) -> FnBuild {
     b.push(Ins::I32Const(ENTRY_BYTES));
     b.push(Ins::I32DivS);
     b.push(Ins::Return);
+    b.push(Ins::End);
     b.push(Ins::End);
     b.push(Ins::End);
     b.push(Ins::LocalGet(i));

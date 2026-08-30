@@ -2,12 +2,14 @@
 //!
 //! `__obj_find` walks the entries in order and every one ahead of the answer
 //! is a miss. A miss used to go through `__str_eq` -- a call, the length
-//! test, then the bytes up to the first that differs -- ~130 steps when the
-//! keys shared a prefix. Now it is rejected on the length, the first word and
-//! the last word before `__str_eq` is asked (2026-08-31). The prices are
-//! pinned here; the correctness half runs every shape the word tests could
-//! get wrong -- keys under a word, keys sharing both ends, the empty key,
-//! computed keys, and a Number key against its String spelling.
+//! test, then the bytes up to the first that differs -- 28 steps on a
+//! different length, ~130 when the keys shared a prefix. Now the length is
+//! read in place (16 a miss), and an entry of the same length is the same
+//! pointer, or is rejected on its first or last word, before `__str_eq` is
+//! asked (2026-08-31). The prices are pinned here; the correctness half runs
+//! every shape the word tests could get wrong -- keys under a word, keys
+//! sharing both ends, the empty key, computed keys, and a Number key against
+//! its String spelling.
 
 use tinyvm::{Limits, WasmModule};
 use tinyvm_qjs::{Value, compile_qjs_m1};
@@ -47,7 +49,8 @@ fn twenty_keys() -> String {
 }
 
 /// Reading the last of twenty keys that share their first word: 2 834 steps
-/// before, 919 after (42 a miss).
+/// before, 952 after (~33 a same-length miss); the first, an interned
+/// literal against itself, 222 -> 97.
 #[test]
 fn a_miss_on_the_way_to_the_last_key_is_cheap() {
     let build = twenty_keys();
@@ -72,7 +75,7 @@ fn a_miss_on_the_way_to_the_last_key_is_cheap() {
 }
 
 /// Building the literal is the same scan once per property: 27 623 before,
-/// 10 203 after for twenty keys.
+/// 10 533 after for twenty keys.
 #[test]
 fn building_a_twenty_key_literal_is_cheap() {
     let base = steps("return 1;");
@@ -153,4 +156,35 @@ fn the_cheap_miss_never_confuses_two_keys() {
     ] {
         assert_eq!(text(source), want, "{source}");
     }
+}
+
+/// The shape a downstream journal record has -- five keys of five different
+/// lengths -- is the one the first draft made *slower*: its prelude and
+/// per-entry tests outweighed the `__str_eq` call they replaced when every
+/// miss was a length mismatch. Five reads: 1 964 before, 821 now; the
+/// literal 894 -> 896.
+#[test]
+fn a_record_of_mixed_length_keys_is_cheaper_to_read_and_no_dearer_to_build() {
+    let rec = r#"let record = { recorded_at_ms: 1788101296722, arguments: ["ui-lease", "attach"], expected_failure: false, exit_code: 0, output: "x" };"#;
+    let base = steps(&format!("{rec} return 1;"));
+    let build = base - steps("return 1;");
+    let mut reads = 0;
+    for k in [
+        "recorded_at_ms",
+        "arguments",
+        "expected_failure",
+        "exit_code",
+        "output",
+    ] {
+        reads += steps(&format!("{rec} let v = record.{k}; return 1;")) - base;
+    }
+    println!("journal record: five reads {reads} steps, the literal {build}");
+    assert!(
+        reads < 1_100,
+        "five reads of a journal record cost {reads} steps; they were 1 964"
+    );
+    assert!(
+        build < 1_000,
+        "building a journal record cost {build} steps; it was 894"
+    );
 }

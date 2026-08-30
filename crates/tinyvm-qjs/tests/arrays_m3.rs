@@ -656,16 +656,18 @@ fn a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was() {
         // carries the four refusal reasons and the arms that name a refused
         // write or a boundary of the representation (fault 10 and a named
         // fault 3, tests/refused_operations.rs). "return 1;" did not move.
-        // +158 on 2026-08-31 for every program that can hold an object
-        // (the kind-names gate): `__obj_find` rejects an entry on its
-        // length, first word and last word before asking `__str_eq`, so a
-        // miss costs ~42 steps instead of ~130 when keys share a prefix.
-        // Reading the last of 20 keys 2 834 -> 919, a 20-key literal
-        // 27 623 -> 10 203, a 100-key literal 649 783 -> 218 683
+        // +119 on 2026-08-31 for every program that can hold an object
+        // (the kind-names gate): `__obj_find` reads the entry's length
+        // itself, and a different one is the whole of the miss (28 -> 16
+        // steps); an entry of the same length is the same pointer (a hit),
+        // or differs in its first or last word (~33), before `__str_eq` is
+        // asked (~130 on keys that share a prefix). Five reads of a
+        // journal record 1 964 -> 821; the last of 20 same-shape keys
+        // 2 834 -> 952; a 20-key literal 27 623 -> 10 533
         // (tests/obj_find_cost.rs, plan/design-obj-find-cheap-miss.md).
         // A program with no object keeps the old body: "return 1;" did
         // not move.
-        ("let o = {a:1}; o.b = 2; return o.a;", 10_929), /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_890), /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
         // A computed key whose *value* the text does not settle. This one
         // moved **up** by 117, and not for arrays: a computed key could
         // evaluate to `"length"`, so it turns on the string-`.length` arm of
@@ -683,9 +685,9 @@ fn a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was() {
         // Only programs that can reach the string-`.length` arm carry it.
         (
             "let o = {a:1}; let k = \"a\"; return o[k];",
-            10_835, /* +7 on 2026-08-30: the nameless capability arm now clears the detail word before it stops, so a named refusal read later cannot inherit an older name (tests/refused_operations.rs) */
+            10_796, /* +7 on 2026-08-30: the nameless capability arm now clears the detail word before it stops, so a named refusal read later cannot inherit an older name (tests/refused_operations.rs) */
         ),
-        ("let o = {a:1}; return o[\"a\"];", 10_609),
+        ("let o = {a:1}; return o[\"a\"];", 10_570),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(
@@ -708,8 +710,8 @@ fn naming_json_brings_the_array_set_because_parse_can_return_one() {
     // see closures_m3 and plan/design-json-parse-fast.md. The array-set
     // arithmetic below is unchanged.
     assert_eq!(
-        n, 17_445,
-        "the array set costs 1 130 bytes on top of the JSON set's 14 633 -- 753 for the \
+        n, 17_406,
+        "the array set costs 1 130 bytes on top of the JSON set's 14 594 -- 753 for the \
          type and 377 more for `JSON.parse`/`JSON.stringify` of one. That arithmetic is \
          unchanged; the total went down by 28 on 2026-08-28 because `__len`'s dead body \
          got gated, which is 19 bytes here plus 9 of shifted LEB128 widths. If this moved \
