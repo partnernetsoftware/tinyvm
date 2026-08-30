@@ -150,6 +150,11 @@ pub(crate) mod m1 {
         pub(crate) bindings: Vec<BindingId>,
         pub(crate) body: Vec<Stmt>,
         pub(crate) span: Span,
+        /// The 1-based source line `span` is on -- of the module's own
+        /// source when the function came in through `import`. Written into
+        /// the compiled module (`ir`'s `qjs.lines` section) so a refusal of
+        /// this function's body can say where the author wrote it.
+        pub(crate) line: u32,
         /// Bindings of an *enclosing* function that this one reads, in the
         /// order they became its environment.
         ///

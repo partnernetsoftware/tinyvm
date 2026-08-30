@@ -1247,6 +1247,11 @@ pub struct FunctionSite {
     pub index: u32,
     /// Its name from the `name` custom section, when the module has one.
     pub name: Option<String>,
+    /// The 1-based source line it was written on, from a `qjs.lines` custom
+    /// section -- what `tinyvm-qjs` writes beside the names, for the
+    /// author who has the `.qjs` and not the `.wasm`. `None` for a module
+    /// without that section or one that does not list this function.
+    pub line: Option<u32>,
 }
 
 /// A refused module, with where it was refused when that is a function.
@@ -1268,27 +1273,26 @@ impl core::fmt::Display for LoadError {
         let text = match self.error {
             WasmError::Decode(text) | WasmError::Trap(text) => text,
         };
-        match &self.function {
-            Some(FunctionSite {
-                index,
-                name: Some(name),
-            }) => write!(f, "{text} in function `{name}` (#{index})"),
-            Some(FunctionSite { index, name: None }) => {
-                write!(f, "{text} in function #{index}")
-            }
-            None => f.write_str(text),
+        let Some(site) = &self.function else {
+            return f.write_str(text);
+        };
+        match &site.name {
+            Some(name) => write!(f, "{text} in function `{name}` (#{})", site.index)?,
+            None => write!(f, "{text} in function #{}", site.index)?,
+        }
+        match site.line {
+            Some(line) => write!(f, " (line {line})"),
+            None => Ok(()),
         }
     }
 }
 
-/// The function's name from the module's `name` custom section (the
-/// `function names` subsection, id 1), or `None` when the module has no such
-/// section or does not name that index. Walks the raw bytes on its own so it
-/// can run after the decoder has already refused the module; any
-/// malformation in the custom section answers `None` rather than a second
-/// error, since a custom section carries no semantics.
+/// The payload of the first custom section named `wanted`, or `None`. Walks
+/// the raw bytes so it can run after the decoder has already refused the
+/// module; any malformation answers `None`, since a custom section carries
+/// no semantics and a second error would only hide the first.
 #[cfg(not(all(feature = "staticcore", not(feature = "std"))))]
-fn function_name_from_name_section(wasm: &[u8], index: u32) -> Option<String> {
+fn custom_section_payload<'a>(wasm: &'a [u8], wanted: &[u8]) -> Option<&'a [u8]> {
     if wasm.len() < 8 {
         return None;
     }
@@ -1306,36 +1310,66 @@ fn function_name_from_name_section(wasm: &[u8], index: u32) -> Option<String> {
         }
         let (name_len, off) = leb_u32(payload, 0).ok()?;
         let name_end = off.checked_add(name_len as usize)?;
-        if payload.get(off..name_end)? != b"name" {
-            continue;
+        if payload.get(off..name_end)? == wanted {
+            return payload.get(name_end..);
         }
-        let mut p = name_end;
-        while p < payload.len() {
-            let sub = *payload.get(p)?;
-            p += 1;
-            let (sub_size, np) = leb_u32(payload, p).ok()?;
-            p = np;
-            let sub_end = p
-                .checked_add(sub_size as usize)
-                .filter(|&e| e <= payload.len())?;
-            if sub == 1 {
-                let map = &payload[p..sub_end];
-                let (count, mut q) = leb_u32(map, 0).ok()?;
-                for _ in 0..count {
-                    let (idx, nq) = leb_u32(map, q).ok()?;
-                    let (len, nq) = leb_u32(map, nq).ok()?;
-                    let text_end = nq.checked_add(len as usize)?;
-                    let text = map.get(nq..text_end)?;
-                    if idx == index {
-                        return core::str::from_utf8(text).ok().map(str::to_owned);
-                    }
-                    q = text_end;
+    }
+    None
+}
+
+/// The function's source line from the module's `qjs.lines` custom section
+/// -- a vector of `(function index, 1-based line)` pairs, the shape
+/// `tinyvm-qjs` writes -- or `None` when the module has no such section or
+/// does not list that index.
+#[cfg(not(all(feature = "staticcore", not(feature = "std"))))]
+fn function_line_from_lines_section(wasm: &[u8], index: u32) -> Option<u32> {
+    let map = custom_section_payload(wasm, b"qjs.lines")?;
+    let (count, mut q) = leb_u32(map, 0).ok()?;
+    for _ in 0..count {
+        let (idx, nq) = leb_u32(map, q).ok()?;
+        let (line, nq) = leb_u32(map, nq).ok()?;
+        if idx == index {
+            return Some(line);
+        }
+        q = nq;
+    }
+    None
+}
+
+/// The function's name from the module's `name` custom section (the
+/// `function names` subsection, id 1), or `None` when the module has no such
+/// section or does not name that index. Walks the raw bytes on its own so it
+/// can run after the decoder has already refused the module; any
+/// malformation in the custom section answers `None` rather than a second
+/// error, since a custom section carries no semantics.
+#[cfg(not(all(feature = "staticcore", not(feature = "std"))))]
+fn function_name_from_name_section(wasm: &[u8], index: u32) -> Option<String> {
+    let payload = custom_section_payload(wasm, b"name")?;
+    let mut p = 0;
+    while p < payload.len() {
+        let sub = *payload.get(p)?;
+        p += 1;
+        let (sub_size, np) = leb_u32(payload, p).ok()?;
+        p = np;
+        let sub_end = p
+            .checked_add(sub_size as usize)
+            .filter(|&e| e <= payload.len())?;
+        if sub == 1 {
+            let map = &payload[p..sub_end];
+            let (count, mut q) = leb_u32(map, 0).ok()?;
+            for _ in 0..count {
+                let (idx, nq) = leb_u32(map, q).ok()?;
+                let (len, nq) = leb_u32(map, nq).ok()?;
+                let text_end = nq.checked_add(len as usize)?;
+                let text = map.get(nq..text_end)?;
+                if idx == index {
+                    return core::str::from_utf8(text).ok().map(str::to_owned);
                 }
-                return None;
+                q = text_end;
             }
-            p = sub_end;
+            return None;
         }
-        return None;
+        p = sub_end;
     }
     None
 }
@@ -4910,7 +4944,8 @@ impl Module {
 
     /// [`from_bytes_with`](Self::from_bytes_with), and when the module is
     /// refused *while validating a function body*, which body: its function
-    /// index and, when the module carries a `name` custom section, its name.
+    /// index and, when the module carries a `name` custom section, its name
+    /// -- and, when it carries a `qjs.lines` section, the source line.
     ///
     /// The plain entry points keep [`WasmError`] -- `Copy`, allocation-free,
     /// two `&'static str` variants -- because that is what a trap-and-fault
@@ -4928,6 +4963,7 @@ impl Module {
             function: site.map(|index| FunctionSite {
                 index,
                 name: function_name_from_name_section(wasm, index),
+                line: function_line_from_lines_section(wasm, index),
             }),
         })
     }

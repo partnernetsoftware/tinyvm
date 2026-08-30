@@ -911,6 +911,91 @@ fn function_names(wasm: &[u8]) -> Option<Vec<(u32, String)>> {
     None
 }
 
+/// Beside the names, the `qjs.lines` custom section says which source line
+/// each of the author's functions was written on -- what tinyvm's
+/// `from_bytes_explained` puts on a refusal so the author opens the `.qjs`
+/// at the right place. The script and the runtime's own functions are not
+/// listed: the script is always line 1, and the runtime was written nowhere
+/// the author can open.
+#[test]
+fn the_lines_section_says_where_each_function_was_written() {
+    let source = "let a = 1;\r\n\
+                  function outer() {\n\
+                    return inner();\n\
+                  }\n\
+                  /* a\n comment */ function inner() { return `x\n y`; }\n\
+                  let f = (v) => v + 1;\n\
+                  return outer() + f(1);";
+    let wasm = compile(source);
+    assert_eq!(run(source), Out::Str("x\n y2".to_string()));
+
+    let names = function_names(&wasm).expect("a name section");
+    let lines = function_lines(&wasm).expect("a lines section");
+    let line_of = |name: &str| {
+        let (index, _) = names
+            .iter()
+            .find(|(_, n)| n == name)
+            .unwrap_or_else(|| panic!("no name for {name:?} in {names:?}"));
+        lines.iter().find(|(i, _)| i == index).map(|(_, l)| *l)
+    };
+    // `\r\n` is one terminator; the block comment's own line break counts;
+    // the template literal's break moves only what comes after it (the
+    // arrow, two lines below `inner` rather than one).
+    assert_eq!(line_of("outer"), Some(2));
+    assert_eq!(line_of("inner"), Some(6));
+    assert_eq!(line_of("main"), None, "the script is always line 1");
+    assert_eq!(line_of("__add"), None, "the runtime has no line");
+    let anon: Vec<u32> = names
+        .iter()
+        .filter(|(_, n)| n.starts_with("<anonymous@"))
+        .filter_map(|(i, _)| lines.iter().find(|(j, _)| j == i).map(|(_, l)| *l))
+        .collect();
+    assert_eq!(anon, vec![8], "the arrow is on line 8");
+    assert!(
+        lines.windows(2).all(|w| w[0].0 < w[1].0),
+        "the line map is not in index order: {lines:?}"
+    );
+
+    // A program with no functions has no section, so its bytes are what
+    // they were before the section existed.
+    assert_eq!(function_lines(&compile("return 1;")), None);
+}
+
+/// The `qjs.lines` custom section decoded by an independent reader: a vector
+/// of `(function index, line)` pairs.
+fn function_lines(wasm: &[u8]) -> Option<Vec<(u32, u32)>> {
+    let mut at = 8;
+    while at < wasm.len() {
+        let id = wasm[at];
+        at += 1;
+        let (size, used) = leb(wasm, at)?;
+        at += used;
+        let body = wasm.get(at..at + size as usize)?;
+        at += size as usize;
+        if id != 0 {
+            continue;
+        }
+        let (len, used) = leb(body, 0)?;
+        let section_name = std::str::from_utf8(body.get(used..used + len as usize)?).ok()?;
+        if section_name != "qjs.lines" {
+            continue;
+        }
+        let payload = &body[used + len as usize..];
+        let (count, mut cursor) = leb(payload, 0)?;
+        let mut out = Vec::new();
+        for _ in 0..count {
+            let (index, used) = leb(payload, cursor)?;
+            cursor += used;
+            let (line, used) = leb(payload, cursor)?;
+            cursor += used;
+            out.push((index, line));
+        }
+        assert_eq!(cursor, payload.len(), "trailing bytes in the lines section");
+        return Some(out);
+    }
+    None
+}
+
 /// An unsigned LEB128 at `at`: the value and how many bytes it took.
 fn leb(bytes: &[u8], at: usize) -> Option<(u32, usize)> {
     let mut value = 0u32;

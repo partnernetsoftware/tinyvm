@@ -633,6 +633,13 @@ fn a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was() {
         // bare Object and function arms. They trapped with no name written
         // and, sitting ahead of the named arms below, shadowed them
         // (`f + 1` was the row that found it).
+        // +17 on 2026-08-30 (late) for every program that declares a
+        // function, none of which are here: the `qjs.lines` custom section
+        // (14 bytes of header, then 2-3 per function) says which source line
+        // each function was written on, so tinyvm's refusal of a function
+        // body can name the line (tests/lower_m2.rs, tinyvm's
+        // tests/explained_load.rs). The script itself is not listed, which
+        // is why "return 1;" did not move. The fleet library moved by +89.
         ("return 1;", 10_007),
         // +190 on 2026-08-30: a program that can hold an Object, an Array or
         // a function carries the three kind names and the arms that refuse

@@ -656,7 +656,7 @@ fn parse_prd_leaves(prd: &str, marker: &str) -> Vec<String> {
 // `prd/PRD.md`'s acceptance section now writes the command set down, with this
 // package in it, so the next gap is caught by the gate rather than by someone
 // deciding to look.
-const LEAF_TESTS: [(&str, &str); 261] = [
+const LEAF_TESTS: [(&str, &str); 262] = [
     (
         "`break` / `continue`                           见下方方法段的同名行",
         "break_leaves_the_loop",
@@ -1084,6 +1084,10 @@ const LEAF_TESTS: [(&str, &str); 261] = [
     (
         "canonical function expression structure",
         "standard_function_expression_structure_is_canonical",
+    ),
+    (
+        "a refusal names the function, its name and its source line  `from_bytes_explained`：`name` 段 + `qjs.lines` 段，静态核不读",
+        "a_lines_section_puts_the_source_line_on_the_refusal",
     ),
     (
         "strict i64 signed-LEB range",

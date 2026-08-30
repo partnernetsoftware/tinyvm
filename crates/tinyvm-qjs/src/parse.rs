@@ -2013,12 +2013,22 @@ pub(crate) mod m1 {
         /// still being parsed.
         fn reserve(&mut self, name: Option<String>, span: Span) -> FuncId {
             let id = FuncId(self.functions.len() as u32);
+            // The span is a token's offset (the `function` keyword, the
+            // arrow's first token, or 0 for the script), and the stream is
+            // in offset order, so the first token at or past it is the one
+            // the span names -- of the module's own stream while one is
+            // swapped in, which is the line the module's author sees.
+            let line = self
+                .tokens
+                .get(self.tokens.partition_point(|t| t.offset < span.offset()))
+                .map_or(1, |t| t.line);
             self.functions.push(Function {
                 name,
                 params: Vec::new(),
                 bindings: Vec::new(),
                 body: Vec::new(),
                 span,
+                line,
                 captures: Vec::new(),
             });
             id

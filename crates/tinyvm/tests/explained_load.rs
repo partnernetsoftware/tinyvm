@@ -37,6 +37,7 @@ fn a_body_that_fails_validation_is_named_by_index_and_by_name() {
         Some(FunctionSite {
             index: 2,
             name: Some("broken".to_owned()),
+            line: None,
         })
     );
     assert_eq!(
@@ -78,13 +79,68 @@ fn without_a_name_section_the_index_still_answers() {
         explained.function,
         Some(FunctionSite {
             index: 2,
-            name: None
+            name: None,
+            line: None,
         })
     );
     assert_eq!(
         explained.to_string(),
         "validation: type mismatch in function #2"
     );
+}
+
+/// A `qjs.lines` custom section -- what `tinyvm-qjs` writes beside the
+/// names -- puts the author's line on the refusal. Appended by hand here:
+/// the compiler never emits a body that fails validation, so the section
+/// has to be tested on a module that does.
+#[test]
+fn a_lines_section_puts_the_source_line_on_the_refusal() {
+    let mut wasm = wat::parse_str(NAMED).expect("well-formed");
+    // Custom section: id 0, size, name "qjs.lines", then a vector of
+    // (index, line) pairs -- `fine` on line 3, `broken` on line 7.
+    let mut contents = vec![9];
+    contents.extend_from_slice(b"qjs.lines");
+    contents.extend_from_slice(&[2, 1, 3, 2, 7]);
+    wasm.push(0);
+    wasm.push(contents.len() as u8);
+    wasm.extend_from_slice(&contents);
+    let explained = WasmModule::from_bytes_explained(&wasm, Limits::default())
+        .err()
+        .expect("still refused");
+    assert_eq!(
+        explained.function,
+        Some(FunctionSite {
+            index: 2,
+            name: Some("broken".to_owned()),
+            line: Some(7),
+        })
+    );
+    assert_eq!(
+        explained.to_string(),
+        "validation: type mismatch in function `broken` (#2) (line 7)"
+    );
+    // A section that does not list the function answers no line, and a
+    // malformed one answers no line rather than a second error.
+    let mut unlisted = wat::parse_str(NAMED).expect("well-formed");
+    unlisted.extend_from_slice(&[0, 13, 9]);
+    unlisted.extend_from_slice(b"qjs.lines");
+    unlisted.extend_from_slice(&[1, 1, 3]);
+    let site = WasmModule::from_bytes_explained(&unlisted, Limits::default())
+        .err()
+        .expect("still refused")
+        .function
+        .expect("a body failed");
+    assert_eq!(site.line, None);
+    let mut truncated = wat::parse_str(NAMED).expect("well-formed");
+    truncated.extend_from_slice(&[0, 12, 9]);
+    truncated.extend_from_slice(b"qjs.lines");
+    truncated.extend_from_slice(&[2, 2]);
+    let site = WasmModule::from_bytes_explained(&truncated, Limits::default())
+        .err()
+        .expect("still refused")
+        .function
+        .expect("a body failed");
+    assert_eq!(site.line, None);
 }
 
 #[test]

@@ -28,6 +28,12 @@ use crate::diag::{Boundary, CompileError, malformed};
 pub(crate) struct Token {
     pub(crate) kind: TokenKind,
     pub(crate) offset: usize,
+    /// The 1-based line `offset` is on, counting ECMA-262 12.3
+    /// LineTerminators (`\n`, `\r`, `\r\n` as one, U+2028, U+2029). What a
+    /// diagnostic that has to survive being read *outside* the compiler --
+    /// tinyvm's refusal of a function body, hours later -- carries instead of
+    /// a byte offset.
+    pub(crate) line: u32,
     /// A LineTerminator stood between this token and the one before it --
     /// written directly, or inside a multi-line comment, which ECMA-262 12.4
     /// says counts the same. This is the raw fact all of ASI is built on.
@@ -357,13 +363,21 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Token>, CompileError> {
         templates: Vec::new(),
     };
     let mut tokens = Vec::new();
+    let mut line = 1;
+    let mut counted_to = 0;
     loop {
         let newline_before = lexer.skip_trivia()?;
         let offset = lexer.pos;
+        // Counted over everything since the previous token, so a lexeme
+        // that spans lines (a template literal) moves the *next* token's
+        // line, and trivia and lexemes are never counted twice.
+        line += line_terminators(&source[counted_to..offset]);
+        counted_to = offset;
         if offset >= lexer.bytes.len() {
             tokens.push(Token {
                 kind: TokenKind::Eof,
                 offset,
+                line,
                 newline_before,
                 inserted: false,
             });
@@ -373,12 +387,34 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Token>, CompileError> {
         tokens.push(Token {
             kind,
             offset,
+            line,
             newline_before,
             inserted: false,
         });
     }
     insert_restricted_semicolons(&mut tokens);
     Ok(tokens)
+}
+
+/// How many ECMA-262 LineTerminatorSequences `text` holds: `\r\n` is one,
+/// as are `\n`, a lone `\r`, U+2028 and U+2029.
+fn line_terminators(text: &str) -> u32 {
+    let mut count = 0;
+    let mut after_cr = false;
+    for c in text.chars() {
+        match c {
+            '\r' => {
+                count += 1;
+                after_cr = true;
+                continue;
+            }
+            '\n' if after_cr => {}
+            '\n' | '\u{2028}' | '\u{2029}' => count += 1,
+            _ => {}
+        }
+        after_cr = false;
+    }
+    count
 }
 
 struct Lexer<'a> {
@@ -1174,11 +1210,13 @@ fn insert_restricted_semicolons(tokens: &mut Vec<Token>) {
     while i < tokens.len() {
         if tokens[i].newline_before && is_restricted(&tokens[i - 1].kind, &tokens[i].kind) {
             let offset = tokens[i].offset;
+            let line = tokens[i].line;
             tokens.insert(
                 i,
                 Token {
                     kind: TokenKind::Semi,
                     offset,
+                    line,
                     newline_before: false,
                     inserted: true,
                 },

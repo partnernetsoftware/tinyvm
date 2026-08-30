@@ -779,6 +779,7 @@ pub(crate) mod m1 {
             let type_index = intern(&mut types, built.params.clone(), built.results.clone());
             funcs.push(func(
                 built.name.to_string(),
+                None,
                 type_index,
                 built.locals,
                 built.body,
@@ -849,8 +850,13 @@ pub(crate) mod m1 {
                 params.insert(0, ValType::I32);
             }
             let type_index = intern(&mut types, params, values(1));
+            // The script's line is always its first, which says nothing a
+            // reader does not already know from `main`; leaving it out is
+            // also what keeps a program with no functions byte-identical.
+            let line = (id != ast::Program::SCRIPT).then_some(function.line);
             funcs.push(func(
                 debug_name(program, id),
+                line,
                 type_index,
                 built.local_groups(),
                 built.body,
@@ -891,6 +897,7 @@ pub(crate) mod m1 {
                             "<adapter of {}>",
                             convert::JSON_SET[offset as usize].symbol()
                         ),
+                        None,
                         uniform.type_index,
                         Vec::new(),
                         body,
@@ -913,6 +920,7 @@ pub(crate) mod m1 {
                 const_undefined(&mut body);
                 funcs.push(func(
                     "<trampoline of a call on a non-function>".to_owned(),
+                    None,
                     uniform.type_index,
                     Vec::new(),
                     body,
@@ -943,6 +951,7 @@ pub(crate) mod m1 {
                 body.push(Ins::Call(user_base + id.0));
                 funcs.push(func(
                     format!("<adapter of {}>", debug_name(program, *id)),
+                    None,
                     uniform.type_index,
                     Vec::new(),
                     body,
@@ -1192,14 +1201,18 @@ pub(crate) mod m1 {
     }
 
     /// One built function, moved from `repr`'s vocabulary into the IR's.
+    /// `line` is where the author wrote it -- `None` for the runtime's own
+    /// functions, which were written nowhere the author can open.
     fn func(
         name: String,
+        line: Option<u32>,
         type_index: u32,
         locals: Vec<(u32, repr::ValType)>,
         body: Vec<Ins>,
     ) -> ir::Func {
         ir::Func {
             name: Some(name),
+            line,
             type_index,
             locals: locals
                 .into_iter()
