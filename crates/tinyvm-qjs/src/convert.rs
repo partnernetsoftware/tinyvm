@@ -3398,6 +3398,12 @@ pub(crate) mod json {
         /// `[` appears in, which is the half of the array predicate that is
         /// not about the source's syntax.
         pub(crate) arrays: u32,
+        /// Whether any function in the program captures: when it does,
+        /// `__fn_new` takes an environment word after the element, and the
+        /// two records `__json_ns` builds hand it `0` like any closure-free
+        /// function object (`emit`'s `function_value`). Read off the same
+        /// scan bit `emit` uses, so the two shapes cannot disagree.
+        pub(crate) captures: bool,
         pub(crate) names: JsonNames,
     }
 
@@ -3438,6 +3444,7 @@ pub(crate) mod json {
                 convert_base: cv.func_base,
                 unwind,
                 arrays: func_base + JSON_SET.len() as u32,
+                captures: false,
                 names,
             }
         }
@@ -5615,7 +5622,11 @@ pub(crate) mod json {
         for (element, key) in [(0u32, names.stringify), (1u32, names.parse)] {
             box_object(&[ld(o)], b);
             b.push(ic(key));
-            box_function(&[ld(element), ctx.rt(Rt::FnNew)], b);
+            if ctx.captures {
+                box_function(&[ld(element), ic(0), ctx.rt(Rt::FnNew)], b);
+            } else {
+                box_function(&[ld(element), ctx.rt(Rt::FnNew)], b);
+            }
             b.push(ctx.rt(Rt::ObjSet));
         }
         b.push(ld(o));

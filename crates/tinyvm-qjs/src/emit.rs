@@ -676,6 +676,7 @@ pub(crate) mod m1 {
                 }),
                 arrays: arr_base,
                 names: convert::JsonNames::intern(&mut pool),
+                captures: scan.captures,
             };
             convert::build_json(&jcx)
         } else {

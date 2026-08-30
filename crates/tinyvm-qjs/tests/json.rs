@@ -150,6 +150,7 @@ impl Bases {
             // The array set follows the JSON set in the module, which is where
             // `emit` puts it and what `JsonCtx::beside` computes.
             arrays: json_base + convert::JSON_SET.len() as u32,
+            captures: false,
             names: js_names,
         };
         Bases {

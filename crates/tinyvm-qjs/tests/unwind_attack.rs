@@ -141,6 +141,7 @@ impl Bases {
             convert_base,
             unwind,
             arrays: json_base + convert::JSON_SET.len() as u32,
+            captures: false,
             names: js_names,
         };
         Bases {
