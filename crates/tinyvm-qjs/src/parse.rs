@@ -1482,6 +1482,57 @@ pub(crate) mod m1 {
             }
         }
 
+        /// `parseInt(s[, radix])` folded to `s.__parse_int_radix(radix)`,
+        /// with `undefined` standing in for an unwritten radix, or the
+        /// arguments handed back untouched. The same default-not-privilege
+        /// rule as `Number`: a declared `parseInt` wins.
+        fn fold_parse_int_call(
+            &mut self,
+            callee: &Expr,
+            args: Vec<Expr>,
+            span: Span,
+        ) -> Result<Result<Expr, Vec<Expr>>, CompileError> {
+            let ExprKind::Name(name) = &callee.kind else {
+                return Ok(Err(args));
+            };
+            if name.text != PARSE_INT
+                || declared(&self.options.names, PARSE_INT)
+                || self.is_declared_in_scope(PARSE_INT)
+            {
+                return Ok(Err(args));
+            }
+            let mut args = args;
+            let radix = match args.len() {
+                1 => Expr {
+                    kind: ExprKind::Undefined,
+                    span,
+                },
+                2 => args.pop().expect("two arguments"),
+                n => {
+                    return Err(unsupported(
+                        Boundary::FullJs,
+                        &format!("`parseInt` called with {n} arguments; it takes one or two"),
+                        span.offset(),
+                    ));
+                }
+            };
+            self.pending[name.occurrence as usize].folded = true;
+            let receiver = args.remove(0);
+            Ok(Ok(Expr {
+                kind: ExprKind::Call {
+                    callee: Box::new(Expr {
+                        kind: ExprKind::Member {
+                            object: Box::new(receiver),
+                            key: MemberKey::Static(PARSE_INT_METHOD.to_owned()),
+                        },
+                        span,
+                    }),
+                    args: vec![radix],
+                },
+                span,
+            }))
+        }
+
         /// A `Math.f(...)` call folded to its reserved method or literal,
         /// or the arguments handed back untouched.
         ///
@@ -1650,6 +1701,11 @@ pub(crate) mod m1 {
             let (namespace, method) = match (name.text.as_str(), member.as_str()) {
                 (OBJECT, "keys") => (OBJECT, OBJ_KEYS_METHOD),
                 (ARRAY, "isArray") => (ARRAY, IS_ARRAY_METHOD),
+                // 21.1.2.3 / 21.1.2.4: type tests, not conversions, which
+                // is why they are prefabs and not folds to `+x` -- an
+                // `isNaN` that converted would answer `true` for `"abc"`.
+                (NUMBER, "isInteger") => (NUMBER, "__is_integer"),
+                (NUMBER, "isNaN") => (NUMBER, "__is_nan"),
                 _ => return Ok(Err(args)),
             };
             if declared(&self.options.names, namespace) || self.is_declared_in_scope(namespace) {
@@ -2718,6 +2774,13 @@ pub(crate) mod m1 {
                             }
                             Err(args) => args,
                         };
+                        let args = match self.fold_parse_int_call(&expr, args, span)? {
+                            Ok(folded) => {
+                                expr = folded;
+                                continue;
+                            }
+                            Err(args) => args,
+                        };
                         expr = match self.fold_number_call(&expr, args, span)? {
                             Ok(folded) => folded,
                             Err(args) => Expr {
@@ -3439,6 +3502,16 @@ pub(crate) mod m1 {
     const OBJ_KEYS_METHOD: &str = "__keys";
     /// The namespace `Array.isArray(x)` is spelled under.
     const ARRAY: &str = "Array";
+    /// The name `parseInt(s[, radix])` is spelled with. Folded to the
+    /// reserved method `s.__parse_int_radix(radix)` -- one prefab, with an
+    /// `undefined` radix synthesised for the one-argument spelling --
+    /// because 19.2.5 is prefix parsing with a radix, which `Number` is
+    /// not: the fold that stood here for a year refused it by name until
+    /// the demand arrived (rh_compat.qjs `parse_int`, 6 call lines in 4
+    /// downstream files).
+    const PARSE_INT: &str = "parseInt";
+    /// The reserved method `parseInt` folds to.
+    const PARSE_INT_METHOD: &str = "__parse_int_radix";
     /// The namespace the `Math` functions and constants are spelled under.
     /// There is no `Math` object: each member folds at the call site to a
     /// reserved method the prefab layer gates per name, exactly as

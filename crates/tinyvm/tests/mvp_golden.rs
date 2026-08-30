@@ -656,7 +656,15 @@ fn parse_prd_leaves(prd: &str, marker: &str) -> Vec<String> {
 // `prd/PRD.md`'s acceptance section now writes the command set down, with this
 // package in it, so the next gap is caught by the gate rather than by someone
 // deciding to look.
-const LEAF_TESTS: [(&str, &str); 273] = [
+const LEAF_TESTS: [(&str, &str); 275] = [
+    (
+        "`parseInt`（前缀解析 + 基数）                 2026-08-31；19.2.5 整条：空白、一个符号、`0x`、逐位到第一个非位、无位 NaN、基数出 2..36 是 NaN；手写 parse_int 2.21M → 135k 步（16×）；1 073 B",
+        "parse_int_reads_a_prefix_in_the_given_radix",
+    ),
+    (
+        "`Number.isInteger` / `Number.isNaN`（21.1.2.3/.4）   2026-08-31；类型测试不转换（`isNaN(\"abc\")` 是 false）；287 / 265 B",
+        "the_number_type_tests_do_not_convert",
+    ),
     (
         "`Math`：floor/ceil/round/trunc/abs/sqrt/sign/pow/min/max + PI/E，逐名折成门控 prefab  2026-08-31；无 `Math` 对象——常量与 0/1 参 min/max 折成字面量零字节；floor 25 步 / 270 B；`int_div` 循环 633k → `Math.trunc(a/b)` 210k 步；缺的成员编译期具名拒绝；pow 的正底分数指数具名拒绝（exp/log 未带）",
         "the_rounding_functions_answer_the_spec",

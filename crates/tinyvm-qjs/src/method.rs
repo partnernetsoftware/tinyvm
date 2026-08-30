@@ -277,6 +277,15 @@ pub(crate) enum Me {
     MathPow,
     MathMin,
     MathMax,
+    /// `parseInt(s[, radix])` (ECMA-262 19.2.5), folded by the parser to
+    /// `s.__parse_int_radix(radix)`: leading StrWhiteSpaceChar skipped,
+    /// one sign, `0x`/`0X` with radix 16 or by default, digits of the
+    /// radix accumulated until the first that is not one, NaN when none.
+    ParseInt,
+    /// `Number.isInteger(x)` (21.1.2.3): a type test, not a conversion.
+    IsInteger,
+    /// `Number.isNaN(x)` (21.1.2.4): NaN of the Number type only.
+    IsNan,
 }
 
 /// Every function this variant can emit, in module order. **Not** what a
@@ -336,6 +345,9 @@ pub(crate) const SET: &[Me] = &[
     Me::MathPow,
     Me::MathMin,
     Me::MathMax,
+    Me::ParseInt,
+    Me::IsInteger,
+    Me::IsNan,
 ];
 
 /// Which of [`SET`] a particular module carries, and where each one lands.
@@ -464,6 +476,9 @@ impl Me {
             Me::MathPow => "__m_math_pow",
             Me::MathMin => "__m_math_min",
             Me::MathMax => "__m_math_max",
+            Me::ParseInt => "__m_parse_int",
+            Me::IsInteger => "__m_is_integer",
+            Me::IsNan => "__m_is_nan",
         }
     }
 
@@ -523,6 +538,9 @@ impl Me {
             ("__math_pow", 1) => Some(Me::MathPow),
             ("__math_min", 1) => Some(Me::MathMin),
             ("__math_max", 1) => Some(Me::MathMax),
+            ("__parse_int_radix", 1) => Some(Me::ParseInt),
+            ("__is_integer", 0) => Some(Me::IsInteger),
+            ("__is_nan", 0) => Some(Me::IsNan),
             _ => None,
         }
     }
@@ -564,7 +582,10 @@ impl Me {
             | Me::MathSign
             | Me::MathPow
             | Me::MathMin
-            | Me::MathMax => Recv::Any,
+            | Me::MathMax
+            | Me::ParseInt
+            | Me::IsInteger
+            | Me::IsNan => Recv::Any,
             Me::Trim
             | Me::StartsWith
             | Me::EndsWith
@@ -653,6 +674,8 @@ impl Me {
             | Me::MathPow
             | Me::MathMin
             | Me::MathMax => Vec::new(),
+            Me::ParseInt => vec![Me::ToInt32, Me::WsWidth],
+            Me::IsInteger | Me::IsNan => Vec::new(),
         }
     }
 }
@@ -748,6 +771,9 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
         Me::MathPow => (values(2), values(1), math_pow(ctx)),
         Me::MathMin => (values(2), values(1), math_pair(ctx, Ins::F64Min)),
         Me::MathMax => (values(2), values(1), math_pair(ctx, Ins::F64Max)),
+        Me::ParseInt => (values(2), values(1), parse_int(ctx)),
+        Me::IsInteger => (values(1), values(1), is_integer()),
+        Me::IsNan => (values(1), values(1), is_nan()),
     };
     RtFunc {
         name: me.symbol(),
@@ -4804,6 +4830,317 @@ fn math_pow(ctx: &Ctx) -> FnBuild {
     b.push(Ins::End);
     let mut boxed = Vec::new();
     box_number(&[Ins::LocalGet(r)], &mut boxed);
+    b.extend(boxed);
+    f
+}
+
+// ---- parseInt and the Number type tests ---------------------------------
+
+/// `parseInt(s[, radix])` -- ECMA-262 19.2.5, whole.
+///
+/// A receiver that is not a String goes through ToString first (step 1),
+/// which answers for Numbers and Booleans and refuses an Object by name,
+/// as ToString everywhere does. Leading whitespace is `Me::WsWidth`'s set
+/// (StrWhiteSpaceChar, the same table `trim` walks), the radix is
+/// `Me::ToInt32` of the argument (`undefined` is 0, which means 10 with
+/// the `0x` prefix live), and the digits accumulate as `v * R + d` on the
+/// double -- exact to 2^53, and past it correctly rounded per step rather
+/// than over the whole numeral, which is the one place this can sit an
+/// ulp from a host's `parseInt`. The downstream demand parses config
+/// integers; none is near 2^53.
+fn parse_int(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH);
+    let h = f.local(ValType::I32);
+    let len = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+    let sign = f.local(ValType::F64);
+    let radix = f.local(ValType::I32);
+    let strip = f.local(ValType::I32);
+    let v = f.local(ValType::F64);
+    let any = f.local(ValType::I32);
+    let byte = f.local(ValType::I32);
+    let d = f.local(ValType::I32);
+    let ok = f.local(ValType::I32);
+    let w = f.local(ValType::I32);
+
+    let b = &mut f.body;
+    let nan = |b: &mut Vec<Ins>| {
+        let mut boxed = Vec::new();
+        box_number(&[Ins::F64Const(f64::NAN)], &mut boxed);
+        b.extend(boxed);
+        b.push(Ins::Return);
+    };
+    // Step 1: ToString of anything that is not one already.
+    repr::is_string(0, b);
+    b.push(Ins::If(BlockType::Empty));
+    unbox_string(0, b);
+    b.push(Ins::LocalSet(h));
+    b.push(Ins::End);
+    repr::is_string(0, b);
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    load_local(0, b);
+    b.push(ctx.rt(Rt::ToStr));
+    b.push(Ins::LocalSet(h));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::I32Load(2, 0));
+    b.push(Ins::LocalSet(len));
+
+    // Steps 3-4: leading StrWhiteSpaceChar.
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(len));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32Add);
+    b.push(ctx.me(Me::WsWidth));
+    b.push(Ins::LocalTee(w));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(w));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    // Steps 5-7: one sign.
+    b.push(Ins::F64Const(1.0));
+    b.push(Ins::LocalSet(sign));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(len));
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::LocalSet(byte));
+    b.push(Ins::LocalGet(byte));
+    b.push(Ins::I32Const(43));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(byte));
+    b.push(Ins::I32Const(45));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::F64Const(-1.0));
+    b.push(Ins::LocalSet(sign));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    // Steps 8-10: the radix, 0 meaning "10, prefix live"; 16 keeps the
+    // prefix live too, and anything outside 2..=36 is NaN.
+    load_local(WIDTH, b);
+    b.push(ctx.me(Me::ToInt32));
+    b.push(Ins::LocalSet(radix));
+    b.push(Ins::LocalGet(radix));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(10));
+    b.push(Ins::LocalSet(radix));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::LocalSet(strip));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(radix));
+    b.push(Ins::I32Const(2));
+    b.push(Ins::I32Sub);
+    b.push(Ins::I32Const(35));
+    b.push(Ins::I32GeU);
+    b.push(Ins::If(BlockType::Empty));
+    nan(b);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(radix));
+    b.push(Ins::I32Const(16));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::LocalSet(strip));
+    b.push(Ins::End);
+    // Step 10's `0x` / `0X`.
+    b.push(Ins::LocalGet(strip));
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(len));
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::I32Const(48));
+    b.push(Ins::I32Eq);
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 5));
+    b.push(Ins::I32Const(32));
+    b.push(Ins::I32Or);
+    b.push(Ins::I32Const(120));
+    b.push(Ins::I32Eq);
+    b.push(Ins::I32And);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(16));
+    b.push(Ins::LocalSet(radix));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(2));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    // Steps 11-13: the digits, stopping at the first that is not one.
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(len));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::LocalSet(byte));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(ok));
+    b.push(Ins::LocalGet(byte));
+    b.push(Ins::I32Const(48));
+    b.push(Ins::I32Sub);
+    b.push(Ins::I32Const(10));
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(byte));
+    b.push(Ins::I32Const(48));
+    b.push(Ins::I32Sub);
+    b.push(Ins::LocalSet(d));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::LocalSet(ok));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(ok));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(byte));
+    b.push(Ins::I32Const(32));
+    b.push(Ins::I32Or);
+    b.push(Ins::I32Const(97));
+    b.push(Ins::I32Sub);
+    b.push(Ins::I32Const(26));
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(byte));
+    b.push(Ins::I32Const(32));
+    b.push(Ins::I32Or);
+    b.push(Ins::I32Const(87));
+    b.push(Ins::I32Sub);
+    b.push(Ins::LocalSet(d));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::LocalSet(ok));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(ok));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(d));
+    b.push(Ins::LocalGet(radix));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(v));
+    b.push(Ins::LocalGet(radix));
+    b.push(Ins::F64ConvertI32S);
+    b.push(Ins::F64Mul);
+    b.push(Ins::LocalGet(d));
+    b.push(Ins::F64ConvertI32S);
+    b.push(Ins::F64Add);
+    b.push(Ins::LocalSet(v));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::LocalSet(any));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(any));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    nan(b);
+    b.push(Ins::End);
+    let mut boxed = Vec::new();
+    box_number(
+        &[Ins::LocalGet(sign), Ins::LocalGet(v), Ins::F64Mul],
+        &mut boxed,
+    );
+    b.extend(boxed);
+    f
+}
+
+/// `Number.isInteger(x)` -- 21.1.2.3: false for anything that is not a
+/// Number (no conversion), and for NaN and the infinities; the test is
+/// `trunc(x) == x`.
+fn is_integer() -> FnBuild {
+    let mut f = FnBuild::new(WIDTH);
+    let r = f.local(ValType::I32);
+    let x = f.local(ValType::F64);
+    let b = &mut f.body;
+    repr::is_number(0, b);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(1));
+    b.push(Ins::F64ReinterpretI64);
+    b.push(Ins::LocalTee(x));
+    b.push(Ins::F64Trunc);
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Eq);
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Abs);
+    b.push(Ins::F64Const(f64::INFINITY));
+    b.push(Ins::F64Ne);
+    b.push(Ins::I32And);
+    b.push(Ins::LocalSet(r));
+    b.push(Ins::End);
+    let mut boxed = Vec::new();
+    box_bool(&[Ins::LocalGet(r)], &mut boxed);
+    b.extend(boxed);
+    f
+}
+
+/// `Number.isNaN(x)` -- 21.1.2.4: NaN of the Number type only, so
+/// `Number.isNaN("abc")` is false where a converting `isNaN` would lie.
+fn is_nan() -> FnBuild {
+    let mut f = FnBuild::new(WIDTH);
+    let r = f.local(ValType::I32);
+    let b = &mut f.body;
+    repr::is_number(0, b);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(1));
+    b.push(Ins::F64ReinterpretI64);
+    b.push(Ins::LocalGet(1));
+    b.push(Ins::F64ReinterpretI64);
+    b.push(Ins::F64Ne);
+    b.push(Ins::LocalSet(r));
+    b.push(Ins::End);
+    let mut boxed = Vec::new();
+    box_bool(&[Ins::LocalGet(r)], &mut boxed);
     b.extend(boxed);
     f
 }

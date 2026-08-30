@@ -292,18 +292,12 @@ fn a_script_that_declares_number_gets_its_own() {
     assert_eq!(run(source), "99");
 }
 
-/// `parseInt` stays unbound, and the diagnostic says the name rather than
-/// pretending.
-///
-/// It is a different function: prefix parsing with a radix, answering `42` for
-/// `"42abc"` where `Number` answers `NaN`. The corpus's `parse_int` is strict,
-/// so `Number` is the honest match and this waits for somebody to ask for
-/// prefix parsing by name.
-#[test]
-fn parse_int_is_not_silently_number() {
-    let error = compile_qjs_m1("return parseInt(\"42abc\");").expect_err("unbound");
-    assert!(error.message.contains("parseInt"), "{}", error.message);
-}
+// `parse_int_is_not_silently_number` stood here until 2026-08-31: it
+// pinned that `parseInt` was refused by name while nobody had asked for
+// prefix parsing. The demand arrived (rh_compat.qjs, 6 call lines in 4
+// downstream files) and `parseInt` landed as a real 19.2.5 --
+// `tests/parse_int_m3.rs::parse_int_reads_a_prefix_in_the_given_radix`
+// is where its behaviour is asserted now.
 
 // ---- the fourth fault code ---------------------------------------------
 
