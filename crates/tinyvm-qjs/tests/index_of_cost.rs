@@ -31,6 +31,31 @@ fn a_miss_skips_clear_windows() {
 }
 
 #[test]
+fn split_skips_clear_windows_between_separators() {
+    let base = steps(&format!("{BUILD} return s.length;"));
+    let split = steps(&format!("{BUILD} return s.split(\"\\n\").length;"));
+    let per = (split - base) as f64 / 131_072.0;
+    println!("split on a 128 KiB string without the separator: {per:.1} steps per character");
+    assert!(per < 35.0, "split cost {per:.1} steps a character between separators; it was ~73");
+    for (source, want) in [
+        (r#"return "a,b,c".split(",").length;"#, 3.0),
+        (r#"return "abcdefgh".split("h").length;"#, 2.0),
+        (r#"return "abcdefghijk".split("ijk").length;"#, 2.0),
+        (r#"return "aaaaaaab".split("ab").length;"#, 2.0),
+        (r#"return "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx".split("y").length;"#, 1.0),
+        (r#"return "line one\nline two\nline three".split("\n").length;"#, 3.0),
+        (r#"return "a--b--c--".split("--").length;"#, 4.0),
+        (r#"let t = ""; for (let i = 0; i < 100; i = i + 1) { t = t + "0123456789\n"; } return t.split("\n").length;"#, 101.0),
+    ] {
+        let wasm = compile_qjs_m1(source).expect("compiles");
+        let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
+        let mut instance = module.instantiate().expect("instantiates");
+        let vals = instance.invoke_by_name("main", &Value::args(&[])).expect("runs");
+        assert_eq!(Value::returned(&vals).expect("value"), Value::Number(want), "{source}");
+    }
+}
+
+#[test]
 fn hits_and_misses_stay_exact_around_the_windows() {
     for (source, want) in [
         (r#"return "abcdefgh".indexOf("h");"#, 7.0),

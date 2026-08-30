@@ -1314,6 +1314,8 @@ fn split(ctx: &Ctx) -> FnBuild {
     let j = f.local(ValType::I32);
     let start = f.local(ValType::I32);
     let ok = f.local(ValType::I32);
+    let p = f.local(ValType::I32);
+    let w = f.local(ValType::I32);
 
     unbox_string(0, &mut f.body);
     f.body.push(Ins::LocalSet(h));
@@ -1352,6 +1354,7 @@ fn split(ctx: &Ctx) -> FnBuild {
     b.push(Ins::I32LtU);
     b.push(Ins::I32Eqz);
     b.push(Ins::If(BlockType::Empty));
+    first_byte_pattern(b, nd, p);
     b.push(Ins::Block(BlockType::Empty));
     b.push(Ins::Loop(BlockType::Empty));
     b.push(Ins::LocalGet(hl));
@@ -1360,6 +1363,7 @@ fn split(ctx: &Ctx) -> FnBuild {
     b.push(Ins::LocalGet(i));
     b.push(Ins::I32LtU);
     b.push(Ins::BrIf(1));
+    skip_clear_window(b, h, i, hl, p, w);
 
     b.push(Ins::I32Const(1));
     b.push(Ins::LocalSet(ok));
