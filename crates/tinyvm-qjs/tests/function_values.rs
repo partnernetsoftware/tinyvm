@@ -372,7 +372,10 @@ fn a_wrong_type_call_is_not_reported_as_heap_exhaustion() {
     assert!(outcome.is_err(), "want a trap");
     let memory = instance.memory().expect("guest memory");
     // Named since 2026-08-30: not heap exhaustion, and not a bare trap.
-    assert_eq!(tinyvm_qjs::guest_fault(&memory), Some(tinyvm_qjs::GuestFault::NotAFunction));
+    assert_eq!(
+        tinyvm_qjs::guest_fault(&memory),
+        Some(tinyvm_qjs::GuestFault::NotAFunction)
+    );
 }
 
 // =========================================================================
@@ -515,7 +518,10 @@ fn an_arrow_function_is_a_function_value() {
     number("let f = a => a; return f(2);", 2.0);
     number("let f = () => 1; return f();", 1.0);
     number("let f = (a) => a; let g = f; return g(3);", 3.0);
-    number("function take(g) { return g(4); } return take((a) => a);", 4.0);
+    number(
+        "function take(g) { return g(4); } return take((a) => a);",
+        4.0,
+    );
 }
 
 /// `bind`, `call` and `apply` live on `Function.prototype`, and there is no
@@ -942,7 +948,11 @@ fn the_whole_fleet_library_compiles_and_its_methods_are_reachable() {
     // from none, and the string-`.length` milestone gated its body. This
     // library has no `.length` in it, so it gets the stub. `arrays_m3`'s
     // three baselines record the same 19-byte drop and the arithmetic.
-    assert_eq!(wasm.len(), 23_816 /* +23 on 2026-08-29: thrown-message record in the epilogue; see arrays_m3 ; +23 more the same day: the fleet library reads static properties, so it carries the arm that names a missing String property (`FAULT_MISSING_STRING_METHOD`) */, "the whole library's emitted size moved");
+    assert_eq!(
+        wasm.len(),
+        23_985, /* +23 on 2026-08-29: thrown-message record in the epilogue; see arrays_m3 ; +23 more the same day: the fleet library reads static properties, so it carries the arm that names a missing String property (`FAULT_MISSING_STRING_METHOD`) */
+        "the whole library's emitted size moved"
+    );
 }
 
 /// The same shape, reduced to what can run with no host at all: a namespace

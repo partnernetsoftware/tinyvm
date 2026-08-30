@@ -75,7 +75,10 @@ fn threw(source: &str) -> String {
 /// The elements, in order, once each.
 #[test]
 fn it_visits_every_element_in_order() {
-    assert_eq!(text("let s = 0; for (const x of [1,2,3]) { s = s + x; } return s;"), "6");
+    assert_eq!(
+        text("let s = 0; for (const x of [1,2,3]) { s = s + x; } return s;"),
+        "6"
+    );
     assert_eq!(
         text("let s = \"\"; for (const x of [\"a\",\"b\",\"c\"]) { s = s + x; } return s;"),
         "abc"
@@ -87,15 +90,27 @@ fn it_visits_every_element_in_order() {
 /// non-array.
 #[test]
 fn an_empty_array_runs_the_body_no_times() {
-    assert_eq!(text("let n = 0; for (const x of []) { n = n + 1; } return n;"), "0");
+    assert_eq!(
+        text("let n = 0; for (const x of []) { n = n + 1; } return n;"),
+        "0"
+    );
 }
 
 /// `let`, `const` and `var` all bind the element.
 #[test]
 fn the_three_declaration_keywords_all_work() {
-    assert_eq!(text("let s = 0; for (let x of [1,2]) { s = s + x; } return s;"), "3");
-    assert_eq!(text("let s = 0; for (const x of [1,2]) { s = s + x; } return s;"), "3");
-    assert_eq!(text("let s = 0; for (var x of [1,2]) { s = s + x; } return s;"), "3");
+    assert_eq!(
+        text("let s = 0; for (let x of [1,2]) { s = s + x; } return s;"),
+        "3"
+    );
+    assert_eq!(
+        text("let s = 0; for (const x of [1,2]) { s = s + x; } return s;"),
+        "3"
+    );
+    assert_eq!(
+        text("let s = 0; for (var x of [1,2]) { s = s + x; } return s;"),
+        "3"
+    );
 }
 
 /// Each pass binds a **new** `x`, so a closure made on pass N sees pass N's
@@ -260,11 +275,11 @@ fn the_refusal_is_a_throw_a_catch_can_see() {
 #[test]
 fn a_program_without_for_of_pays_nothing_for_it() {
     for (source, want) in [
-        ("return 1;", 10_025),
-        ("let o = {a:1}; o.b = 2; return o.a;", 10_193) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
+        ("return 1;", 10_007),
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_365), /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
         (
             "function mk() { return function () { return 1; }; } let f = mk(); return f();",
-            10_342,
+            10_510,
         ),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();

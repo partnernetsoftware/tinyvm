@@ -225,9 +225,11 @@ fn qjs_m1_tells_an_exhausted_heap_from_a_broken_script() {
     );
     // A trap the heap had nothing to do with: `"x" + o` needs ToPrimitive
     // (ECMA-262 7.1.1), which reaches the `valueOf`/`toString` a prototype
-    // would carry, and there is no prototype -- so the runtime traps rather
-    // than fabricate a string. Same instruction, same budget, entirely
-    // different cause. (It used to be `"a" + 1`; that one has an answer now.)
+    // would carry, and there is no prototype -- so the runtime refuses rather
+    // than fabricate a string, and since 2026-08-30 says which kind it
+    // refused (`FAULT_NO_PRIMITIVE_FORM`). Same instruction, same budget,
+    // entirely different cause. (It used to be `"a" + 1`; that one has an
+    // answer now.)
     let semantic = trap_in("const o = {}; return \"x\" + o;", one_page);
 
     // The VM cannot tell them apart, and does not pretend to.
@@ -239,7 +241,7 @@ fn qjs_m1_tells_an_exhausted_heap_from_a_broken_script() {
 
     // The guest can, because it wrote it down on the way out.
     assert_eq!(exhausted.fault, Some(GuestFault::HeapExhausted));
-    assert_eq!(semantic.fault, None);
+    assert_eq!(semantic.fault, Some(GuestFault::NoPrimitiveForm));
 
     // And no host has to be watching: neither module imports anything.
     assert_eq!(exhausted.imports, 0);
@@ -821,7 +823,10 @@ fn qjs_m1_tells_an_uncaught_throw_from_a_broken_script() {
     );
     let mut broken = broken.instantiate().expect("instantiates");
     assert!(broken.invoke_by_name("main", &Value::args(&[])).is_err());
-    assert_eq!(guest_fault(&broken.memory().expect("guest memory")), Some(GuestFault::PropertyOfNonObject));
+    assert_eq!(
+        guest_fault(&broken.memory().expect("guest memory")),
+        Some(GuestFault::PropertyOfNonObject)
+    );
 }
 
 /// The acceptance library, driven end to end: a `fleet.js` wrapper calls out

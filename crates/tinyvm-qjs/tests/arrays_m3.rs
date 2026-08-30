@@ -478,7 +478,10 @@ fn an_array_method_this_engine_lacks_is_absent_rather_than_refused() {
     traps("let f = function (x) { return x; }; return [1, 2].filter(f);");
     // And the ones that landed really did: absent then, answers now.
     number("return [1, 2].push(3);", 3.0);
-    number("let f = function (x) { return x + 1; }; return [1, 2].map(f)[0];", 2.0);
+    number(
+        "let f = function (x) { return x + 1; }; return [1, 2].map(f)[0];",
+        2.0,
+    );
 }
 
 #[test]
@@ -626,8 +629,16 @@ fn a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was() {
         // `__str_concat`, so every row here moved by the same 85; one append
         // to a 1 000-character string fell 17 178 -> 2 569 steps
         // (tests/concat_cost.rs).
-        ("return 1;", 10_025),
-        ("let o = {a:1}; o.b = 2; return o.a;", 10_193) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
+        // -18 on 2026-08-30, for every program: `__to_number` lost its two
+        // bare Object and function arms. They trapped with no name written
+        // and, sitting ahead of the named arms below, shadowed them
+        // (`f + 1` was the row that found it).
+        ("return 1;", 10_007),
+        // +190 on 2026-08-30: a program that can hold an Object, an Array or
+        // a function carries the three kind names and the arms that refuse
+        // their string and number forms by name (fault 9,
+        // tests/to_string_of_objects.rs).
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_365), /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
         // A computed key whose *value* the text does not settle. This one
         // moved **up** by 117, and not for arrays: a computed key could
         // evaluate to `"length"`, so it turns on the string-`.length` arm of
@@ -643,8 +654,8 @@ fn a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was() {
         // +58 on 2026-08-30: `__len` counts eight plain-ASCII bytes a step
         // (180 000 -> 19 900 steps on 6 000 characters, tests/length_cost.rs).
         // Only programs that can reach the string-`.length` arm carry it.
-        ("let o = {a:1}; let k = \"a\"; return o[k];", 10_307),
-        ("let o = {a:1}; return o[\"a\"];", 10_088),
+        ("let o = {a:1}; let k = \"a\"; return o[k];", 10_479),
+        ("let o = {a:1}; return o[\"a\"];", 10_260),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(
@@ -663,7 +674,7 @@ fn naming_json_brings_the_array_set_because_parse_can_return_one() {
         .expect("compiles")
         .len();
     assert_eq!(
-        n, 16_570,
+        n, 16_743,
         "the array set costs 1 130 bytes on top of the JSON set's 14 284 -- 753 for the \
          type and 377 more for `JSON.parse`/`JSON.stringify` of one. That arithmetic is \
          unchanged; the total went down by 28 on 2026-08-28 because `__len`'s dead body \

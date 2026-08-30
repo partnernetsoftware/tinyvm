@@ -124,8 +124,8 @@ fn the_wrong_arity_is_refused_by_name() {
 #[test]
 fn a_program_that_never_asks_for_keys_pays_nothing() {
     for (source, want) in [
-        ("return 1;", 10_025),
-        ("let o = {a:1}; o.b = 2; return o.a;", 10_193) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
+        ("return 1;", 10_007),
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_365), /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(n, want, "{source:?} is {n} bytes");
@@ -140,5 +140,8 @@ fn what_object_keys_costs_is_written_down() {
     let with = size("const o = {a:1}; const a = [1]; return Object.keys(o).length;");
     let cost = with - base;
     println!("Object.keys: {cost} bytes over a program that already has arrays and objects");
-    assert!(cost > 0 && cost < 600, "Object.keys costs {cost} bytes, which is a surprise");
+    assert!(
+        cost > 0 && cost < 600,
+        "Object.keys costs {cost} bytes, which is a surprise"
+    );
 }

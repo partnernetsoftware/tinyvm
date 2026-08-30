@@ -627,7 +627,7 @@ pub(crate) fn host_decode(vals: &[Val]) -> Result<HostVal, String> {
 
 // ---- internals ----------------------------------------------------------
 
-fn tag_is(base: u32, tag: i32, out: &mut Vec<Ins>) {
+pub(crate) fn tag_is(base: u32, tag: i32, out: &mut Vec<Ins>) {
     out.push(Ins::LocalGet(base));
     out.push(Ins::I32Const(tag));
     out.push(Ins::I32Eq);

@@ -84,8 +84,8 @@
 use tinyvm::{HostGlobal, Val, WasmError, eval_wasm};
 
 mod array;
-mod case;
 mod ast;
+mod case;
 mod convert;
 mod diag;
 mod emit;
@@ -250,6 +250,11 @@ pub enum GuestFault {
     /// what an uncatchable program reports instead of a bare trap. The
     /// callee's name is the detail: [`guest_not_a_function`].
     NotAFunction,
+    /// The script asked for the string form of an Object, an Array or a
+    /// function (`"" + o`, an object as a key). ECMA-262 would answer
+    /// `[object Object]`; this engine refuses, on purpose, and says which
+    /// kind: [`guest_no_primitive_form`]. `JSON.stringify` is the spelling.
+    NoPrimitiveForm,
 }
 
 /// Read the guest's own account of why it trapped, out of its linear memory.
@@ -340,6 +345,15 @@ pub fn guest_not_a_function(memory: &[u8]) -> Option<String> {
     fault_detail_string(memory)
 }
 
+/// After a [`GuestFault::NoPrimitiveForm`]: the kind that has no string form
+/// here -- `an Object`, `an Array` or `a function`.
+pub fn guest_no_primitive_form(memory: &[u8]) -> Option<String> {
+    if guest_fault(memory)? != GuestFault::NoPrimitiveForm {
+        return None;
+    }
+    fault_detail_string(memory)
+}
+
 /// The String record the fault area's second word points at, if any.
 fn fault_detail_string(memory: &[u8]) -> Option<String> {
     let at = runtime::FAULT_THROWN as usize;
@@ -367,6 +381,7 @@ pub fn guest_fault(memory: &[u8]) -> Option<GuestFault> {
         runtime::FAULT_HOST_ARGUMENT => Some(GuestFault::HostArgument),
         runtime::FAULT_PROPERTY_OF_NON_OBJECT => Some(GuestFault::PropertyOfNonObject),
         runtime::FAULT_NOT_A_FUNCTION => Some(GuestFault::NotAFunction),
+        runtime::FAULT_NO_PRIMITIVE_FORM => Some(GuestFault::NoPrimitiveForm),
         _ => None,
     }
 }

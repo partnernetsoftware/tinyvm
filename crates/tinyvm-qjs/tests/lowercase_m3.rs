@@ -65,7 +65,7 @@ fn caf_uppercase_lowercases_correctly() {
     // `the_greek_final_sigma_is_the_second_named_divergence`.
     assert_eq!(lower("ΣΊΣΥΦΟΝ"), "σίσυφον");
     assert_eq!(lower("ПРИВЕТ"), "привет");
-    assert_eq!(lower("ÇĞİÖŞÜ").contains('ç'), true);
+    assert!(lower("ÇĞİÖŞÜ").contains('ç'));
 }
 
 /// **Criterion ②.** The test that kills "trap on anything non-ASCII".
@@ -179,15 +179,18 @@ fn it_reads_the_way_the_corpus_uses_it() {
 #[test]
 fn a_program_that_never_lowercases_carries_none_of_it() {
     for (source, want) in [
-        ("return 1;", 10_025),
-        ("let o = {a:1}; o.b = 2; return o.a;", 10_193) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
+        ("return 1;", 10_007),
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_365), /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
         (
             "function mk() { return function () { return 1; }; } let f = mk(); return f();",
-            10_342,
+            10_510,
         ),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
-        assert_eq!(n, want, "{source:?} is {n} bytes, so the table leaked into it");
+        assert_eq!(
+            n, want,
+            "{source:?} is {n} bytes, so the table leaked into it"
+        );
     }
 }
 

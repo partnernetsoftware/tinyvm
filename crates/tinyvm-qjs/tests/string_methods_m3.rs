@@ -135,11 +135,11 @@ fn they_read_the_way_the_corpus_uses_them() {
 #[test]
 fn a_program_that_names_none_of_them_pays_nothing() {
     for (source, want) in [
-        ("return 1;", 10_025),
-        ("let o = {a:1}; o.b = 2; return o.a;", 10_193) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
+        ("return 1;", 10_007),
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_365), /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
         (
             "function mk() { return function () { return 1; }; } let f = mk(); return f();",
-            10_342,
+            10_510,
         ),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
@@ -179,7 +179,10 @@ fn what_the_three_cost_is_written_down() {
     ] {
         let n = size(source) - base;
         println!("{name}: {n} bytes");
-        assert!(n > 0 && n < 1_000, "{name} is {n} bytes, which is a surprise");
+        assert!(
+            n > 0 && n < 1_000,
+            "{name} is {n} bytes, which is a surprise"
+        );
     }
 }
 
@@ -224,7 +227,10 @@ fn split_cuts_at_every_separator() {
 /// Without `join`, which does not exist yet: read the pieces by index.
 #[test]
 fn the_pieces_are_the_pieces() {
-    assert_eq!(text("const p = \"a,b,c\".split(\",\"); return p.length;"), "3");
+    assert_eq!(
+        text("const p = \"a,b,c\".split(\",\"); return p.length;"),
+        "3"
+    );
     assert_eq!(text("const p = \"a,b,c\".split(\",\"); return p[0];"), "a");
     assert_eq!(text("const p = \"a,b,c\".split(\",\"); return p[1];"), "b");
     assert_eq!(text("const p = \"a,b,c\".split(\",\"); return p[2];"), "c");
@@ -237,7 +243,10 @@ fn the_pieces_are_the_pieces() {
 /// happens -- and this is the test that says the fall-through is right.
 #[test]
 fn a_separator_that_is_absent_gives_the_whole_string() {
-    assert_eq!(text("const p = \"abc\".split(\",\"); return p.length;"), "1");
+    assert_eq!(
+        text("const p = \"abc\".split(\",\"); return p.length;"),
+        "1"
+    );
     assert_eq!(text("const p = \"abc\".split(\",\"); return p[0];"), "abc");
     // Longer than the string: the same answer by a different path, since the
     // scan is skipped entirely rather than running zero times.
@@ -256,7 +265,10 @@ fn empty_pieces_are_kept() {
     assert_eq!(text("return \"a,,b\".split(\",\").length;"), "3");
     assert_eq!(text("return \",\".split(\",\").length;"), "2");
     assert_eq!(text("return \"\".split(\",\").length;"), "1");
-    assert_eq!(text("const p = \"a,,b\".split(\",\"); return p[1] + \"!\";"), "!");
+    assert_eq!(
+        text("const p = \"a,,b\".split(\",\"); return p[1] + \"!\";"),
+        "!"
+    );
 }
 
 /// A multi-character separator, and a separator whose bytes are multi-byte.
@@ -286,12 +298,12 @@ fn the_pieces_outlive_the_allocations_that_follow_them() {
 #[test]
 fn a_program_that_never_splits_pays_for_neither_split_nor_substr() {
     for (source, want) in [
-        ("return 1;", 10_025),
+        ("return 1;", 10_007),
         // +82 on 2026-08-30: `includes` and `indexOf` skip a four-byte
         // window that holds no copy of the needle's first byte (a 128 KiB
         // miss 36 -> 7.2 steps a character, tests/index_of_cost.rs); only
         // programs that call either carry the two windows' worth of code.
-        ("return \"ab\".includes(\"a\");", 10_626) /* +23 on 2026-08-29: `.includes` is a static property read, so the program carries the arm that names a missing String property; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
+        ("return \"ab\".includes(\"a\");", 10_608), /* +23 on 2026-08-29: `.includes` is a static property read, so the program carries the arm that names a missing String property; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(n, want, "{source:?} is {n} bytes");

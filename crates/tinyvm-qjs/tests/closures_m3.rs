@@ -246,14 +246,14 @@ fn a_program_with_no_capture_is_byte_identical_to_what_it_was() {
     // weight than the byte-count body it replaced. Nothing here started paying
     // for anything -- the opposite.
     for (source, want) in [
-        ("return 1;", 10_025),
-        ("let o = {a:1}; o.b = 2; return o.a;", 10_193) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
+        ("return 1;", 10_007),
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_365), /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
         (
             "function mk() { return function () { return 1; }; } let f = mk(); return f();",
             // +153 on 2026-08-30: a program with an indirect call carries `__call_check`
             // and its trampoline (a call on a non-function is a named refusal,
             // tests/not_a_function.rs); "return 1;" did not move.
-            10_342,
+            10_510,
         ),
         // +23 on 2026-08-29: a program with an unwind channel now records the
         // thrown String's address in the entry epilogue, so the host can read
@@ -263,7 +263,7 @@ fn a_program_with_no_capture_is_byte_identical_to_what_it_was() {
         // through `__jb_bytes` and escapes only the byte that stopped the
         // run (117 -> 39 steps a byte, tests/json_stringify_cost.rs). Only
         // programs that name JSON carry it; "return 1;" above did not move.
-        ("return JSON.stringify({a:1});", 16_570),
+        ("return JSON.stringify({a:1});", 16_743),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(

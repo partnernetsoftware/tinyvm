@@ -229,6 +229,16 @@ pub(crate) const FAULT_PROPERTY_OF_NON_OBJECT: i32 = 7;
 /// `unreachable` from `unbox_function`'s tag check.
 pub(crate) const FAULT_NOT_A_FUNCTION: i32 = 8;
 
+/// The guest asked for the string or number form of an Object, an Array or
+/// a function -- `"" + o`, `o[k]` with such a key, `o * 2`, `-f` -- and
+/// [`FAULT_THROWN`] holds the pooled kind (`an Object`, `an Array`, `a
+/// function`). ECMA-262 would answer `[object Object]` or `NaN`; this engine
+/// refuses on purpose: a value quietly becoming that text in a command line
+/// or a key, or `NaN` in a sum, is the footgun its tests name ("never
+/// quietly converted"), and `JSON.stringify` is the spelling that says what
+/// was meant. Until 2026-08-30 both were a bare `unreachable`.
+pub(crate) const FAULT_NO_PRIMITIVE_FORM: i32 = 9;
+
 /// Emitted where a host argument's tag test fails: the detail first, then
 /// the code, then the caller's `unreachable`.
 pub(crate) fn record_host_argument(detail: i32, out: &mut Vec<Ins>) {
@@ -466,7 +476,6 @@ pub(crate) struct Conversions {
     pub(crate) str_cmp: u32,
 }
 
-
 /// The unwind channel's three globals, when the program has one: a runtime
 /// function that wants to *throw* rather than fault sets the value, sets the
 /// flag and returns; the call site's `throw_check` does the rest.
@@ -517,7 +526,32 @@ impl CallCheckNames {
     }
 }
 
+/// The pooled kind names [`FAULT_NO_PRIMITIVE_FORM`] reports for the three
+/// kinds of value that are not primitives, present only in a program that
+/// can hold one.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ObjectNames {
+    pub(crate) object: i32,
+    pub(crate) array: i32,
+    pub(crate) function: i32,
+}
+
+impl ObjectNames {
+    pub(crate) fn intern(pool: &mut StringPool) -> Self {
+        Self {
+            object: pool.intern("an Object"),
+            array: pool.intern("an Array"),
+            function: pool.intern("a function"),
+        }
+    }
+}
+
 pub(crate) struct Ctx {
+    /// Present when the program can hold an Object, an Array or a function
+    /// value: `"" + o` and `o[k]` with such a key stop with a name
+    /// ([`FAULT_NO_PRIMITIVE_FORM`]) instead of a bare trap. `None` keeps a
+    /// program of primitives at its bytes.
+    pub(crate) object_names: Option<ObjectNames>,
     /// Present when the program has an indirect call -- a value called
     /// through the table -- so that a callee that is not a function is a
     /// named refusal (a catchable TypeError with the channel, fault 8
@@ -1172,22 +1206,27 @@ fn to_number(ctx: &Ctx) -> FnBuild {
 
     // 7.1.4 step 9: ToNumber of an Object is ToNumber of its ToPrimitive, and
     // 7.1.1 reaches `valueOf`/`toString` through a prototype this engine does
-    // not have. Written as its own arm rather than left to the fallthrough, so
-    // that the fallthrough keeps meaning "not built by this engine".
-    is_object(0, &mut f.body);
-    f.body.push(Ins::If(BlockType::Empty));
-    f.body.push(Ins::Unreachable);
-    f.body.push(Ins::End);
-
-    // A function is an Object for the same step, and reaches the same missing
-    // algorithm -- `Function.prototype.toString` is a prototype method and
-    // there is no prototype. Appended last, and written out for the same
-    // reason the Object arm is.
-    is_function(0, &mut f.body);
-    f.body.push(Ins::If(BlockType::Empty));
-    f.body.push(Ins::Unreachable);
-    f.body.push(Ins::End);
-
+    // not have. An Object, an Array or a function therefore has no quiet
+    // number form here: the same named refusal ToString gives, with the kind.
+    // These arms exist only when the program can build such a value; a bare
+    // arm ahead of them once caught the function tag first and trapped with
+    // no name written, which is the shape the first cut of `f + 1` had.
+    if let Some(names) = ctx.object_names {
+        for (tag, kind) in [
+            (super::repr::TAG_OBJECT, names.object),
+            (super::repr::TAG_ARRAY, names.array),
+            (super::repr::TAG_FUNCTION, names.function),
+        ] {
+            super::repr::tag_is(0, tag, &mut f.body);
+            f.body.push(Ins::If(BlockType::Empty));
+            f.body.push(Ins::I32Const(FAULT_THROWN));
+            f.body.push(Ins::I32Const(kind));
+            f.body.push(Ins::I32Store(2, 0));
+            store_fault(FAULT_NO_PRIMITIVE_FORM, &mut f.body);
+            f.body.push(Ins::Unreachable);
+            f.body.push(Ins::End);
+        }
+    }
     // Every tag is accounted for above, so reaching here means the pair was
     // not built by this engine.
     f.body.push(Ins::Unreachable);
@@ -1401,10 +1440,7 @@ fn length(ctx: &Ctx) -> FnBuild {
     b.push(Ins::End);
     b.push(Ins::End);
 
-    let inner = vec![
-        Ins::LocalGet(n),
-        Ins::F64ConvertI32S,
-    ];
+    let inner = vec![Ins::LocalGet(n), Ins::F64ConvertI32S];
     let mut out = Vec::new();
     box_number(&inner, &mut out);
     f.body.extend(out);
@@ -1986,7 +2022,11 @@ fn obj_get(ctx: &Ctx) -> FnBuild {
                 let b = &mut arm;
                 // Total length, then one allocation.
                 b.push(Ins::I32Const(STRING_HEADER));
-                for p in [Ins::I32Const(names.prefix), Ins::LocalGet(key), Ins::I32Const(names.suffix)] {
+                for p in [
+                    Ins::I32Const(names.prefix),
+                    Ins::LocalGet(key),
+                    Ins::I32Const(names.suffix),
+                ] {
                     b.push(p);
                     b.push(Ins::I32Load(ALIGN_WORD, 0));
                     b.push(Ins::I32Add);
@@ -1995,7 +2035,11 @@ fn obj_get(ctx: &Ctx) -> FnBuild {
                 b.push(Ins::LocalSet(out));
                 b.push(Ins::I32Const(0));
                 b.push(Ins::LocalSet(w));
-                for p in [Ins::I32Const(names.prefix), Ins::LocalGet(key), Ins::I32Const(names.suffix)] {
+                for p in [
+                    Ins::I32Const(names.prefix),
+                    Ins::LocalGet(key),
+                    Ins::I32Const(names.suffix),
+                ] {
                     b.push(p);
                     b.push(Ins::LocalSet(piece));
                     b.push(Ins::I32Const(0));
@@ -2300,10 +2344,27 @@ fn to_string(ctx: &Ctx) -> FnBuild {
         f.body.push(Ins::End);
     }
 
-    // An Object or a Function would need 7.1.1 ToPrimitive, which needs the
-    // `toString`/`valueOf` a prototype would carry, and there is no prototype.
-    // The one conversion this milestone did *not* bring in, and the reason
-    // `"" + {}` and `o[{}]` both still trap.
+    // 7.1.1 ToPrimitive would ask a prototype for `toString`/`valueOf`; there
+    // is none, and this engine would refuse anyway: an Object, an Array or a
+    // function has no quiet string form here. What it gets is a name --
+    // which kind, in the detail word -- so the stop reads as a sentence.
+    // Absent the names, a program of primitives cannot hold such a value.
+    if let Some(names) = ctx.object_names {
+        for (tag, kind) in [
+            (super::repr::TAG_OBJECT, names.object),
+            (super::repr::TAG_ARRAY, names.array),
+            (super::repr::TAG_FUNCTION, names.function),
+        ] {
+            super::repr::tag_is(0, tag, &mut f.body);
+            f.body.push(Ins::If(BlockType::Empty));
+            f.body.push(Ins::I32Const(FAULT_THROWN));
+            f.body.push(Ins::I32Const(kind));
+            f.body.push(Ins::I32Store(2, 0));
+            store_fault(FAULT_NO_PRIMITIVE_FORM, &mut f.body);
+            f.body.push(Ins::Unreachable);
+            f.body.push(Ins::End);
+        }
+    }
     f.body.push(Ins::Unreachable);
     f
 }

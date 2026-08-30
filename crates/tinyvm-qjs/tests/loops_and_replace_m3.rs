@@ -56,7 +56,9 @@ fn run(source: &str) -> String {
 #[test]
 fn break_leaves_the_loop() {
     assert_eq!(
-        run("let n = 0; for (let i = 0; i < 10; i = i + 1) { if (i === 3) { break; } n = n + 1; } return n;"),
+        run(
+            "let n = 0; for (let i = 0; i < 10; i = i + 1) { if (i === 3) { break; } n = n + 1; } return n;"
+        ),
         "3"
     );
     assert_eq!(
@@ -68,7 +70,9 @@ fn break_leaves_the_loop() {
 #[test]
 fn continue_skips_the_rest_of_the_pass() {
     assert_eq!(
-        run("let n = 0; for (let i = 0; i < 6; i = i + 1) { if (i === 2) { continue; } n = n + i; } return n;"),
+        run(
+            "let n = 0; for (let i = 0; i < 6; i = i + 1) { if (i === 2) { continue; } n = n + i; } return n;"
+        ),
         "13"
     );
 }
@@ -81,7 +85,9 @@ fn continue_skips_the_rest_of_the_pass() {
 #[test]
 fn a_continue_in_a_for_still_runs_the_update() {
     assert_eq!(
-        run("let n = 0; for (let i = 0; i < 4; i = i + 1) { if (i === 1) { continue; } n = n + 1; } return n;"),
+        run(
+            "let n = 0; for (let i = 0; i < 4; i = i + 1) { if (i === 1) { continue; } n = n + 1; } return n;"
+        ),
         "3"
     );
 }
@@ -125,7 +131,11 @@ fn they_work_inside_a_try_catch() {
 #[test]
 fn a_break_outside_a_loop_is_refused() {
     let error = compile_qjs_m1("break; return 1;").expect_err("nothing to branch to");
-    assert!(error.message.contains("outside any loop"), "{}", error.message);
+    assert!(
+        error.message.contains("outside any loop"),
+        "{}",
+        error.message
+    );
 }
 
 // ---- replace / replaceAll -----------------------------------------------
@@ -198,8 +208,8 @@ fn multi_byte_patterns_and_replacements_work() {
 #[test]
 fn a_program_using_neither_pays_for_neither() {
     for (source, want) in [
-        ("return 1;", 10_025),
-        ("let o = {a:1}; o.b = 2; return o.a;", 10_193) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
+        ("return 1;", 10_007),
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_365), /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(n, want, "{source:?} is {n} bytes");
@@ -218,7 +228,10 @@ fn what_the_pair_costs_is_written_down() {
     let base = size("return \"a\";");
     let one = size("return \"a\".replace(\"a\", \"b\");") - base;
     let both = size("return \"a\".replace(\"a\", \"b\") + \"c\".replaceAll(\"c\", \"d\");") - base;
-    println!("replace: {one} bytes; adding replaceAll: {} more", both - one);
+    println!(
+        "replace: {one} bytes; adding replaceAll: {} more",
+        both - one
+    );
     assert!(one > 0 && one < 900, "replace is {one} bytes");
 }
 
@@ -248,7 +261,10 @@ fn number_converts_the_way_unary_plus_does() {
 #[test]
 fn number_of_nothing_is_zero_and_number_of_undefined_is_not() {
     assert_eq!(run("return Number();"), "0");
-    assert_eq!(run("return Number(undefined) === Number(undefined);"), "false");
+    assert_eq!(
+        run("return Number(undefined) === Number(undefined);"),
+        "false"
+    );
 }
 
 /// It reads the way the corpus does: text out of an argument, into a count.

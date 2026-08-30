@@ -110,7 +110,10 @@ fn an_unexported_name_is_not_visible_to_the_importer() {
     );
     // ...while the module can still use it itself.
     assert_eq!(
-        run("import * as m from \"lib\"; return m.open();", &[("lib", lib)]),
+        run(
+            "import * as m from \"lib\"; return m.open();",
+            &[("lib", lib)]
+        ),
         "1"
     );
 }
@@ -141,7 +144,10 @@ fn modules_compose() {
         run(
             "import * as top from \"a\"; return top.value();",
             &[
-                ("a", "import * as b from \"b\"; export function value() { return b.base() + 1; }"),
+                (
+                    "a",
+                    "import * as b from \"b\"; export function value() { return b.base() + 1; }"
+                ),
                 ("b", "export function base() { return 10; }"),
             ],
         ),
@@ -160,8 +166,14 @@ fn a_cycle_is_refused_and_both_specifiers_are_named() {
     let error = refuse(
         "import * as a from \"a\"; return a.f();",
         &[
-            ("a", "import * as b from \"b\"; export function f() { return b.g(); }"),
-            ("b", "import * as a from \"a\"; export function g() { return 1; }"),
+            (
+                "a",
+                "import * as b from \"b\"; export function f() { return b.g(); }",
+            ),
+            (
+                "b",
+                "import * as a from \"a\"; export function g() { return 1; }",
+            ),
         ],
     );
     assert!(error.contains('a') && error.contains('b'), "{error}");
@@ -176,7 +188,10 @@ fn a_cycle_is_refused_and_both_specifiers_are_named() {
 fn a_self_import_is_refused() {
     let error = refuse(
         "import * as a from \"a\"; return 1;",
-        &[("a", "import * as a from \"a\"; export function f() { return 1; }")],
+        &[(
+            "a",
+            "import * as a from \"a\"; export function f() { return 1; }",
+        )],
     );
     assert!(error.contains("imports itself"), "{error}");
 }
@@ -246,11 +261,11 @@ fn a_build_without_a_resolver_says_that_is_what_happened() {
 #[test]
 fn a_program_without_imports_pays_nothing_for_them() {
     for (source, want) in [
-        ("return 1;", 10_025),
-        ("let o = {a:1}; o.b = 2; return o.a;", 10_193) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
+        ("return 1;", 10_007),
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_365), /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
         (
             "function mk() { return function () { return 1; }; } let f = mk(); return f();",
-            10_342,
+            10_510,
         ),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();

@@ -23,9 +23,13 @@ fn run_and_read(source: &str) -> (Option<GuestFault>, Option<String>) {
 /// The common case, and the one the migration needs.
 #[test]
 fn a_thrown_string_is_readable_from_the_host() {
-    let (fault, message) = run_and_read("throw \"artifact_manifest_name_invalid:agenterm-x1.exe\";");
+    let (fault, message) =
+        run_and_read("throw \"artifact_manifest_name_invalid:agenterm-x1.exe\";");
     assert_eq!(fault, Some(GuestFault::UncaughtThrow));
-    assert_eq!(message.as_deref(), Some("artifact_manifest_name_invalid:agenterm-x1.exe"));
+    assert_eq!(
+        message.as_deref(),
+        Some("artifact_manifest_name_invalid:agenterm-x1.exe")
+    );
 }
 
 /// A String built at run time, not a literal, so the pointer is a heap record.
@@ -57,7 +61,10 @@ fn a_caught_throw_leaves_no_message() {
 /// epilogue that only a program with an unwind channel has.
 #[test]
 fn a_program_that_never_throws_pays_nothing() {
-    for (source, want) in [("return 1;", 10_025), ("let o = {a:1}; o.b = 2; return o.a;", 10_193) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */] {
+    for (source, want) in [
+        ("return 1;", 10_007),
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_365), /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
+    ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(n, want, "{source:?} is {n} bytes");
     }

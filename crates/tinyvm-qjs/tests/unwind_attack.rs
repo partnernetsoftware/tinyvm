@@ -111,6 +111,7 @@ impl Bases {
         let convert_base = runtime::SET.len() as u32;
         let json_base = convert_base + convert::SET.len() as u32;
         let rt = RtCtx {
+            object_names: None,
             call_check: None,
             func_base: 0,
             heap_global: 0,

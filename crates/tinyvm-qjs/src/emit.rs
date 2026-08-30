@@ -321,11 +321,13 @@ pub(crate) mod m1 {
     use crate::ast::m1 as ast;
     use crate::convert;
     use crate::diag::{Boundary, CompileError, host_table, malformed, unsupported};
-    use crate::method;
     use crate::ir::m1 as ir;
+    use crate::method;
     use crate::opts::{HostFn, HostParam, HostResult, Names, Options};
     use crate::repr::{
-        self, BlockType, Ins, ValType, WIDTH, box_array, box_bool, box_function, box_number, box_object, box_string, const_bool, const_null, const_number, const_string, const_undefined, drop_value, load_local, store_local, is_number,
+        self, BlockType, Ins, ValType, WIDTH, box_array, box_bool, box_function, box_number,
+        box_object, box_string, const_bool, const_null, const_number, const_string,
+        const_undefined, drop_value, is_number, load_local, store_local,
     };
     use crate::repr::{is_array, is_object, is_string};
     use crate::runtime::{
@@ -626,13 +628,19 @@ pub(crate) mod m1 {
         let unwind = scan.throws.then(|| Unwind::at(binding_globals));
 
         let ctx = Ctx {
+            object_names: (scan.objects || scan.arrays || scan.json || scan.function_values)
+                .then(|| runtime::ObjectNames::intern(&mut pool)),
             // The trampoline's element comes after the JSON adapters and the
             // user adapters -- the same arithmetic the table block below uses.
             call_check: scan.indirect.then(|| {
                 let json_adapters = if scan.json { 2 } else { 0 };
                 runtime::CallCheckNames::intern(&mut pool, 1 + json_adapters)
             }),
-            unwind: unwind.map(|u| runtime::UnwindGlobals { flag: u.flag, tag: u.tag, payload: u.payload }),
+            unwind: unwind.map(|u| runtime::UnwindGlobals {
+                flag: u.flag,
+                tag: u.tag,
+                payload: u.payload,
+            }),
             // Only a program that reads a static property can reach the
             // TypeError; a JSON-only program has a channel and no such read.
             type_error: (unwind.is_some() && scan.string_member)
@@ -854,10 +862,7 @@ pub(crate) mod m1 {
         let adapter_base = user_base + program.functions.len() as u32;
         let mut elements = Vec::new();
         let mut table_type = None;
-        if !fns.entries.is_empty()
-            || scan.indirect
-            || scan.json
-        {
+        if !fns.entries.is_empty() || scan.indirect || scan.json {
             let uniform = uniform.expect("a table means the uniform signature exists");
             let mut in_table = Vec::new();
             if json.is_some() {
@@ -1348,6 +1353,11 @@ pub(crate) mod m1 {
         /// A wasm import has one signature, so a name used at two arities has
         /// no single import to be. Overloading it would need a third world.
         hosts: BTreeMap<String, Use>,
+        /// Whether the program writes an object literal anywhere: with
+        /// `arrays`, `json` and `function_values`, the four ways a value that
+        /// is not a primitive comes to exist, and what gates ToString's
+        /// answers for them.
+        objects: bool,
         /// Whether the program writes `typeof` anywhere. The five strings
         /// 13.5.3 answers with are data-segment literals, so a program that
         /// never asks should not carry them -- see [`runtime::TypeNames`].
@@ -1499,7 +1509,6 @@ pub(crate) mod m1 {
                 // floor for a program that names `JSON`. `fleet.js` already
                 // reaches three (`ui.input.pointer`), so it pays nothing.
                 .max(if self.json { Json::ARITY } else { 0 })
-
         }
 
         /// Whether this program needs the module's funcref table at all.
@@ -1513,7 +1522,6 @@ pub(crate) mod m1 {
             self.call_arity = self.call_arity.max(args);
         }
     }
-
 
     fn scan(program: &ast::Program) -> Result<Scan, CompileError> {
         let mut out = Scan::default();
@@ -1734,9 +1742,12 @@ pub(crate) mod m1 {
                 }
                 args.iter().try_for_each(|a| host_expr(a, scan))
             }
-            ast::ExprKind::Object(properties) => properties
-                .iter()
-                .try_for_each(|property| host_expr(&property.value, scan)),
+            ast::ExprKind::Object(properties) => {
+                scan.objects = true;
+                properties
+                    .iter()
+                    .try_for_each(|property| host_expr(&property.value, scan))
+            }
             ast::ExprKind::Array(elements) => {
                 scan.arrays = true;
                 elements.iter().try_for_each(|el| host_expr(el, scan))
@@ -2441,8 +2452,7 @@ pub(crate) mod m1 {
                     // `undefined` from the moment its scope is entered, which
                     // is *before* its statement runs, so it cannot wait.
                     binding.captured
-                        && (binding.slot < params
-                            || matches!(binding.kind, ast::BindingKind::Var))
+                        && (binding.slot < params || matches!(binding.kind, ast::BindingKind::Var))
                 })
                 .map(|id| {
                     let slot = self.program.binding(*id).slot;
@@ -3298,8 +3308,6 @@ pub(crate) mod m1 {
             Ok(())
         }
 
-
-
         /// Where a `break` or a `continue` branches, or why it cannot.
         ///
         /// Two refusals, and both are the alternative to a silently wrong
@@ -3314,7 +3322,9 @@ pub(crate) mod m1 {
         fn loop_target(&self, keyword: &str, span: ast::Span) -> Result<Loop, CompileError> {
             let Some(&target) = self.loops.last() else {
                 return Err(malformed(
-                    &format!("finds a `{keyword}` outside any loop, which has nothing to branch to"),
+                    &format!(
+                        "finds a `{keyword}` outside any loop, which has nothing to branch to"
+                    ),
                     span.offset(),
                 ));
             };
@@ -3800,7 +3810,10 @@ pub(crate) mod m1 {
             self.arguments(args, uniform.arity)?;
             let callee_name = match &callee.kind {
                 ast::ExprKind::Name(name) => name.text.clone(),
-                ast::ExprKind::Member { key: ast::MemberKey::Static(key), .. } => key.clone(),
+                ast::ExprKind::Member {
+                    key: ast::MemberKey::Static(key),
+                    ..
+                } => key.clone(),
                 _ => "<expression>".to_owned(),
             };
             self.call_checked_record(slot, &callee_name);
@@ -3983,8 +3996,10 @@ pub(crate) mod m1 {
                 slots.push(slot);
             }
 
-            let literal: Vec<bool> =
-                args.iter().map(|arg| matches!(arg.kind, ast::ExprKind::Str(_))).collect();
+            let literal: Vec<bool> = args
+                .iter()
+                .map(|arg| matches!(arg.kind, ast::ExprKind::Str(_)))
+                .collect();
             let host = b.decl.name.clone();
 
             match &b.decl.result {
@@ -4484,4 +4499,3 @@ pub(crate) mod m1 {
         }
     }
 }
-

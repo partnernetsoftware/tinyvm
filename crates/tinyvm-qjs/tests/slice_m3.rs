@@ -23,7 +23,8 @@ fn text(source: &str) -> String {
             let view = instance.memory().expect("guest memory");
             let bytes: &[u8] = &view;
             let at = ptr as usize;
-            let len = u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]) as usize;
+            let len = u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+                as usize;
             String::from_utf8(bytes[at + 4..at + 4 + len].to_vec()).expect("utf-8")
         }
         other => panic!("{source:?}: expected a String, got {other:?}"),
@@ -97,7 +98,9 @@ fn nan_is_zero_and_fractions_truncate() {
 #[test]
 fn it_reads_the_way_the_harness_uses_it() {
     assert_eq!(
-        text(r#"let t = "0123456789"; let m = 4; if (t.length <= m) { return t; } return t.slice(0, m) + "...";"#),
+        text(
+            r#"let t = "0123456789"; let m = 4; if (t.length <= m) { return t; } return t.slice(0, m) + "...";"#
+        ),
         "0123..."
     );
 }
@@ -106,9 +109,15 @@ fn it_reads_the_way_the_harness_uses_it() {
 /// the two forms share one core so naming both costs one body.
 #[test]
 fn what_slice_costs_is_written_down() {
-    let base = compile_qjs_m1("return \"abcdef\".length;").expect("compiles").len();
-    let two = compile_qjs_m1("return \"abcdef\".slice(1, 3).length;").expect("compiles").len();
-    let one = compile_qjs_m1("return \"abcdef\".slice(1).length;").expect("compiles").len();
+    let base = compile_qjs_m1("return \"abcdef\".length;")
+        .expect("compiles")
+        .len();
+    let two = compile_qjs_m1("return \"abcdef\".slice(1, 3).length;")
+        .expect("compiles")
+        .len();
+    let one = compile_qjs_m1("return \"abcdef\".slice(1).length;")
+        .expect("compiles")
+        .len();
     let both = compile_qjs_m1("return \"abcdef\".slice(1, 3).length + \"abcdef\".slice(1).length;")
         .expect("compiles")
         .len();
@@ -118,10 +127,13 @@ fn what_slice_costs_is_written_down() {
         one - base,
         both - base
     );
-    assert!(both - base < (two - base) + (one - base), "the two forms must share the core");
+    assert!(
+        both - base < (two - base) + (one - base),
+        "the two forms must share the core"
+    );
     assert_eq!(
         compile_qjs_m1("return 1;").expect("compiles").len(),
-        10_025,
+        10_007,
         "a program that never slices pays nothing"
     );
 }
@@ -136,11 +148,16 @@ fn a_non_negative_slice_does_not_walk_the_whole_string() {
     // Enough for the 100-iteration build (~880 000 steps at 8 800 each) but
     // not for 78 000 more on top: the slice itself must be a few hundred.
     // The baseline returns the string itself: `.length` would walk it too.
-    let build_only = compile_qjs_m1(r#"let s = ""; for (let i = 0; i < 100; i = i + 1) { s = s + "0123456789"; } return s;"#).expect("compiles");
+    let build_only = compile_qjs_m1(
+        r#"let s = ""; for (let i = 0; i < 100; i = i + 1) { s = s + "0123456789"; } return s;"#,
+    )
+    .expect("compiles");
     let steps = |wasm: &[u8]| -> u64 {
         let module = WasmModule::from_bytes_with(wasm, Limits::default()).expect("loads");
         let mut instance = module.instantiate().expect("instantiates");
-        instance.invoke_by_name("main", &Value::args(&[])).expect("runs");
+        instance
+            .invoke_by_name("main", &Value::args(&[]))
+            .expect("runs");
         instance.last_steps()
     };
     let slice_cost = steps(&wasm) - steps(&build_only);
