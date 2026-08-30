@@ -308,7 +308,7 @@ tinyvm (35)                                      [~]
 │   │   │   ├── a write past the end fills, no holes      [x]
 │   │   │   ├── JSON reads and writes one                 [x]
 │   │   │   ├── a string key is not an index (10.4.2.1)   [~] recorded divergence
-│   │   │   ├── a non-index property write traps          [~] nowhere to put it
+│   │   │   ├── a non-index property write is a named refusal [x] fault 10, `refused_operations.rs`
 │   │   │   └── methods: push / pop / map                 [x] see below
 │   │   ├── an array-free program pays nothing for arrays [x] 9 784 -> 9 784 bytes
 │   │   ├── an indexed read is 36.6x the object spelling  [x] 526 vs 19 235 steps
