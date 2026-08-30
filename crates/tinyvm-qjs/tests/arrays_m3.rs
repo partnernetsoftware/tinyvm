@@ -638,7 +638,11 @@ fn a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was() {
         // a function carries the three kind names and the arms that refuse
         // their string and number forms by name (fault 9,
         // tests/to_string_of_objects.rs).
-        ("let o = {a:1}; o.b = 2; return o.a;", 10_365), /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
+        // +215 on 2026-08-30, later: a program that writes through a member
+        // carries the four refusal reasons and the arms that name a refused
+        // write or a boundary of the representation (fault 10 and a named
+        // fault 3, tests/refused_operations.rs). "return 1;" did not move.
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_580), /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
         // A computed key whose *value* the text does not settle. This one
         // moved **up** by 117, and not for arrays: a computed key could
         // evaluate to `"length"`, so it turns on the string-`.length` arm of
@@ -654,7 +658,10 @@ fn a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was() {
         // +58 on 2026-08-30: `__len` counts eight plain-ASCII bytes a step
         // (180 000 -> 19 900 steps on 6 000 characters, tests/length_cost.rs).
         // Only programs that can reach the string-`.length` arm carry it.
-        ("let o = {a:1}; let k = \"a\"; return o[k];", 10_479),
+        (
+            "let o = {a:1}; let k = \"a\"; return o[k];",
+            10_486, /* +7 on 2026-08-30: the nameless capability arm now clears the detail word before it stops, so a named refusal read later cannot inherit an older name (tests/refused_operations.rs) */
+        ),
         ("let o = {a:1}; return o[\"a\"];", 10_260),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();

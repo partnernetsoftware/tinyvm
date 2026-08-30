@@ -104,6 +104,7 @@ impl Prog {
             // global, so the bump pointer is global 0.
             ctx: Ctx {
                 object_names: None,
+                refusal_names: None,
                 func_base: 0,
                 heap_global: 0,
                 type_names,
@@ -501,6 +502,7 @@ fn host_decode_rejects_a_pair_it_did_not_build() {
 fn add_tests_number_before_string() {
     let ctx = Ctx {
         object_names: None,
+        refusal_names: None,
         func_base: 0,
         heap_global: 0,
         type_names: None,
@@ -557,6 +559,7 @@ fn a_new_type_costs_nothing_at_a_site_that_never_sees_it() {
     // there in a program that never writes one.
     let ctx = Ctx {
         object_names: None,
+        refusal_names: None,
         func_base: 0,
         heap_global: 0,
         type_names: None,
@@ -776,6 +779,7 @@ fn typeof_costs_nothing_in_a_program_that_never_asks() {
     // And the emitted function is the trap that says nothing may call it.
     let ctx = Ctx {
         object_names: None,
+        refusal_names: None,
         func_base: 0,
         heap_global: 0,
         type_names: None,

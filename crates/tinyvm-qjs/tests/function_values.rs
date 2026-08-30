@@ -950,7 +950,7 @@ fn the_whole_fleet_library_compiles_and_its_methods_are_reachable() {
     // three baselines record the same 19-byte drop and the arithmetic.
     assert_eq!(
         wasm.len(),
-        23_985, /* +23 on 2026-08-29: thrown-message record in the epilogue; see arrays_m3 ; +23 more the same day: the fleet library reads static properties, so it carries the arm that names a missing String property (`FAULT_MISSING_STRING_METHOD`) */
+        24_229, /* +23 on 2026-08-29: thrown-message record in the epilogue; see arrays_m3 ; +23 more the same day: the fleet library reads static properties, so it carries the arm that names a missing String property (`FAULT_MISSING_STRING_METHOD`) */
         "the whole library's emitted size moved"
     );
 }

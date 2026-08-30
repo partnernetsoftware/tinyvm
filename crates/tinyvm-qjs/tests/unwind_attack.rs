@@ -112,6 +112,7 @@ impl Bases {
         let json_base = convert_base + convert::SET.len() as u32;
         let rt = RtCtx {
             object_names: None,
+            refusal_names: None,
             call_check: None,
             func_base: 0,
             heap_global: 0,
@@ -165,6 +166,7 @@ impl Bases {
         // module whose JSON functions call whatever sits at those indices,
         // which the load gate answers with "validation: type mismatch".
         all.extend(array::build(&array::Ctx {
+            refusal_names: None,
             func_base: self.js.arrays,
             runtime_base: self.rt.func_base,
             names: self.array_names,

@@ -239,6 +239,21 @@ pub(crate) const FAULT_NOT_A_FUNCTION: i32 = 8;
 /// was meant. Until 2026-08-30 both were a bare `unreachable`.
 pub(crate) const FAULT_NO_PRIMITIVE_FORM: i32 = 9;
 
+/// The guest wrote where this engine refuses to write, and [`FAULT_THROWN`]
+/// holds the pooled reason: an Array key that is not an integer index below
+/// [`super::array`]'s limit (`a["x"] = 1`, `a[1.5] = 1`, `a[-1] = 1` --
+/// ECMA-262 would make a named property of each), or a property write on a
+/// value that has no properties (`s[0] = "x"` on a String, which the
+/// specification ignores in sloppy mode and rejects in strict). The script's
+/// own doing, and each has a plain spelling. Until 2026-08-30 both were a
+/// bare `unreachable`.
+///
+/// The two refusals a script cannot rewrite around -- `split("")`, and a
+/// `slice` boundary inside a surrogate pair -- are [`FAULT_CAPABILITY`] with
+/// the same kind of name at [`FAULT_THROWN`]: the engine has the method and
+/// cannot represent the answer.
+pub(crate) const FAULT_INVALID_WRITE: i32 = 10;
+
 /// Emitted where a host argument's tag test fails: the detail first, then
 /// the code, then the caller's `unreachable`.
 pub(crate) fn record_host_argument(detail: i32, out: &mut Vec<Ins>) {
@@ -536,6 +551,38 @@ pub(crate) struct ObjectNames {
     pub(crate) function: i32,
 }
 
+/// The pooled reasons behind [`FAULT_INVALID_WRITE`] and a *named*
+/// [`FAULT_CAPABILITY`]. Interned only when the program can reach one of the
+/// six arms that write them (see `emit`), so a program that cannot keeps its
+/// bytes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RefusalNames {
+    pub(crate) empty_separator: i32,
+    pub(crate) surrogate_boundary: i32,
+    pub(crate) non_index_key: i32,
+    pub(crate) write_on_primitive: i32,
+}
+
+impl RefusalNames {
+    pub(crate) fn intern(pool: &mut StringPool) -> Self {
+        Self {
+            empty_separator: pool.intern("split with an empty separator"),
+            surrogate_boundary: pool.intern("a slice boundary inside a surrogate pair"),
+            non_index_key: pool.intern("an Array key that is not an index below 16777216"),
+            write_on_primitive: pool.intern("a property write on a value that has no properties"),
+        }
+    }
+}
+
+/// Name, then code, then the caller's `unreachable`: the order
+/// `record_thrown_string` uses, for the reason it gives.
+pub(crate) fn record_named_fault(name: i32, code: i32, out: &mut Vec<Ins>) {
+    out.push(Ins::I32Const(FAULT_THROWN));
+    out.push(Ins::I32Const(name));
+    out.push(Ins::I32Store(2, 0));
+    store_fault(code, out);
+}
+
 impl ObjectNames {
     pub(crate) fn intern(pool: &mut StringPool) -> Self {
         Self {
@@ -552,6 +599,9 @@ pub(crate) struct Ctx {
     /// ([`FAULT_NO_PRIMITIVE_FORM`]) instead of a bare trap. `None` keeps a
     /// program of primitives at its bytes.
     pub(crate) object_names: Option<ObjectNames>,
+    /// Present when the program can reach a refused write or a refused
+    /// `split` / `slice` (see [`RefusalNames`]); the arms then say why.
+    pub(crate) refusal_names: Option<RefusalNames>,
     /// Present when the program has an indirect call -- a value called
     /// through the table -- so that a callee that is not a function is a
     /// named refusal (a catchable TypeError with the channel, fault 8
@@ -1995,6 +2045,11 @@ fn obj_get(ctx: &Ctx) -> FnBuild {
             arm.push(Ins::I32Store(2, 0));
             store_fault(FAULT_MISSING_STRING_METHOD, &mut arm);
         } else {
+            // Nameless: clear the detail word so a host reading a *named*
+            // capability refusal never sees a name an earlier call left.
+            arm.push(Ins::I32Const(FAULT_THROWN));
+            arm.push(Ins::I32Const(0));
+            arm.push(Ins::I32Store(2, 0));
             store_fault(FAULT_CAPABILITY, &mut arm);
         }
         arm.push(Ins::Unreachable);
@@ -2154,6 +2209,18 @@ fn obj_set(ctx: &Ctx) -> FnBuild {
     let dst = f.local(ValType::I32);
     let i = f.local(ValType::I32);
 
+    // A receiver with no properties -- a String, a Number, `null` -- is a
+    // named refusal ([`FAULT_INVALID_WRITE`]) in a program that writes
+    // through a member at all; `unbox_object` below then only ever sees an
+    // Object, and its own check is the engine's, not the script's.
+    if let Some(names) = ctx.refusal_names {
+        is_object(0, &mut f.body);
+        f.body.push(Ins::I32Eqz);
+        f.body.push(Ins::If(BlockType::Empty));
+        record_named_fault(names.write_on_primitive, FAULT_INVALID_WRITE, &mut f.body);
+        f.body.push(Ins::Unreachable);
+        f.body.push(Ins::End);
+    }
     unbox_object(0, &mut f.body);
     f.body.push(Ins::LocalSet(o));
 

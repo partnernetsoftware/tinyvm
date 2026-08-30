@@ -255,6 +255,10 @@ pub enum GuestFault {
     /// `[object Object]`; this engine refuses, on purpose, and says which
     /// kind: [`guest_no_primitive_form`]. `JSON.stringify` is the spelling.
     NoPrimitiveForm,
+    /// The script wrote where this engine refuses to: a non-index key or an
+    /// out-of-range index on an Array, or a property on a value that has
+    /// none. [`guest_invalid_write`] says which.
+    InvalidWrite,
 }
 
 /// Read the guest's own account of why it trapped, out of its linear memory.
@@ -355,6 +359,26 @@ pub fn guest_no_primitive_form(memory: &[u8]) -> Option<String> {
 }
 
 /// The String record the fault area's second word points at, if any.
+/// After a [`GuestFault::InvalidWrite`]: what the script wrote that this
+/// engine refuses (`an Array key that is not an integer index`, ...).
+pub fn guest_invalid_write(memory: &[u8]) -> Option<String> {
+    if guest_fault(memory)? != GuestFault::InvalidWrite {
+        return None;
+    }
+    fault_detail_string(memory)
+}
+
+/// After a [`GuestFault::CapabilityBoundary`]: the name of the boundary when
+/// the guest wrote one (`split with an empty separator`, `a slice boundary
+/// inside a surrogate pair`), else `None` -- the older, nameless arms clear
+/// the word so no earlier name survives into this reading.
+pub fn guest_capability_name(memory: &[u8]) -> Option<String> {
+    if guest_fault(memory)? != GuestFault::CapabilityBoundary {
+        return None;
+    }
+    fault_detail_string(memory)
+}
+
 fn fault_detail_string(memory: &[u8]) -> Option<String> {
     let at = runtime::FAULT_THROWN as usize;
     let word = memory.get(at..at + 4)?;
@@ -382,6 +406,7 @@ pub fn guest_fault(memory: &[u8]) -> Option<GuestFault> {
         runtime::FAULT_PROPERTY_OF_NON_OBJECT => Some(GuestFault::PropertyOfNonObject),
         runtime::FAULT_NOT_A_FUNCTION => Some(GuestFault::NotAFunction),
         runtime::FAULT_NO_PRIMITIVE_FORM => Some(GuestFault::NoPrimitiveForm),
+        runtime::FAULT_INVALID_WRITE => Some(GuestFault::InvalidWrite),
         _ => None,
     }
 }

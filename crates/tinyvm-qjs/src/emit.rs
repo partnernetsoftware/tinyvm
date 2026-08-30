@@ -630,6 +630,12 @@ pub(crate) mod m1 {
         let ctx = Ctx {
             object_names: (scan.objects || scan.arrays || scan.json || scan.function_values)
                 .then(|| runtime::ObjectNames::intern(&mut pool)),
+            // A member write can reach `__prop_set` or `__obj_set` with a
+            // receiver that refuses; `split` and `slice` are their own gates.
+            refusal_names: (scan.member_write
+                || scan.methods.wants(method::Me::Split)
+                || scan.methods.wants(method::Me::SliceCore))
+            .then(|| runtime::RefusalNames::intern(&mut pool)),
             // The trampoline's element comes after the JSON adapters and the
             // user adapters -- the same arithmetic the table block below uses.
             call_check: scan.indirect.then(|| {
@@ -703,6 +709,7 @@ pub(crate) mod m1 {
 
         let array_set: Vec<runtime::RtFunc> = if scan.arrays {
             array::build(&array::Ctx {
+                refusal_names: ctx.refusal_names,
                 func_base: arr_base,
                 runtime_base,
                 names: array::Names::intern(&mut pool),
@@ -745,6 +752,7 @@ pub(crate) mod m1 {
             Vec::new()
         } else {
             method::build(&method::Ctx {
+                refusal_names: ctx.refusal_names,
                 func_base: method_base,
                 runtime_base,
                 plan: scan.methods.clone(),
@@ -1368,6 +1376,10 @@ pub(crate) mod m1 {
         /// program with only dotted access needs none of the three constant
         /// answers -- see [`runtime::KeyNames`].
         computed_key: bool,
+        /// Some assignment or update writes through a member expression
+        /// (`o.k = v`, `a[i] = v`, `x.n++`). Only such a program can reach a
+        /// refused write, so only it carries the names for one.
+        member_write: bool,
         /// Whether the program ever puts a function where a value goes. The
         /// yes-or-no of what [`FnTable`] then counts exactly, and the reason
         /// a program that never does emits no table and no uniform signature.
@@ -1790,12 +1802,16 @@ pub(crate) mod m1 {
                 scan.type_of |= *op == ast::UnaryOp::TypeOf;
                 host_expr(operand, scan)
             }
-            ast::ExprKind::Update { target, .. } => host_expr(target, scan),
+            ast::ExprKind::Update { target, .. } => {
+                scan.member_write |= matches!(target.kind, ast::ExprKind::Member { .. });
+                host_expr(target, scan)
+            }
             ast::ExprKind::Binary(_, lhs, rhs) | ast::ExprKind::Logical(_, lhs, rhs) => {
                 host_expr(lhs, scan)?;
                 host_expr(rhs, scan)
             }
             ast::ExprKind::Assign { target, value, .. } => {
+                scan.member_write |= matches!(target.kind, ast::ExprKind::Member { .. });
                 host_expr(target, scan)?;
                 host_expr(value, scan)
             }

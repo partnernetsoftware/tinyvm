@@ -28,8 +28,8 @@ use super::repr::{
 use super::array::{ARR_ELEMS, ARR_LEN, Ar, ELEM_BYTES, ELEM_PAYLOAD, ELEM_TAG};
 use super::repr::{box_array, const_bool, const_undefined, unbox_object};
 use super::runtime::{
-    ALIGN_WORD, ENTRY_BYTES, ENTRY_KEY, FN_ELEMENT, FN_ENV, FnBuild, OBJ_ENTRIES, OBJ_LEN, Rt,
-    RtFunc,
+    ALIGN_WORD, ENTRY_BYTES, ENTRY_KEY, FAULT_CAPABILITY, FN_ELEMENT, FN_ENV, FnBuild, OBJ_ENTRIES,
+    OBJ_LEN, RefusalNames, Rt, RtFunc, record_named_fault,
 };
 
 /// Where this set sits, and where the unconditional runtime sits. The same
@@ -42,6 +42,9 @@ pub(crate) struct Ctx {
     pub(crate) runtime_base: u32,
     /// Which functions this module carries, and where.
     pub(crate) plan: Plan,
+    /// The boundaries `split("")` and a mid-surrogate `slice` name; `None`
+    /// when the program wants neither method.
+    pub(crate) refusal_names: Option<RefusalNames>,
     /// The uniform call signature's type index, and the arity it pads to.
     ///
     /// Nothing in this compiler's runtime could `call_indirect` before
@@ -1325,10 +1328,14 @@ fn split(ctx: &Ctx) -> FnBuild {
     b.push(Ins::I32Load(ALIGN_WORD, 0));
     b.push(Ins::LocalSet(nl));
 
-    // See the doc comment: unrepresentable rather than unimplemented.
+    // See the doc comment: unrepresentable rather than unimplemented -- and
+    // since 2026-08-30 a *named* capability refusal rather than a bare stop.
     b.push(Ins::LocalGet(nl));
     b.push(Ins::I32Eqz);
     b.push(Ins::If(BlockType::Empty));
+    if let Some(names) = ctx.refusal_names {
+        record_named_fault(names.empty_separator, FAULT_CAPABILITY, b);
+    }
     b.push(Ins::Unreachable);
     b.push(Ins::End);
 
@@ -2108,22 +2115,22 @@ fn slice_core(ctx: &Ctx) -> FnBuild {
     b.push(Ins::I32Const(2));
     b.push(Ins::I32Eq);
     b.push(Ins::If(BlockType::Empty));
-    b.push(Ins::LocalGet(u));
-    b.push(Ins::I32Const(1));
-    b.push(Ins::I32Add);
-    b.push(Ins::LocalGet(from));
-    b.push(Ins::I32Eq);
-    b.push(Ins::If(BlockType::Empty));
-    b.push(Ins::Unreachable);
-    b.push(Ins::End);
-    b.push(Ins::LocalGet(u));
-    b.push(Ins::I32Const(1));
-    b.push(Ins::I32Add);
-    b.push(Ins::LocalGet(to));
-    b.push(Ins::I32Eq);
-    b.push(Ins::If(BlockType::Empty));
-    b.push(Ins::Unreachable);
-    b.push(Ins::End);
+    // A boundary that falls between the two code units of a surrogate pair
+    // has no byte position in UTF-8 (see the doc comment); a named
+    // capability refusal since 2026-08-30.
+    for edge in [from, to] {
+        b.push(Ins::LocalGet(u));
+        b.push(Ins::I32Const(1));
+        b.push(Ins::I32Add);
+        b.push(Ins::LocalGet(edge));
+        b.push(Ins::I32Eq);
+        b.push(Ins::If(BlockType::Empty));
+        if let Some(names) = ctx.refusal_names {
+            record_named_fault(names.surrogate_boundary, FAULT_CAPABILITY, b);
+        }
+        b.push(Ins::Unreachable);
+        b.push(Ins::End);
+    }
     b.push(Ins::End);
     b.push(Ins::LocalGet(u));
     b.push(Ins::LocalGet(w));

@@ -27,7 +27,10 @@
 use super::repr::{
     self, BlockType, Ins, TAG_ARRAY, TAG_NUMBER, TAG_OBJECT, ValType, WIDTH, const_undefined,
 };
-use super::runtime::{ALIGN_WORD, FnBuild, Rt, RtFunc, StringPool};
+use super::runtime::{
+    ALIGN_WORD, FAULT_INVALID_WRITE, FnBuild, RefusalNames, Rt, RtFunc, StringPool,
+    record_named_fault,
+};
 
 // -------------------------------------------------------------------------
 // The record.
@@ -162,6 +165,9 @@ pub(crate) struct Ctx {
     /// Index of `__add` -- the base `runtime::SET` is laid out from.
     pub(crate) runtime_base: u32,
     pub(crate) names: Names,
+    /// The reasons a refused write names; `None` in a program that cannot
+    /// reach one (see `emit`).
+    pub(crate) refusal_names: Option<RefusalNames>,
 }
 
 impl Ctx {
@@ -431,6 +437,9 @@ fn arr_set(ctx: &Ctx) -> FnBuild {
     b.push(Ins::I32Const(MAX_INDEX));
     b.push(Ins::I32GeU);
     b.push(Ins::If(BlockType::Empty));
+    // Nameless on purpose: every script path reaches this through
+    // `__arr_index`, which refused the index first. Only a caller inside the
+    // engine could arrive here, so this is a defect and not the script's.
     b.push(Ins::Unreachable);
     b.push(Ins::End);
 
@@ -684,13 +693,21 @@ fn prop_set(ctx: &Ctx) -> FnBuild {
     b.push(Ins::Return);
     b.push(Ins::End);
 
+    // Not an Object and not an Array: a String, a Number, a Boolean, `null`,
+    // `undefined` or a function. Nothing here has a property to write.
     b.push(Ins::LocalGet(recv));
     b.push(Ins::I32Const(TAG_ARRAY));
     b.push(Ins::I32Ne);
     b.push(Ins::If(BlockType::Empty));
+    if let Some(names) = ctx.refusal_names {
+        record_named_fault(names.write_on_primitive, FAULT_INVALID_WRITE, b);
+    }
     b.push(Ins::Unreachable);
     b.push(Ins::End);
 
+    // An Array, and a key `__arr_index` could not read as an integer index
+    // (a String, a fraction, a negative): ECMA-262 would hang a named
+    // property on the array; this engine refuses and says so.
     b.push(Ins::LocalGet(key));
     b.push(Ins::LocalGet(key + 1));
     b.push(ctx.me(Ar::Index));
@@ -699,6 +716,9 @@ fn prop_set(ctx: &Ctx) -> FnBuild {
     b.push(Ins::I32Const(-1));
     b.push(Ins::I32Eq);
     b.push(Ins::If(BlockType::Empty));
+    if let Some(names) = ctx.refusal_names {
+        record_named_fault(names.non_index_key, FAULT_INVALID_WRITE, b);
+    }
     b.push(Ins::Unreachable);
     b.push(Ins::End);
 

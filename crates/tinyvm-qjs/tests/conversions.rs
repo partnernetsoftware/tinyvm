@@ -76,6 +76,7 @@ impl Prog {
         let base = runtime::SET.len() as u32;
         let rt = RtCtx {
             object_names: None,
+            refusal_names: None,
             call_check: None,
             func_base: 0,
             heap_global: 0,
