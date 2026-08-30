@@ -220,6 +220,15 @@ pub(crate) const FAULT_HOST_ARGUMENT: i32 = 6;
 /// `=== undefined` first because the trap said nothing.
 pub(crate) const FAULT_PROPERTY_OF_NON_OBJECT: i32 = 7;
 
+/// The guest called a value that is not a function -- `undefined()`, a
+/// missing method (`[].concat()`), a number -- and [`FAULT_THROWN`] holds
+/// the callee's pooled name as the source spelled it (`concat`, `f`, or
+/// `<expression>` for a callee with no name). ECMA-262's answer is a
+/// TypeError; a program with an unwind channel gets exactly that, catchable,
+/// and never reaches this word. Until 2026-08-30 both were a bare
+/// `unreachable` from `unbox_function`'s tag check.
+pub(crate) const FAULT_NOT_A_FUNCTION: i32 = 8;
+
 /// Emitted where a host argument's tag test fails: the detail first, then
 /// the code, then the caller's `unreachable`.
 pub(crate) fn record_host_argument(detail: i32, out: &mut Vec<Ins>) {
@@ -484,7 +493,37 @@ impl TypeErrorNames {
     }
 }
 
+/// The two pooled halves of the TypeError text `__call_check` throws around
+/// the callee's name.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CallCheckNames {
+    pub(crate) prefix: i32,
+    pub(crate) suffix: i32,
+    /// The table element of the trampoline adapter: a function of the
+    /// uniform signature that answers `undefined`. A refused call runs it
+    /// with the throw already in flight, so the call site's shape -- the
+    /// arguments pushed, a result pair coming back, the throw check after
+    /// -- is the same as for any call.
+    pub(crate) trampoline_element: u32,
+}
+
+impl CallCheckNames {
+    pub(crate) fn intern(pool: &mut StringPool, trampoline_element: u32) -> Self {
+        Self {
+            prefix: pool.intern("TypeError: "),
+            suffix: pool.intern(" is not a function"),
+            trampoline_element,
+        }
+    }
+}
+
 pub(crate) struct Ctx {
+    /// Present when the program has an indirect call -- a value called
+    /// through the table -- so that a callee that is not a function is a
+    /// named refusal (a catchable TypeError with the channel, fault 8
+    /// without) instead of a bare trap. `None` leaves `__call_check`'s body
+    /// unreachable and unreached.
+    pub(crate) call_check: Option<CallCheckNames>,
     /// Present when the program can catch: `__obj_get` throws a TypeError
     /// through it for a property read off undefined/null/a primitive
     /// (ECMA-262's answer) instead of faulting. Absent, the fault stays.
@@ -1551,6 +1590,73 @@ fn copy_addresses(b: &mut Vec<Ins>, src: u32, dst: u32, shift: Option<u32>, i: u
     b.push(Ins::LocalGet(src));
     b.push(Ins::LocalGet(i));
     b.push(Ins::I32Add);
+}
+
+/// `__call_check(tag, payload, name) -> record`: the callee's record when
+/// `tag` is a Function (with `unbox_function`'s high-half guard), and
+/// otherwise ECMA-262's TypeError, `"TypeError: <name> is not a function"`.
+/// With an unwind channel the throw is set in flight and the answer is a
+/// fresh record for the trampoline element, so the call proceeds into a
+/// function that answers `undefined` and the call site's throw check
+/// leaves; without one the fault word says [`FAULT_NOT_A_FUNCTION`] and
+/// [`FAULT_THROWN`] the name. Emitted only for a program with an indirect
+/// call, as its own set after the methods, so every other program keeps its
+/// bytes.
+pub(crate) fn build_call_check(ctx: &Ctx, names: CallCheckNames) -> RtFunc {
+    let mut f = FnBuild::new(3);
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Const(super::repr::TAG_FUNCTION));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    // The payload must be a plain address: a high half is a hand-built pair.
+    b.push(Ins::LocalGet(1));
+    b.push(Ins::I32WrapI64);
+    b.push(Ins::I64ExtendI32U);
+    b.push(Ins::LocalGet(1));
+    b.push(Ins::I64Eq);
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::Unreachable);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(1));
+    b.push(Ins::I32WrapI64);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+    match ctx.unwind {
+        Some(unwind) => {
+            b.push(Ins::I32Const(names.prefix));
+            b.push(Ins::LocalGet(2));
+            b.push(ctx.call(Rt::StrConcat));
+            b.push(Ins::I32Const(names.suffix));
+            b.push(ctx.call(Rt::StrConcat));
+            b.push(Ins::I64ExtendI32U);
+            b.push(Ins::GlobalSet(unwind.payload));
+            b.push(Ins::I32Const(super::repr::TAG_STRING));
+            b.push(Ins::GlobalSet(unwind.tag));
+            b.push(Ins::I32Const(1));
+            b.push(Ins::GlobalSet(unwind.flag));
+            b.push(Ins::I32Const(names.trampoline_element as i32));
+            if ctx.captures {
+                b.push(Ins::I32Const(0));
+            }
+            b.push(ctx.call(Rt::FnNew));
+        }
+        None => {
+            b.push(Ins::I32Const(FAULT_THROWN));
+            b.push(Ins::LocalGet(2));
+            b.push(Ins::I32Store(2, 0));
+            store_fault(FAULT_NOT_A_FUNCTION, b);
+            b.push(Ins::Unreachable);
+        }
+    }
+    RtFunc {
+        name: "__call_check",
+        params: vec![ValType::I32, ValType::I64, ValType::I32],
+        results: vec![ValType::I32],
+        locals: f.local_groups(),
+        body: f.body,
+    }
 }
 
 /// Byte equality. Not pointer equality: there is no interning, so two equal

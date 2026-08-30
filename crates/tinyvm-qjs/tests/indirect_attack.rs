@@ -402,9 +402,11 @@ fn a_wrong_tag_call_is_not_misreported_as_a_budget_fault() {
     let outcome = instance.invoke_by_name("main", &Value::args(&[]));
     assert!(outcome.is_err(), "expected a trap");
     let memory = instance.memory().expect("memory");
+    // Since 2026-08-30 the refusal has a name of its own: not a heap fault,
+    // and not a bare trap either.
     assert_eq!(
         guest_fault(&memory),
-        None,
+        Some(GuestFault::NotAFunction),
         "a call on a non-function must not be recorded as a heap fault"
     );
 }
@@ -829,8 +831,12 @@ fn a_function_payload_means_nothing_outside_its_own_module() {
             continue;
         };
         let out = decode(&instance, &vals, b);
+        // `undefined` is B's own too: a payload that reaches the trampoline
+        // element -- the adapter `__call_check` hands a refused call, present
+        // in every module with an indirect call since 2026-08-30 -- answers
+        // it, and it belongs to B exactly as B's two functions do.
         assert!(
-            out == Out::Number(1.0) || out == Out::Number(2.0),
+            out == Out::Number(1.0) || out == Out::Number(2.0) || out == Out::Undefined,
             "payload {payload} answered {out:?}, which is not one of B's own"
         );
         answered += 1;
@@ -863,8 +869,8 @@ fn a_function_value_survives_many_calls_on_one_instance() {
     }
     assert_eq!(
         table_elements(&wasm).len(),
-        2,
-        "two functions, two elements"
+        3,
+        "two functions, two elements, and the trampoline a refused call runs into"
     );
 }
 

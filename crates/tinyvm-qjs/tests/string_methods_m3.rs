@@ -139,7 +139,7 @@ fn a_program_that_names_none_of_them_pays_nothing() {
         ("let o = {a:1}; o.b = 2; return o.a;", 10_193) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
         (
             "function mk() { return function () { return 1; }; } let f = mk(); return f();",
-            10_189,
+            10_342,
         ),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
@@ -291,7 +291,7 @@ fn a_program_that_never_splits_pays_for_neither_split_nor_substr() {
         // window that holds no copy of the needle's first byte (a 128 KiB
         // miss 36 -> 7.2 steps a character, tests/index_of_cost.rs); only
         // programs that call either carry the two windows' worth of code.
-        ("return \"ab\".includes(\"a\");", 10_474) /* +23 on 2026-08-29: `.includes` is a static property read, so the program carries the arm that names a missing String property; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
+        ("return \"ab\".includes(\"a\");", 10_626) /* +23 on 2026-08-29: `.includes` is a static property read, so the program carries the arm that names a missing String property; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(n, want, "{source:?} is {n} bytes");

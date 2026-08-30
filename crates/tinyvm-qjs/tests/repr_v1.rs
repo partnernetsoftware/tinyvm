@@ -112,6 +112,7 @@ impl Prog {
                 captures: false,
                 string_length: length_name,
                 string_member: false,
+                call_check: None,
                 unwind: None,
                 type_error: None,
             },
@@ -509,6 +510,7 @@ fn add_tests_number_before_string() {
         captures: false,
         string_length: None,
         string_member: false,
+        call_check: None,
         unwind: None,
         type_error: None,
     };
@@ -563,6 +565,7 @@ fn a_new_type_costs_nothing_at_a_site_that_never_sees_it() {
         captures: false,
         string_length: None,
         string_member: false,
+        call_check: None,
         unwind: None,
         type_error: None,
     };
@@ -780,6 +783,7 @@ fn typeof_costs_nothing_in_a_program_that_never_asks() {
         captures: false,
         string_length: None,
         string_member: false,
+        call_check: None,
         unwind: None,
         type_error: None,
     };

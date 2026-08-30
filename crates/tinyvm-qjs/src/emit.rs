@@ -325,7 +325,7 @@ pub(crate) mod m1 {
     use crate::ir::m1 as ir;
     use crate::opts::{HostFn, HostParam, HostResult, Names, Options};
     use crate::repr::{
-        self, BlockType, Ins, ValType, WIDTH, box_array, box_bool, box_function, box_number, box_object, box_string, const_bool, const_null, const_number, const_string, const_undefined, drop_value, load_local, store_local, unbox_function, is_number,
+        self, BlockType, Ins, ValType, WIDTH, box_array, box_bool, box_function, box_number, box_object, box_string, const_bool, const_null, const_number, const_string, const_undefined, drop_value, load_local, store_local, is_number,
     };
     use crate::repr::{is_array, is_object, is_string};
     use crate::runtime::{
@@ -613,7 +613,11 @@ pub(crate) mod m1 {
         // program without it keeps the indices it always had.
         let method_base = arr_base + arr_len;
         let method_len = scan.methods.len();
-        let user_base = method_base + method_len;
+        // `__call_check`, for a program with an indirect call: one function,
+        // appended after the methods for the same reason as every other gate.
+        let call_check_base = method_base + method_len;
+        let call_check_len = u32::from(scan.indirect);
+        let user_base = call_check_base + call_check_len;
         // The three unwind globals sit *after* every binding global, so a
         // program that cannot throw has the same global indices it always
         // had. Computed here rather than where the globals are built, because
@@ -622,6 +626,12 @@ pub(crate) mod m1 {
         let unwind = scan.throws.then(|| Unwind::at(binding_globals));
 
         let ctx = Ctx {
+            // The trampoline's element comes after the JSON adapters and the
+            // user adapters -- the same arithmetic the table block below uses.
+            call_check: scan.indirect.then(|| {
+                let json_adapters = if scan.json { 2 } else { 0 };
+                runtime::CallCheckNames::intern(&mut pool, 1 + json_adapters)
+            }),
             unwind: unwind.map(|u| runtime::UnwindGlobals { flag: u.flag, tag: u.tag, payload: u.payload }),
             // Only a program that reads a static property can reach the
             // TypeError; a JSON-only program has a channel and no such read.
@@ -737,6 +747,10 @@ pub(crate) mod m1 {
             })
         };
 
+        let call_check_set: Vec<runtime::RtFunc> = match ctx.call_check {
+            Some(names) => vec![runtime::build_call_check(&ctx, names)],
+            None => Vec::new(),
+        };
         let mut funcs: Vec<ir::Func> = Vec::new();
         for built in runtime::build(&ctx)
             .into_iter()
@@ -744,6 +758,7 @@ pub(crate) mod m1 {
             .chain(json_set)
             .chain(array_set)
             .chain(method_set)
+            .chain(call_check_set)
         {
             let type_index = intern(&mut types, built.params.clone(), built.results.clone());
             funcs.push(func(
@@ -779,7 +794,9 @@ pub(crate) mod m1 {
         });
 
         let mut fns = FnTable {
-            reserved: if scan.json { 2 } else { 0 },
+            // The JSON adapters, then the trampoline `__call_check` hands a
+            // refused call; user functions take the elements after.
+            reserved: (if scan.json { 2 } else { 0 }) + i32::from(scan.indirect),
             ..FnTable::default()
         };
         for (index, function) in program.functions.iter().enumerate() {
@@ -792,6 +809,7 @@ pub(crate) mod m1 {
                 &table,
                 &mut fns,
                 uniform,
+                scan.indirect.then_some(call_check_base),
                 scan.arrays.then_some(arr_base),
                 (!scan.methods.is_empty()).then(|| (method_base, scan.methods.clone())),
                 unwind,
@@ -866,6 +884,27 @@ pub(crate) mod m1 {
                     ));
                     in_table.push(index);
                 }
+            }
+            // The trampoline `__call_check` hands a refused call: the uniform
+            // signature, answering `undefined`. Its element is the one after
+            // the JSON adapters, which is what `CallCheckNames::
+            // trampoline_element` was computed as before the lowering ran.
+            if let Some(names) = ctx.call_check {
+                debug_assert_eq!(
+                    1 + in_table.len() as u32,
+                    names.trampoline_element,
+                    "the trampoline's element follows the JSON adapters"
+                );
+                let index = adapter_base + in_table.len() as u32;
+                let mut body = Vec::new();
+                const_undefined(&mut body);
+                funcs.push(func(
+                    "<trampoline of a call on a non-function>".to_owned(),
+                    uniform.type_index,
+                    Vec::new(),
+                    body,
+                ));
+                in_table.push(index);
             }
             for (position, id) in fns.entries.iter().enumerate() {
                 let arity = program.func(*id).params.len() as u32;
@@ -1914,6 +1953,8 @@ pub(crate) mod m1 {
         /// The signature every call through a value speaks, or `None` for a
         /// program the scan said has no such call and no such value.
         uniform: Option<Uniform>,
+        /// `__call_check`'s index, for a program with an indirect call.
+        call_check: Option<u32>,
         /// Whether *any* function in the program captures: the gate that
         /// decides the record's width and the uniform signature's shape. Not
         /// about this function -- `env_param` is that one.
@@ -1990,6 +2031,7 @@ pub(crate) mod m1 {
             table: &'a Table,
             fns: &'a mut FnTable,
             uniform: Option<Uniform>,
+            call_check: Option<u32>,
             arrays: Option<u32>,
             methods: Option<(u32, method::Plan)>,
             unwind: Option<Unwind>,
@@ -2043,6 +2085,7 @@ pub(crate) mod m1 {
                 table,
                 fns,
                 uniform,
+                call_check,
                 arrays,
                 methods,
                 unwind,
@@ -2783,6 +2826,38 @@ pub(crate) mod m1 {
                 Some(&at) => self.depth - at,
                 None => self.depth,
             }
+        }
+
+        /// `__call_check(tag, payload, name) -> record` for the callee pair in
+        /// `slot`: the record when it is a function, the trampoline's with the
+        /// TypeError in flight when it is not (or fault 8 in a program that
+        /// cannot catch). Emitted after the arguments, ECMA-262 13.3.6.1's
+        /// order. Leaves the record on the stack.
+        fn call_checked_record(&mut self, slot: u32, name: &str) {
+            let check = self
+                .call_check
+                .expect("the scan sets `indirect` for every call through the table");
+            let name_ptr = self.pool.intern(name);
+            self.push(Ins::LocalGet(slot));
+            self.push(Ins::LocalGet(slot + 1));
+            self.push(Ins::I32Const(name_ptr));
+            self.push(Ins::Call(check));
+        }
+
+        /// The environment word of the callee pair in `slot`, read without a
+        /// tag test: the record address is multiplied by "is a function", so
+        /// a callee that is not one reads word `FN_ENV` of address 0 -- the
+        /// fault area -- instead of trapping before its arguments ran.
+        /// `__call_check` answers such a call afterwards; the value read here
+        /// is never used.
+        fn env_of_callee(&mut self, slot: u32) {
+            self.push(Ins::LocalGet(slot + 1));
+            self.push(Ins::I32WrapI64);
+            self.push(Ins::LocalGet(slot));
+            self.push(Ins::I32Const(crate::repr::TAG_FUNCTION));
+            self.push(Ins::I32Eq);
+            self.push(Ins::I32Mul);
+            self.push(Ins::I32Load(ALIGN_WORD, FN_ENV));
         }
 
         /// The check after a call that could have thrown: two instructions,
@@ -3714,13 +3789,21 @@ pub(crate) mod m1 {
             // with it. It comes out of the record, which is what the callee
             // value's payload *is* -- the adapter cannot ask which funcref it
             // was reached through, so the call site that already holds the
-            // record is the one place the answer exists.
+            // record is the one place the answer exists. Read without a tag
+            // test: a callee that is not a function has no record, so the
+            // address is zeroed by the test's result and the load reads the
+            // fault area, which is harmless -- `__call_check` below answers
+            // the call before the record could matter.
             if self.captures {
-                unbox_function(slot, &mut self.f.body);
-                self.push(Ins::I32Load(ALIGN_WORD, FN_ENV));
+                self.env_of_callee(slot);
             }
             self.arguments(args, uniform.arity)?;
-            unbox_function(slot, &mut self.f.body);
+            let callee_name = match &callee.kind {
+                ast::ExprKind::Name(name) => name.text.clone(),
+                ast::ExprKind::Member { key: ast::MemberKey::Static(key), .. } => key.clone(),
+                _ => "<expression>".to_owned(),
+            };
+            self.call_checked_record(slot, &callee_name);
             self.push(Ins::I32Load(ALIGN_WORD, FN_ELEMENT));
             self.push(Ins::CallIndirect(uniform.type_index, 0));
             // The other one. The adapter in the table needs no check of its
@@ -3815,11 +3898,12 @@ pub(crate) mod m1 {
             self.throw_check();
             store_local(value, &mut self.f.body);
             if self.captures {
-                unbox_function(value, &mut self.f.body);
-                self.push(Ins::I32Load(ALIGN_WORD, FN_ENV));
+                self.env_of_callee(value);
             }
             self.arguments(args, uniform.arity)?;
-            unbox_function(value, &mut self.f.body);
+            // The property may hold anything; a non-function is refused by
+            // the method's name, after the arguments ran (13.3.6.1).
+            self.call_checked_record(value, &name);
             self.push(Ins::I32Load(ALIGN_WORD, FN_ELEMENT));
             self.push(Ins::CallIndirect(uniform.type_index, 0));
             store_local(result, &mut self.f.body);
@@ -4400,3 +4484,4 @@ pub(crate) mod m1 {
         }
     }
 }
+

@@ -250,7 +250,10 @@ fn a_program_with_no_capture_is_byte_identical_to_what_it_was() {
         ("let o = {a:1}; o.b = 2; return o.a;", 10_193) /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */,
         (
             "function mk() { return function () { return 1; }; } let f = mk(); return f();",
-            10_189,
+            // +153 on 2026-08-30: a program with an indirect call carries `__call_check`
+            // and its trampoline (a call on a non-function is a named refusal,
+            // tests/not_a_function.rs); "return 1;" did not move.
+            10_342,
         ),
         // +23 on 2026-08-29: a program with an unwind channel now records the
         // thrown String's address in the entry epilogue, so the host can read
@@ -260,7 +263,7 @@ fn a_program_with_no_capture_is_byte_identical_to_what_it_was() {
         // through `__jb_bytes` and escapes only the byte that stopped the
         // run (117 -> 39 steps a byte, tests/json_stringify_cost.rs). Only
         // programs that name JSON carry it; "return 1;" above did not move.
-        ("return JSON.stringify({a:1});", 16_413),
+        ("return JSON.stringify({a:1});", 16_570),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(
@@ -301,8 +304,12 @@ fn what_one_closure_costs_is_written_down() {
     let fixed = (one_closure - one_value) as i64 - per_function;
 
     println!("closures cost: fixed {fixed} bytes, {per_function} per capturing function");
+    // 99 -> 83 on 2026-08-30: each indirect call site lost its two
+    // `unbox_function` sequences (one for the environment, one for the
+    // element) to one trap-free environment read and one `__call_check`
+    // call; the check itself is in the gated set, paid once.
     assert_eq!(
-        per_function, 99,
+        per_function, 83,
         "one capturing function: the environment parameter, the cell prologue and the \
          environment built at each creation site"
     );

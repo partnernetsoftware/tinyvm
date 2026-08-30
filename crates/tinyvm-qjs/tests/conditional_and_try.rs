@@ -812,12 +812,23 @@ fn a_property_read_off_undefined_is_a_throw_and_a_real_trap_still_is_not() {
         .expect("the TypeError is caught and the script completes");
     assert_eq!(Value::returned(&vals), Ok(Value::Number(5.0)));
 
-    let mut trapped = instantiate(
+    // Calling a non-function is ECMA-262's other TypeError, and since
+    // 2026-08-30 it is caught too.
+    let mut called = instantiate(
         "let out = 0; try { const f = 1; f(); } catch (e) { out = 5; } return out;",
+    );
+    let vals = called
+        .invoke_by_name("main", &Value::args(&[]))
+        .expect("the TypeError is caught and the script completes");
+    assert_eq!(Value::returned(&vals), Ok(Value::Number(5.0)));
+    // A real trap still is not a throw: a String method this engine does
+    // not have stops with its own fault word, channel or no channel.
+    let mut trapped = instantiate(
+        "let out = 0; try { const s = \"ab\"; out = s.substring(1); } catch (e) { out = 5; } return out;",
     );
     trapped
         .invoke_by_name("main", &Value::args(&[]))
-        .expect_err("calling a non-function traps rather than throwing");
+        .expect_err("a missing String method traps rather than throwing");
 }
 
 /// What a program that *can* throw pays on the path where it does not.

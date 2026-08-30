@@ -75,6 +75,7 @@ impl Prog {
         let names = convert::Names::intern(&mut pool);
         let base = runtime::SET.len() as u32;
         let rt = RtCtx {
+            call_check: None,
             func_base: 0,
             heap_global: 0,
             type_names,

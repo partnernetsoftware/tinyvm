@@ -244,6 +244,12 @@ pub enum GuestFault {
     /// Boolean. ECMA-262 throws a TypeError; this engine stops, and names
     /// the key: [`guest_property_of_non_object`].
     PropertyOfNonObject,
+    /// The script called a value that is not a function -- `undefined()`, a
+    /// method the engine does not have (`[].concat()`), a number. ECMA-262
+    /// says TypeError; a program that can catch gets one, so this fault is
+    /// what an uncatchable program reports instead of a bare trap. The
+    /// callee's name is the detail: [`guest_not_a_function`].
+    NotAFunction,
 }
 
 /// Read the guest's own account of why it trapped, out of its linear memory.
@@ -325,6 +331,15 @@ pub fn guest_property_of_non_object(memory: &[u8]) -> Option<String> {
     fault_detail_string(memory)
 }
 
+/// After a [`GuestFault::NotAFunction`]: the callee's name as the source
+/// spelled it (`f`, `concat`), or `<expression>` for a callee with no name.
+pub fn guest_not_a_function(memory: &[u8]) -> Option<String> {
+    if guest_fault(memory)? != GuestFault::NotAFunction {
+        return None;
+    }
+    fault_detail_string(memory)
+}
+
 /// The String record the fault area's second word points at, if any.
 fn fault_detail_string(memory: &[u8]) -> Option<String> {
     let at = runtime::FAULT_THROWN as usize;
@@ -351,6 +366,7 @@ pub fn guest_fault(memory: &[u8]) -> Option<GuestFault> {
         runtime::FAULT_MISSING_STRING_METHOD => Some(GuestFault::MissingStringMethod),
         runtime::FAULT_HOST_ARGUMENT => Some(GuestFault::HostArgument),
         runtime::FAULT_PROPERTY_OF_NON_OBJECT => Some(GuestFault::PropertyOfNonObject),
+        runtime::FAULT_NOT_A_FUNCTION => Some(GuestFault::NotAFunction),
         _ => None,
     }
 }
