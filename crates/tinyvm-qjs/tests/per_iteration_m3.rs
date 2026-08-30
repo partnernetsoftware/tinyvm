@@ -286,7 +286,10 @@ fn what_a_per_iteration_binding_costs_is_written_down() {
     );
 
     let marginal = two - one;
-    println!("loop capture: {} for the first, {marginal} per additional binding", one - none);
+    println!(
+        "loop capture: {} for the first, {marginal} per additional binding",
+        one - none
+    );
     assert_eq!(
         marginal, 83,
         "one more binding captured inside a loop body: its fresh cell at the \
