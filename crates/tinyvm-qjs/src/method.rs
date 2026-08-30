@@ -84,6 +84,12 @@ pub(crate) struct Ctx {
     /// Function index of `__str_cmp`, the code-unit comparison `<` uses;
     /// `sort`'s default order is that comparison over ToString forms.
     pub(crate) str_cmp: u32,
+    /// The interned `"a fractional Math.pow exponent"` -- the one arm of
+    /// `pow` this engine refuses rather than approximates (21.3.2.26 hands
+    /// a finite non-integer exponent over a positive base to exp/log, which
+    /// this engine does not carry). Zero when the plan does not want
+    /// [`Me::MathPow`]; nothing reads it then.
+    pub(crate) pow_exponent: i32,
 }
 
 impl Ctx {
@@ -255,6 +261,22 @@ pub(crate) enum Me {
     Shr,
     UShr,
     BitNot,
+    /// The `Math` functions (ECMA-262 21.3.2), folded by the parser to
+    /// reserved method names (`Math.floor(x)` is `x.__math_floor()`), each
+    /// gated per name like any method. `min`/`max` reach here only with
+    /// two arguments -- the parser folds the other arities to literals or
+    /// `+x` -- and IEEE `f64.min`/`f64.max` are exactly 21.3.2.25/24 over
+    /// a pair: NaN propagates and `-0` sorts below `+0`.
+    MathFloor,
+    MathCeil,
+    MathRound,
+    MathTrunc,
+    MathAbs,
+    MathSqrt,
+    MathSign,
+    MathPow,
+    MathMin,
+    MathMax,
 }
 
 /// Every function this variant can emit, in module order. **Not** what a
@@ -304,6 +326,16 @@ pub(crate) const SET: &[Me] = &[
     Me::Shr,
     Me::UShr,
     Me::BitNot,
+    Me::MathFloor,
+    Me::MathCeil,
+    Me::MathRound,
+    Me::MathTrunc,
+    Me::MathAbs,
+    Me::MathSqrt,
+    Me::MathSign,
+    Me::MathPow,
+    Me::MathMin,
+    Me::MathMax,
 ];
 
 /// Which of [`SET`] a particular module carries, and where each one lands.
@@ -422,6 +454,16 @@ impl Me {
             Me::Shr => "__m_shr",
             Me::UShr => "__m_ushr",
             Me::BitNot => "__m_bit_not",
+            Me::MathFloor => "__m_math_floor",
+            Me::MathCeil => "__m_math_ceil",
+            Me::MathRound => "__m_math_round",
+            Me::MathTrunc => "__m_math_trunc",
+            Me::MathAbs => "__m_math_abs",
+            Me::MathSqrt => "__m_math_sqrt",
+            Me::MathSign => "__m_math_sign",
+            Me::MathPow => "__m_math_pow",
+            Me::MathMin => "__m_math_min",
+            Me::MathMax => "__m_math_max",
         }
     }
 
@@ -471,6 +513,16 @@ impl Me {
             ("charAt", 1) => Some(Me::CharAt),
             ("substring", 2) => Some(Me::Substring),
             ("substring", 1) => Some(Me::SubstringFrom),
+            ("__math_floor", 0) => Some(Me::MathFloor),
+            ("__math_ceil", 0) => Some(Me::MathCeil),
+            ("__math_round", 0) => Some(Me::MathRound),
+            ("__math_trunc", 0) => Some(Me::MathTrunc),
+            ("__math_abs", 0) => Some(Me::MathAbs),
+            ("__math_sqrt", 0) => Some(Me::MathSqrt),
+            ("__math_sign", 0) => Some(Me::MathSign),
+            ("__math_pow", 1) => Some(Me::MathPow),
+            ("__math_min", 1) => Some(Me::MathMin),
+            ("__math_max", 1) => Some(Me::MathMax),
             _ => None,
         }
     }
@@ -503,6 +555,16 @@ impl Me {
             Me::ObjKeys => Recv::Obj,
             Me::IndexOf | Me::Includes => Recv::StrOrArr,
             Me::IsArray => Recv::Any,
+            Me::MathFloor
+            | Me::MathCeil
+            | Me::MathRound
+            | Me::MathTrunc
+            | Me::MathAbs
+            | Me::MathSqrt
+            | Me::MathSign
+            | Me::MathPow
+            | Me::MathMin
+            | Me::MathMax => Recv::Any,
             Me::Trim
             | Me::StartsWith
             | Me::EndsWith
@@ -581,6 +643,16 @@ impl Me {
             Me::BitAnd | Me::BitOr | Me::BitXor | Me::Shl | Me::Shr | Me::UShr | Me::BitNot => {
                 vec![Me::ToInt32]
             }
+            Me::MathFloor
+            | Me::MathCeil
+            | Me::MathRound
+            | Me::MathTrunc
+            | Me::MathAbs
+            | Me::MathSqrt
+            | Me::MathSign
+            | Me::MathPow
+            | Me::MathMin
+            | Me::MathMax => Vec::new(),
         }
     }
 }
@@ -666,6 +738,16 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
         Me::Shr => (values(2), values(1), bitwise(ctx, Bit::Shr)),
         Me::UShr => (values(2), values(1), bitwise(ctx, Bit::UShr)),
         Me::BitNot => (values(1), values(1), bit_not(ctx)),
+        Me::MathFloor => (values(1), values(1), math_simple(ctx, Ins::F64Floor)),
+        Me::MathCeil => (values(1), values(1), math_simple(ctx, Ins::F64Ceil)),
+        Me::MathRound => (values(1), values(1), math_round(ctx)),
+        Me::MathTrunc => (values(1), values(1), math_simple(ctx, Ins::F64Trunc)),
+        Me::MathAbs => (values(1), values(1), math_simple(ctx, Ins::F64Abs)),
+        Me::MathSqrt => (values(1), values(1), math_simple(ctx, Ins::F64Sqrt)),
+        Me::MathSign => (values(1), values(1), math_sign(ctx)),
+        Me::MathPow => (values(2), values(1), math_pow(ctx)),
+        Me::MathMin => (values(2), values(1), math_pair(ctx, Ins::F64Min)),
+        Me::MathMax => (values(2), values(1), math_pair(ctx, Ins::F64Max)),
     };
     RtFunc {
         name: me.symbol(),
@@ -4430,5 +4512,298 @@ fn bit_not(ctx: &Ctx) -> FnBuild {
     let mut boxed = Vec::new();
     box_number(&inner, &mut boxed);
     f.body.extend(boxed);
+    f
+}
+
+// ---- the Math functions -------------------------------------------------
+
+/// `floor` / `ceil` / `trunc` / `abs` / `sqrt` (21.3.2.16 / .10 / .35 /
+/// .1 / .32): ToNumber, then the wasm instruction that *is* the spec's
+/// operation -- IEEE `sqrt` of a negative is NaN and of `-0` is `-0`,
+/// `floor`/`ceil`/`trunc` keep the zero's sign, all exactly as 21.3.2
+/// writes them.
+fn math_simple(ctx: &Ctx, op: Ins) -> FnBuild {
+    let mut f = FnBuild::new(WIDTH);
+    let mut inner = Vec::new();
+    load_local(0, &mut inner);
+    inner.push(ctx.rt(Rt::ToNumber));
+    inner.push(op);
+    let mut boxed = Vec::new();
+    box_number(&inner, &mut boxed);
+    f.body.extend(boxed);
+    f
+}
+
+/// `min` / `max` over exactly two Numbers (21.3.2.25 / .24): the wasm
+/// instruction is the 2019 IEEE minimum/maximum, which is the spec's --
+/// NaN wins over anything and `-0` is smaller than `+0`.
+fn math_pair(ctx: &Ctx, op: Ins) -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH);
+    let mut inner = Vec::new();
+    load_local(0, &mut inner);
+    inner.push(ctx.rt(Rt::ToNumber));
+    load_local(WIDTH, &mut inner);
+    inner.push(ctx.rt(Rt::ToNumber));
+    inner.push(op);
+    let mut boxed = Vec::new();
+    box_number(&inner, &mut boxed);
+    f.body.extend(boxed);
+    f
+}
+
+/// `Math.round` (21.3.2.28): ties toward +∞, which is `floor` plus one
+/// exactly when the fraction reaches one half. `x - floor(x)` is exact
+/// for every finite double (Sterbenz where the two share an exponent,
+/// plain representability below one), so the half test cannot be off by
+/// a rounding. An integer, an infinity and NaN come back unchanged
+/// (`inf - inf` is NaN and NaN passes no test), and a result of zero
+/// takes the argument's sign: `round(-0.3)` is `-0` (step 2).
+fn math_round(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(WIDTH);
+    let x = f.local(ValType::F64);
+    let r = f.local(ValType::F64);
+    let b = &mut f.body;
+    load_local(0, b);
+    b.push(ctx.rt(Rt::ToNumber));
+    b.push(Ins::LocalTee(x));
+    b.push(Ins::F64Floor);
+    b.push(Ins::LocalSet(r));
+    // r + 1 when the fraction is at or past one half.
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::LocalGet(r));
+    b.push(Ins::F64Sub);
+    b.push(Ins::F64Const(0.5));
+    b.push(Ins::F64Ge);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(r));
+    b.push(Ins::F64Const(1.0));
+    b.push(Ins::F64Add);
+    b.push(Ins::LocalSet(r));
+    b.push(Ins::End);
+    // A zero keeps the argument's sign.
+    b.push(Ins::LocalGet(r));
+    b.push(Ins::F64Const(0.0));
+    b.push(Ins::F64Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(r));
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Copysign);
+    b.push(Ins::LocalSet(r));
+    b.push(Ins::End);
+    let mut boxed = Vec::new();
+    box_number(&[Ins::LocalGet(r)], &mut boxed);
+    b.extend(boxed);
+    f
+}
+
+/// `Math.sign` (21.3.2.30): NaN and the zeros come back unchanged, and
+/// everything else is one with the argument's sign.
+fn math_sign(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(WIDTH);
+    let x = f.local(ValType::F64);
+    let b = &mut f.body;
+    load_local(0, b);
+    b.push(ctx.rt(Rt::ToNumber));
+    b.push(Ins::LocalSet(x));
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Ne);
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Const(0.0));
+    b.push(Ins::F64Eq);
+    b.push(Ins::I32Or);
+    b.push(Ins::If(BlockType::Empty));
+    let mut boxed = Vec::new();
+    box_number(&[Ins::LocalGet(x)], &mut boxed);
+    b.extend(boxed);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+    let mut boxed = Vec::new();
+    box_number(
+        &[Ins::F64Const(1.0), Ins::LocalGet(x), Ins::F64Copysign],
+        &mut boxed,
+    );
+    b.extend(boxed);
+    f
+}
+
+/// `Math.pow` (21.3.2.26 over 6.1.6.1.3, Number::exponentiate).
+///
+/// The special cases are the spec's, in its order: an exponent of ±0 is 1
+/// whatever the base (even NaN); a NaN anywhere else is NaN; an infinite
+/// exponent asks only where |base| stands against one, and |base| = 1
+/// exactly is NaN. An *integer* exponent -- every use the downstream
+/// count found -- is exponentiation by squaring on the double, with a
+/// negative exponent as one over the positive's answer; infinities and
+/// signed zeros ride the multiplications and divisions to exactly the
+/// spec's table (`(-0) ** -1` is `-Infinity` because `1 / -0` is).
+///
+/// A finite non-integer exponent over a positive base is the one arm
+/// 6.1.6.1.3 leaves to exp/log, which this engine does not carry: it is
+/// refused **by name** (`FAULT_CAPABILITY`, `a fractional Math.pow
+/// exponent`) rather than approximated silently. Over a negative base it
+/// is NaN (step 12), and over ±0 / ±∞ the spec's own table still answers.
+fn math_pow(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH);
+    let x = f.local(ValType::F64);
+    let e = f.local(ValType::F64);
+    let m = f.local(ValType::F64);
+    let r = f.local(ValType::F64);
+    let b = &mut f.body;
+    load_local(0, b);
+    b.push(ctx.rt(Rt::ToNumber));
+    b.push(Ins::LocalSet(x));
+    load_local(WIDTH, b);
+    b.push(ctx.rt(Rt::ToNumber));
+    b.push(Ins::LocalSet(e));
+    let answer = |b: &mut Vec<Ins>, ins: &[Ins]| {
+        let mut boxed = Vec::new();
+        box_number(ins, &mut boxed);
+        b.extend(boxed);
+        b.push(Ins::Return);
+    };
+    // exponent ±0 -> 1, even for a NaN base (6.1.6.1.3 step 1).
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::F64Const(0.0));
+    b.push(Ins::F64Eq);
+    b.push(Ins::If(BlockType::Empty));
+    answer(b, &[Ins::F64Const(1.0)]);
+    b.push(Ins::End);
+    // NaN anywhere else is NaN (steps 2-3).
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::F64Ne);
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Ne);
+    b.push(Ins::I32Or);
+    b.push(Ins::If(BlockType::Empty));
+    answer(b, &[Ins::F64Const(f64::NAN)]);
+    b.push(Ins::End);
+    // An infinite exponent (step 6): |base| = 1 is NaN, and otherwise the
+    // answer is +∞ exactly when |base| > 1 agrees with e > 0.
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::F64Abs);
+    b.push(Ins::F64Const(f64::INFINITY));
+    b.push(Ins::F64Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Abs);
+    b.push(Ins::F64Const(1.0));
+    b.push(Ins::F64Eq);
+    b.push(Ins::If(BlockType::Empty));
+    answer(b, &[Ins::F64Const(f64::NAN)]);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Abs);
+    b.push(Ins::F64Const(1.0));
+    b.push(Ins::F64Gt);
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::F64Const(0.0));
+    b.push(Ins::F64Gt);
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    answer(b, &[Ins::F64Const(f64::INFINITY)]);
+    b.push(Ins::End);
+    answer(b, &[Ins::F64Const(0.0)]);
+    b.push(Ins::End);
+    // A finite non-integer exponent: NaN over a negative base (step 12),
+    // the spec's zero/infinity table over ±0 and ±∞ (their rows have no
+    // odd-integer branch left when the exponent is not an integer), and a
+    // named refusal over a positive finite base.
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::F64Trunc);
+    b.push(Ins::F64Ne);
+    b.push(Ins::If(BlockType::Empty));
+    {
+        // (the outer `b` is still borrowed here)
+        b.push(Ins::LocalGet(x));
+        b.push(Ins::F64Const(0.0));
+        b.push(Ins::F64Lt);
+        b.push(Ins::LocalGet(x));
+        b.push(Ins::F64Abs);
+        b.push(Ins::F64Const(f64::INFINITY));
+        b.push(Ins::F64Ne);
+        b.push(Ins::I32And);
+        b.push(Ins::If(BlockType::Empty));
+        answer(b, &[Ins::F64Const(f64::NAN)]);
+        b.push(Ins::End);
+        // ±0 and ±∞ bases: |x| > 1 (that is, ∞) agreeing with e > 0 is ∞.
+        b.push(Ins::LocalGet(x));
+        b.push(Ins::F64Const(0.0));
+        b.push(Ins::F64Eq);
+        b.push(Ins::LocalGet(x));
+        b.push(Ins::F64Abs);
+        b.push(Ins::F64Const(f64::INFINITY));
+        b.push(Ins::F64Eq);
+        b.push(Ins::I32Or);
+        b.push(Ins::If(BlockType::Empty));
+        b.push(Ins::LocalGet(x));
+        b.push(Ins::F64Abs);
+        b.push(Ins::F64Const(1.0));
+        b.push(Ins::F64Gt);
+        b.push(Ins::LocalGet(e));
+        b.push(Ins::F64Const(0.0));
+        b.push(Ins::F64Gt);
+        b.push(Ins::I32Eq);
+        b.push(Ins::If(BlockType::Empty));
+        answer(b, &[Ins::F64Const(f64::INFINITY)]);
+        b.push(Ins::End);
+        answer(b, &[Ins::F64Const(0.0)]);
+        b.push(Ins::End);
+        record_named_fault(ctx.pow_exponent, FAULT_CAPABILITY, b);
+        b.push(Ins::Unreachable);
+    }
+    b.push(Ins::End);
+    // An integer exponent: squaring, negative as one over the positive.
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::F64Abs);
+    b.push(Ins::LocalSet(m));
+    b.push(Ins::F64Const(1.0));
+    b.push(Ins::LocalSet(r));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(m));
+    b.push(Ins::F64Const(0.0));
+    b.push(Ins::F64Eq);
+    b.push(Ins::BrIf(1));
+    // Odd: the low bit of m, as m - 2 * trunc(m / 2).
+    b.push(Ins::LocalGet(m));
+    b.push(Ins::LocalGet(m));
+    b.push(Ins::F64Const(2.0));
+    b.push(Ins::F64Div);
+    b.push(Ins::F64Trunc);
+    b.push(Ins::LocalTee(m));
+    b.push(Ins::F64Const(2.0));
+    b.push(Ins::F64Mul);
+    b.push(Ins::F64Sub);
+    b.push(Ins::F64Const(0.0));
+    b.push(Ins::F64Ne);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(r));
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Mul);
+    b.push(Ins::LocalSet(r));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Mul);
+    b.push(Ins::LocalSet(x));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::F64Const(0.0));
+    b.push(Ins::F64Lt);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::F64Const(1.0));
+    b.push(Ins::LocalGet(r));
+    b.push(Ins::F64Div);
+    b.push(Ins::LocalSet(r));
+    b.push(Ins::End);
+    let mut boxed = Vec::new();
+    box_number(&[Ins::LocalGet(r)], &mut boxed);
+    b.extend(boxed);
     f
 }

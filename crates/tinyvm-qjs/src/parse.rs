@@ -1482,6 +1482,135 @@ pub(crate) mod m1 {
             }
         }
 
+        /// A `Math.f(...)` call folded to its reserved method or literal,
+        /// or the arguments handed back untouched.
+        ///
+        /// ECMA-262 21.3.2, the members the downstream count asked for:
+        /// `floor` / `ceil` / `round` / `trunc` / `abs` / `sqrt` / `sign`
+        /// take one argument and fold to `x.__math_floor()` and kin;
+        /// `pow(a, b)` folds to `a.__math_pow(b)`; `min` / `max` with no
+        /// arguments are their identity literals (21.3.2.25 step 1: +∞ /
+        /// −∞), with one argument are ToNumber (`+x`), and with more fold
+        /// pairwise left to right -- IEEE `min` is associative enough for
+        /// 21.3.2.25: NaN propagates through every pair and `-0 < +0`
+        /// holds pairwise.
+        ///
+        /// A member this table does not have is refused **here, by name**:
+        /// there is no `Math` record for a read to miss, so the compile-time
+        /// sentence is the missing-property refusal this engine can give.
+        /// A script that declares its own `Math` gets its own, as with
+        /// `Number` and `JSON`.
+        fn fold_math_call(
+            &mut self,
+            callee: &Expr,
+            args: Vec<Expr>,
+            span: Span,
+        ) -> Result<Result<Expr, Vec<Expr>>, CompileError> {
+            let ExprKind::Member {
+                object,
+                key: MemberKey::Static(member),
+            } = &callee.kind
+            else {
+                return Ok(Err(args));
+            };
+            let ExprKind::Name(name) = &object.kind else {
+                return Ok(Err(args));
+            };
+            if name.text != MATH
+                || declared(&self.options.names, MATH)
+                || self.is_declared_in_scope(MATH)
+            {
+                return Ok(Err(args));
+            }
+            let wrong_arity = |takes: &str| {
+                Err(unsupported(
+                    Boundary::FullJs,
+                    &format!(
+                        "`Math.{member}` called with {} arguments; it takes {takes}",
+                        args.len()
+                    ),
+                    span.offset(),
+                ))
+            };
+            let method = match (member.as_str(), args.len()) {
+                ("floor", 1) => "__math_floor",
+                ("ceil", 1) => "__math_ceil",
+                ("round", 1) => "__math_round",
+                ("trunc", 1) => "__math_trunc",
+                ("abs", 1) => "__math_abs",
+                ("sqrt", 1) => "__math_sqrt",
+                ("sign", 1) => "__math_sign",
+                ("pow", 2) => "__math_pow",
+                ("floor" | "ceil" | "round" | "trunc" | "abs" | "sqrt" | "sign", _) => {
+                    return wrong_arity("one");
+                }
+                ("pow", _) => return wrong_arity("two"),
+                ("min" | "max", _) => {
+                    let identity = if member == "min" {
+                        f64::INFINITY
+                    } else {
+                        f64::NEG_INFINITY
+                    };
+                    let pair = if member == "min" {
+                        "__math_min"
+                    } else {
+                        "__math_max"
+                    };
+                    self.pending[name.occurrence as usize].folded = true;
+                    let mut args = args;
+                    let mut folded = match args.len() {
+                        0 => Expr {
+                            kind: ExprKind::Num(identity),
+                            span,
+                        },
+                        _ => Expr {
+                            kind: ExprKind::Unary(UnaryOp::Plus, Box::new(args.remove(0))),
+                            span,
+                        },
+                    };
+                    for next in args {
+                        folded = Expr {
+                            kind: ExprKind::Call {
+                                callee: Box::new(Expr {
+                                    kind: ExprKind::Member {
+                                        object: Box::new(folded),
+                                        key: MemberKey::Static(pair.to_owned()),
+                                    },
+                                    span,
+                                }),
+                                args: vec![next],
+                            },
+                            span,
+                        };
+                    }
+                    return Ok(Ok(folded));
+                }
+                _ => {
+                    return Err(unsupported(
+                        Boundary::FullJs,
+                        &format!("`Math.{member}`"),
+                        span.offset(),
+                    ));
+                }
+            };
+            self.pending[name.occurrence as usize].folded = true;
+            let mut args = args;
+            let receiver = args.remove(0);
+            Ok(Ok(Expr {
+                kind: ExprKind::Call {
+                    callee: Box::new(Expr {
+                        kind: ExprKind::Member {
+                            object: Box::new(receiver),
+                            key: MemberKey::Static(method.to_owned()),
+                        },
+                        span,
+                    }),
+                    args,
+                },
+                span,
+            }))
+        }
+
         /// `Object.keys(x)` folded to `x.__keys()` and `Array.isArray(x)` to
         /// `x.__is_array()`, or the arguments handed back untouched.
         ///
@@ -2501,6 +2630,24 @@ pub(crate) mod m1 {
                             );
                         };
                         self.advance();
+                        // `Math.PI` and `Math.E` are the two members that
+                        // are values rather than calls, so they fold here,
+                        // where the member is read -- to the literal
+                        // 21.3.1.6 / 21.3.1.1 name. A declared `Math`
+                        // shadows this, as with `Number` and `JSON`.
+                        if let ExprKind::Name(obj) = &expr.kind
+                            && obj.text == MATH
+                            && !declared(&self.options.names, MATH)
+                            && !self.is_declared_in_scope(MATH)
+                            && let Some(value) = math_constant(&name)
+                        {
+                            self.pending[obj.occurrence as usize].folded = true;
+                            expr = Expr {
+                                kind: ExprKind::Num(value),
+                                span,
+                            };
+                            continue;
+                        }
                         expr = Expr {
                             kind: ExprKind::Member {
                                 object: Box::new(expr),
@@ -2557,6 +2704,13 @@ pub(crate) mod m1 {
                         // run-time TypeError rather than a syntax one.
                         self.relabel(&expr, Role::Call);
                         let args = self.arguments()?;
+                        let args = match self.fold_math_call(&expr, args, span)? {
+                            Ok(folded) => {
+                                expr = folded;
+                                continue;
+                            }
+                            Err(args) => args,
+                        };
                         let args = match self.fold_namespace_call(&expr, args, span)? {
                             Ok(folded) => {
                                 expr = folded;
@@ -3285,9 +3439,25 @@ pub(crate) mod m1 {
     const OBJ_KEYS_METHOD: &str = "__keys";
     /// The namespace `Array.isArray(x)` is spelled under.
     const ARRAY: &str = "Array";
+    /// The namespace the `Math` functions and constants are spelled under.
+    /// There is no `Math` object: each member folds at the call site to a
+    /// reserved method the prefab layer gates per name, exactly as
+    /// `Object.keys` does, and the two constants fold to their literals.
+    /// A member this engine's `Math` does not have is refused here, by
+    /// name, rather than resolving `Math` into anything.
+    const MATH: &str = "Math";
     /// The reserved method name `Array.isArray(x)` folds to: `x.__is_array()`,
     /// under the same rule as [`OBJ_KEYS_METHOD`].
     const IS_ARRAY_METHOD: &str = "__is_array";
+
+    /// The value of a `Math` constant member, or `None` for any other name.
+    fn math_constant(name: &str) -> Option<f64> {
+        match name {
+            "PI" => Some(std::f64::consts::PI),
+            "E" => Some(std::f64::consts::E),
+            _ => None,
+        }
+    }
 
     fn declared(names: &Names, name: &str) -> bool {
         match names {

@@ -798,6 +798,11 @@ pub(crate) mod m1 {
                     0
                 },
                 str_cmp: convert_base + convert::Cv::StrCmp.offset(),
+                pow_exponent: if scan.methods.wants(method::Me::MathPow) {
+                    pool.intern("a fractional Math.pow exponent")
+                } else {
+                    0
+                },
             })
         };
 

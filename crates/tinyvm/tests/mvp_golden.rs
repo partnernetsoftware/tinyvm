@@ -656,7 +656,11 @@ fn parse_prd_leaves(prd: &str, marker: &str) -> Vec<String> {
 // `prd/PRD.md`'s acceptance section now writes the command set down, with this
 // package in it, so the next gap is caught by the gate rather than by someone
 // deciding to look.
-const LEAF_TESTS: [(&str, &str); 272] = [
+const LEAF_TESTS: [(&str, &str); 273] = [
+    (
+        "`Math`：floor/ceil/round/trunc/abs/sqrt/sign/pow/min/max + PI/E，逐名折成门控 prefab  2026-08-31；无 `Math` 对象——常量与 0/1 参 min/max 折成字面量零字节；floor 25 步 / 270 B；`int_div` 循环 633k → `Math.trunc(a/b)` 210k 步；缺的成员编译期具名拒绝；pow 的正底分数指数具名拒绝（exp/log 未带）",
+        "the_rounding_functions_answer_the_spec",
+    ),
     (
         "位运算 `&   ^ ~ << >> >>>` 与六个复合赋值：ToInt32 一个 prefab，逐运算符门控  2026-08-31；每个运算符 ~170 B、45 步（2^31 外 65）；`xor16` 手写 16 轮 14.5M → `^` 267k 步（54×）",
         "the_six_operators_on_small_integers",
