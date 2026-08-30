@@ -130,7 +130,7 @@ pub use wasm::{
 #[cfg(not(all(feature = "staticcore", not(feature = "std"))))]
 pub use wasm::{
     ExternReference as WasmExternReference, FunctionReference as WasmFunctionReference,
-    HostMemories as WasmHostMemories,
+    FunctionSite, HostMemories as WasmHostMemories, LoadError,
 };
 
 /// One bytecode instruction.

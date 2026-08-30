@@ -656,7 +656,7 @@ fn parse_prd_leaves(prd: &str, marker: &str) -> Vec<String> {
 // `prd/PRD.md`'s acceptance section now writes the command set down, with this
 // package in it, so the next gap is caught by the gate rather than by someone
 // deciding to look.
-const LEAF_TESTS: [(&str, &str); 260] = [
+const LEAF_TESTS: [(&str, &str); 261] = [
     (
         "`break` / `continue`                           见下方方法段的同名行",
         "break_leaves_the_loop",
@@ -1010,6 +1010,10 @@ const LEAF_TESTS: [(&str, &str); 260] = [
     (
         "`Object.keys(o)`：折成 `o.__keys()`，门控 prefab   208 字节；迁移语料 12 处",
         "keys_come_back_in_insertion_order",
+    ),
+    (
+        "a non-index property write is a named refusal  fault 10, `refused_operations.rs`",
+        "a_refused_write_says_what_was_written",
     ),
     (
         "第三种接收者：调用点原只分「数组 / 否则字符串」  对象接收者曾落进 String 拒绝",

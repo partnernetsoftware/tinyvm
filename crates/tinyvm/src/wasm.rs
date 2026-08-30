@@ -1237,6 +1237,109 @@ pub enum WasmError {
     Trap(&'static str),
 }
 
+/// Which function a module was refused in -- see
+/// [`Module::from_bytes_explained`].
+#[cfg(not(all(feature = "staticcore", not(feature = "std"))))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionSite {
+    /// The function's index in the module's function index space (imports
+    /// first), the number a trap message or a `name` section uses.
+    pub index: u32,
+    /// Its name from the `name` custom section, when the module has one.
+    pub name: Option<String>,
+}
+
+/// A refused module, with where it was refused when that is a function.
+#[cfg(not(all(feature = "staticcore", not(feature = "std"))))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadError {
+    pub error: WasmError,
+    /// `Some` only when validation of a function body is what failed;
+    /// section-level refusals (bad magic, an unsupported section, a limit)
+    /// have no function to name.
+    pub function: Option<FunctionSite>,
+}
+
+#[cfg(not(all(feature = "staticcore", not(feature = "std"))))]
+impl core::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // `WasmError` is deliberately `Display`-free (two `&'static str`
+        // variants a host classifies); here the text is what a person reads.
+        let text = match self.error {
+            WasmError::Decode(text) | WasmError::Trap(text) => text,
+        };
+        match &self.function {
+            Some(FunctionSite {
+                index,
+                name: Some(name),
+            }) => write!(f, "{text} in function `{name}` (#{index})"),
+            Some(FunctionSite { index, name: None }) => {
+                write!(f, "{text} in function #{index}")
+            }
+            None => f.write_str(text),
+        }
+    }
+}
+
+/// The function's name from the module's `name` custom section (the
+/// `function names` subsection, id 1), or `None` when the module has no such
+/// section or does not name that index. Walks the raw bytes on its own so it
+/// can run after the decoder has already refused the module; any
+/// malformation in the custom section answers `None` rather than a second
+/// error, since a custom section carries no semantics.
+#[cfg(not(all(feature = "staticcore", not(feature = "std"))))]
+fn function_name_from_name_section(wasm: &[u8], index: u32) -> Option<String> {
+    if wasm.len() < 8 {
+        return None;
+    }
+    let mut i = 8;
+    while i < wasm.len() {
+        let id = *wasm.get(i)?;
+        i += 1;
+        let (size, ni) = leb_u32(wasm, i).ok()?;
+        i = ni;
+        let end = i.checked_add(size as usize).filter(|&e| e <= wasm.len())?;
+        let payload = &wasm[i..end];
+        i = end;
+        if id != 0 {
+            continue;
+        }
+        let (name_len, off) = leb_u32(payload, 0).ok()?;
+        let name_end = off.checked_add(name_len as usize)?;
+        if payload.get(off..name_end)? != b"name" {
+            continue;
+        }
+        let mut p = name_end;
+        while p < payload.len() {
+            let sub = *payload.get(p)?;
+            p += 1;
+            let (sub_size, np) = leb_u32(payload, p).ok()?;
+            p = np;
+            let sub_end = p
+                .checked_add(sub_size as usize)
+                .filter(|&e| e <= payload.len())?;
+            if sub == 1 {
+                let map = &payload[p..sub_end];
+                let (count, mut q) = leb_u32(map, 0).ok()?;
+                for _ in 0..count {
+                    let (idx, nq) = leb_u32(map, q).ok()?;
+                    let (len, nq) = leb_u32(map, nq).ok()?;
+                    let text_end = nq.checked_add(len as usize)?;
+                    let text = map.get(nq..text_end)?;
+                    if idx == index {
+                        return core::str::from_utf8(text).ok().map(str::to_owned);
+                    }
+                    q = text_end;
+                }
+                return None;
+            }
+            p = sub_end;
+        }
+        return None;
+    }
+    None
+}
+
 struct DecodeBudget {
     remaining: usize,
     /// Resource context for validating decoded standard memory instructions.
@@ -4801,6 +4904,39 @@ impl Module {
     /// Load a module under an explicit host budget. Table `min` is checked
     /// against [`Limits::max_table_elems`] before any table allocation.
     pub fn from_bytes_with(wasm: &[u8], limits: Limits) -> Result<Module, WasmError> {
+        let mut site = None;
+        Self::decode(wasm, limits, &mut site)
+    }
+
+    /// [`from_bytes_with`](Self::from_bytes_with), and when the module is
+    /// refused *while validating a function body*, which body: its function
+    /// index and, when the module carries a `name` custom section, its name.
+    ///
+    /// The plain entry points keep [`WasmError`] -- `Copy`, allocation-free,
+    /// two `&'static str` variants -- because that is what a trap-and-fault
+    /// classification wants. A compiler feeding this decoder wants the
+    /// opposite: "validation: type mismatch" with no location sent an author
+    /// to bisect a 900-line script by hand. So this entry reads the location
+    /// on the way out and hands both back. The `name` section is parsed only
+    /// here and only after a failure: a well-formed module pays nothing.
+    /// Absent from the static core, which has no one to read a name.
+    #[cfg(not(all(feature = "staticcore", not(feature = "std"))))]
+    pub fn from_bytes_explained(wasm: &[u8], limits: Limits) -> Result<Module, LoadError> {
+        let mut site = None;
+        Self::decode(wasm, limits, &mut site).map_err(|error| LoadError {
+            error,
+            function: site.map(|index| FunctionSite {
+                index,
+                name: function_name_from_name_section(wasm, index),
+            }),
+        })
+    }
+
+    // `site` is written only outside the static core (see
+    // `from_bytes_explained`); there it is a dead parameter and costs the
+    // 100 KiB budget nothing -- which the size gate measured, at one 16 KiB
+    // page, when the writes were unconditional.
+    fn decode(wasm: &[u8], limits: Limits, site: &mut Option<u32>) -> Result<Module, WasmError> {
         if wasm.len() < 8 || &wasm[0..4] != b"\0asm" {
             return Err(WasmError::Decode("not a wasm module (bad magic)"));
         }
@@ -5113,7 +5249,15 @@ impl Module {
                 memory_count,
                 declared_refs: &declared_refs,
             };
-            for f in &module.funcs {
+            for (defined, f) in module.funcs.iter().enumerate() {
+                // The function index space starts with the imports, and every
+                // entry of `imports` is a function import (globals, memories
+                // and tables are tracked apart) -- so this is the index a
+                // `name` section and a trap message would both use.
+                #[cfg(not(all(feature = "staticcore", not(feature = "std"))))]
+                {
+                    *site = Some((module.import_descs.len() + defined) as u32);
+                }
                 let ft = f
                     .sig
                     .and_then(|s| module.types.get(s))
@@ -5122,6 +5266,10 @@ impl Module {
                 locals.extend_from_slice(&ft.params);
                 locals.extend(f.locals.iter().map(valtype_of));
                 validate::validate_body(&ctx, &locals, &ft.results, &f.code, &f.branch_targets)?;
+            }
+            #[cfg(not(all(feature = "staticcore", not(feature = "std"))))]
+            {
+                *site = None;
             }
         }
 
