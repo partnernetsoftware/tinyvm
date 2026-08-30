@@ -3006,24 +3006,62 @@ pub(crate) mod m1 {
         /// carry the parent link; distinct `func` values along that chain are
         /// the function nesting.
         fn record_captures(&mut self, resolved: &[Res]) {
-            for (p, res) in self.pending.iter().zip(resolved) {
+            let occurrences: Vec<(usize, Res)> =
+                self.pending.iter().map(|p| p.scope).zip(resolved.iter().cloned()).collect();
+            for (scope, res) in &occurrences {
                 let Res::Captured(id) = res else { continue };
-                let owner = self.bindings[id.0 as usize].func;
                 self.bindings[id.0 as usize].captured = true;
-
-                let mut scope = Some(p.scope);
-                while let Some(at) = scope {
-                    let func = self.scopes[at].func;
-                    if func == owner {
-                        break;
+                self.forward_capture(*scope, *id);
+            }
+            // A call names its callee's environment, and the caller builds
+            // it (`emit`'s `call`): so a function that calls a *capturing*
+            // declared function from below the declaration -- or holds it as
+            // a value there -- has to carry every cell that callee captures,
+            // forwarded up to each owner like any capture of its own. The
+            // callee's list can itself grow on a later pass of this loop
+            // (it may call another declared function), so this runs to a
+            // fixed point. Without it, `function outer(id) { function ask()
+            // { return id; } return { f: function () { return ask(); } }; }`
+            // died in `emit` looking for `id` in `f`'s empty layout.
+            loop {
+                let mut grew = false;
+                for (scope, res) in &occurrences {
+                    let id = match res {
+                        Res::Captured(id) | Res::Callee(id) => *id,
+                        _ => continue,
+                    };
+                    let BindingKind::Function(callee) = self.bindings[id.0 as usize].kind else { continue };
+                    let needed = self.functions[callee.0 as usize].captures.clone();
+                    for cell in needed {
+                        grew |= self.forward_capture(*scope, cell);
                     }
-                    let captures = &mut self.functions[func.0 as usize].captures;
-                    if !captures.contains(id) {
-                        captures.push(*id);
-                    }
-                    scope = self.scopes[at].parent;
+                }
+                if !grew {
+                    break;
                 }
             }
+        }
+
+        /// Add `id` to the capture list of every function from the scope
+        /// `from` up to, and not including, the binding's owner. Answers
+        /// whether any list grew.
+        fn forward_capture(&mut self, from: usize, id: BindingId) -> bool {
+            let owner = self.bindings[id.0 as usize].func;
+            let mut grew = false;
+            let mut scope = Some(from);
+            while let Some(at) = scope {
+                let func = self.scopes[at].func;
+                if func == owner {
+                    break;
+                }
+                let captures = &mut self.functions[func.0 as usize].captures;
+                if !captures.contains(&id) {
+                    captures.push(id);
+                    grew = true;
+                }
+                scope = self.scopes[at].parent;
+            }
+            grew
         }
 
         fn resolve_one(&self, p: &Pending) -> Result<Res, CompileError> {
