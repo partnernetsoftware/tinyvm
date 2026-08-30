@@ -116,3 +116,21 @@ fn a_string_where_a_number_is_declared_names_the_call_and_the_argument() {
     let (ok, fault, _) = run(r#"let n = 2; at(n, n / 4);"#);
     assert!(ok, "{fault:?}");
 }
+
+/// A Number that is not an integer, where the host declared an `I32`, is the
+/// same fault with the same name: the host asked for an `i32` and this
+/// argument is not one. Rounding would hand the host a number no line of the
+/// script wrote, and until 2026-08-30 the refusal was a bare stop.
+#[test]
+fn a_fraction_where_an_i32_is_declared_names_the_call_and_the_argument() {
+    let (ok, fault, detail) = run(r#"at(1.5, 2);"#);
+    assert!(!ok);
+    assert_eq!(fault, Some(GuestFault::HostArgument));
+    assert_eq!(detail.as_deref(), Some("at#1"));
+    let (ok, fault, detail) = run(r#"let n = 2; at(n / 4, 1);"#);
+    assert!(!ok);
+    assert_eq!(fault, Some(GuestFault::HostArgument));
+    assert_eq!(detail.as_deref(), Some("at#1"));
+    let (ok, fault, _) = run(r#"let n = 6; at(n / 2, 1);"#);
+    assert!(ok, "{fault:?}");
+}

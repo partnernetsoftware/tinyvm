@@ -4058,7 +4058,10 @@ pub(crate) mod m1 {
         /// A Number argument for an `I32`/`F64` parameter: one tag test that,
         /// on failure, records `"<host>#<n>"` and the sixth fault code before
         /// the trap; then the payload as f64. Same shape as the String case.
-        fn number_argument(&mut self, slot: u32, position: usize, host: &str) {
+        ///
+        /// Returns the pooled `"<host>#<n>"` so the `I32` arm can name the
+        /// same argument again when the Number is not an integer.
+        fn number_argument(&mut self, slot: u32, position: usize, host: &str) -> i32 {
             is_number(slot, &mut self.f.body);
             self.push(Ins::I32Eqz);
             self.push(Ins::If(BlockType::Empty));
@@ -4068,6 +4071,7 @@ pub(crate) mod m1 {
             self.push(Ins::End);
             self.push(Ins::LocalGet(slot + 1));
             self.push(Ins::F64ReinterpretI64);
+            detail
         }
 
         fn unwrap_args(
@@ -4112,18 +4116,24 @@ pub(crate) mod m1 {
                     // script contains.
                     HostParam::I32 => {
                         let scratch = self.f.local(ValType::F64);
-                        self.number_argument(*slot, position, host);
+                        let detail = self.number_argument(*slot, position, host);
                         self.push(Ins::LocalTee(scratch));
                         self.push(Ins::F64Trunc);
                         self.push(Ins::LocalGet(scratch));
                         self.push(Ins::F64Ne);
                         self.push(Ins::If(BlockType::Empty));
+                        // A fraction is the same fault as a String here: the
+                        // host asked for an `i32` and this argument is not
+                        // one. Named since 2026-08-30; a bare stop before.
+                        runtime::record_host_argument(detail, &mut self.f.body);
                         self.push(Ins::Unreachable);
                         self.push(Ins::End);
                         self.push(Ins::LocalGet(scratch));
                         self.push(Ins::I32TruncF64S);
                     }
-                    HostParam::F64 => self.number_argument(*slot, position, host),
+                    HostParam::F64 => {
+                        self.number_argument(*slot, position, host);
+                    }
                 }
             }
         }
