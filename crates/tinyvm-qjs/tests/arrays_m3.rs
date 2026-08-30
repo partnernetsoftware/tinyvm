@@ -15,7 +15,10 @@
 //! boundary. Each is refused or absent for a reason recorded in
 //! `plan/design-array-milestone.md` §4, and the tests at the bottom pin the
 //! ones that produce a diagnostic so the refusal cannot quietly become a
-//! wrong answer.
+//! wrong answer. (Written at the milestone; the methods, `Array.isArray` and
+//! `for…of` have since landed behind their own gates -- `method.rs`,
+//! `tests/method_conformance.rs`, `tests/for_of_m3.rs` -- and the byte pins
+//! below are what say this file's programs still pay for none of them.)
 
 use tinyvm::{Limits, Val, WasmInstance, WasmModule};
 use tinyvm_qjs::{Boundary, Names, Options, Value, compile_qjs_m1, compile_qjs_m1_with};
@@ -330,9 +333,10 @@ fn two_arrays_are_equal_only_when_they_are_the_same_array() {
 
 #[test]
 fn typeof_an_array_is_object() {
-    // 13.5.3 step 8. There is no `Array.isArray` here, so `typeof` cannot be
-    // read as "not an array" -- worth stating, because that is exactly how a
-    // script ported from a real engine will read it.
+    // 13.5.3 step 8. `typeof` cannot be read as "not an array" -- worth
+    // stating, because that is exactly how a script ported from a real
+    // engine will read it. `Array.isArray` is the question to ask (since
+    // 2026-08-31, tests/method_conformance.rs).
     string("return typeof [];", "object");
     string("return typeof [1, 2];", "object");
 }

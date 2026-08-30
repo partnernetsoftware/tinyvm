@@ -335,6 +335,25 @@ pub(crate) mod m1 {
         StringPool,
     };
 
+    /// Leave "the receiver at `slot` is what this method's prefab takes" as
+    /// one `i32`. The test is per method ([`method::Me::receiver`]); a
+    /// method shared by two receivers admits either and lets the prefab
+    /// dispatch. Never asked for [`method::Recv::Any`], whose call site has
+    /// no test.
+    fn receiver_test(recv: method::Recv, slot: u32, out: &mut Vec<Ins>) {
+        match recv {
+            method::Recv::Str => is_string(slot, out),
+            method::Recv::Arr => is_array(slot, out),
+            method::Recv::Obj => is_object(slot, out),
+            method::Recv::StrOrArr => {
+                is_string(slot, out);
+                is_array(slot, out);
+                out.push(Ins::I32Or);
+            }
+            method::Recv::Any => unreachable!("an any-receiver prefab has no call-site test"),
+        }
+    }
+
     /// The name every compiled script exports, as at M0.
     pub(crate) const ENTRY: &str = super::ENTRY;
     pub(crate) const HOST_MODULE: &str = super::HOST_MODULE;
@@ -760,6 +779,11 @@ pub(crate) mod m1 {
                 array_base: arr_base,
                 case_table,
                 case_runs,
+                comma: if scan.methods.wants(method::Me::Join) {
+                    pool.intern(",")
+                } else {
+                    0
+                },
             })
         };
 
@@ -3900,17 +3924,25 @@ pub(crate) mod m1 {
             self.expr(object)?;
             store_local(recv, &mut self.f.body);
 
+            // A prefab that takes any value -- `Array.isArray` -- has no
+            // property path to fall back to and no tag to test: the call is
+            // the whole lowering.
+            if me.receiver() == method::Recv::Any {
+                load_local(recv, &mut self.f.body);
+                for arg in args {
+                    self.expr(arg)?;
+                }
+                self.push(Ins::Call(base + plan.offset(me)));
+                self.give(result);
+                self.give(recv);
+                return Ok(());
+            }
+
             // The typed path: the prefab, called directly, with no value.
             // Which tag is right depends on the method -- `trim` wants a
             // String, `push` an Array -- so the test lives at the call site
             // per method rather than being one shared check.
-            if me.receiver_is_array() {
-                is_array(recv, &mut self.f.body);
-            } else if me.receiver_is_object() {
-                is_object(recv, &mut self.f.body);
-            } else {
-                is_string(recv, &mut self.f.body);
-            }
+            receiver_test(me.receiver(), recv, &mut self.f.body);
             self.push(Ins::If(BlockType::Empty));
             load_local(recv, &mut self.f.body);
             for arg in args {
@@ -3922,13 +3954,7 @@ pub(crate) mod m1 {
 
             // Everything else: the ordinary property read and indirect call,
             // on the receiver already in hand.
-            if me.receiver_is_array() {
-                is_array(recv, &mut self.f.body);
-            } else if me.receiver_is_object() {
-                is_object(recv, &mut self.f.body);
-            } else {
-                is_string(recv, &mut self.f.body);
-            }
+            receiver_test(me.receiver(), recv, &mut self.f.body);
             self.push(Ins::I32Eqz);
             self.push(Ins::If(BlockType::Empty));
             let uniform = self

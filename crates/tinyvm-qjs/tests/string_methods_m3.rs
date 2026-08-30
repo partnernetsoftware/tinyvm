@@ -303,7 +303,10 @@ fn a_program_that_never_splits_pays_for_neither_split_nor_substr() {
         // window that holds no copy of the needle's first byte (a 128 KiB
         // miss 36 -> 7.2 steps a character, tests/index_of_cost.rs); only
         // programs that call either carry the two windows' worth of code.
-        ("return \"ab\".includes(\"a\");", 10_799), /* +23 on 2026-08-29: `.includes` is a static property read, so the program carries the arm that names a missing String property; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
+        // +221 on 2026-08-31: `includes` (and `indexOf`) carry the Array
+        // arm -- one name, two receivers, one prefab; see
+        // tests/array_methods_m3.rs.
+        ("return \"ab\".includes(\"a\");", 11_020), /* +23 on 2026-08-29: `.includes` is a static property read, so the program carries the arm that names a missing String property; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(n, want, "{source:?} is {n} bytes");

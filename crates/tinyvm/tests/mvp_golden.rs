@@ -656,7 +656,23 @@ fn parse_prd_leaves(prd: &str, marker: &str) -> Vec<String> {
 // `prd/PRD.md`'s acceptance section now writes the command set down, with this
 // package in it, so the next gap is caught by the gate rather than by someone
 // deciding to look.
-const LEAF_TESTS: [(&str, &str); 262] = [
+const LEAF_TESTS: [(&str, &str); 266] = [
+    (
+        "`Array.isArray(x)`：折成 `x.__is_array()`，任意接收者   2026-08-31；59 B；`rh_compat` 曾手写「有数字 length 的对象」",
+        "is_array_answers_the_tag_and_nothing_else",
+    ),
+    (
+        "数组 `indexOf` / `includes`：与 String 同名，一个 prefab 按 tag 分派  2026-08-31；702 / 623 B；未命中 52 / 55 步/元素；String 调用者 +221 B",
+        "array_index_of_and_includes_compare_strictly",
+    ),
+    (
+        "`concat(x[, y])`：数组展开一层，其它原样追加         2026-08-31；569 / 639 B；28 步/元素",
+        "concat_spreads_arrays_and_appends_everything_else",
+    ),
+    (
+        "`join([sep])`：undefined/null 为空，对象元素具名拒绝   2026-08-31；871 / 885 B；两趟一次分配，10 字节元素 236 步/个",
+        "join_writes_every_element_with_the_separator_between",
+    ),
     (
         "`break` / `continue`                           见下方方法段的同名行",
         "break_leaves_the_loop",

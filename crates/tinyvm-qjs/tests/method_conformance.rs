@@ -82,6 +82,11 @@ fn number(source: &str, want: f64) {
     assert_eq!(run(source), Out::Number(want), "{source:?}");
 }
 
+#[track_caller]
+fn boolean(source: &str, want: bool) {
+    assert_eq!(run(source), Out::Bool(want), "{source:?}");
+}
+
 // =========================================================================
 // The four methods, chosen in §2 for what each one forces
 // =========================================================================
@@ -242,6 +247,165 @@ fn map_calls_back_into_a_function_value() {
 }
 
 // =========================================================================
+// The 2026-08-31 batch: what the migrated scripts spelled by hand
+// =========================================================================
+
+/// `Array.isArray(x)` -- ECMA-262 23.1.2.2. `rh_compat.qjs` wrote it as
+/// "an object with a numeric `length`", which an object literal with a
+/// `length` key satisfies; the tag does not lie.
+#[test]
+fn is_array_answers_the_tag_and_nothing_else() {
+    boolean("return Array.isArray([1, 2]);", true);
+    boolean("return Array.isArray([]);", true);
+    boolean("let a = [1]; let b = a; return Array.isArray(b);", true);
+    boolean("return Array.isArray(JSON.parse(\"[1]\"));", true);
+    boolean("return Array.isArray({ length: 1 });", false);
+    boolean("return Array.isArray(\"ab\");", false);
+    boolean("return Array.isArray(undefined);", false);
+    boolean("return Array.isArray(null);", false);
+    boolean("return Array.isArray(3);", false);
+    boolean("return Array.isArray(function () {});", false);
+    // Every value is a receiver here, so a call inside an expression
+    // that could not otherwise be typed still answers.
+    number(
+        "let n = 0; for (const x of [[], 1, [2]]) { if (Array.isArray(x)) { n = n + 1; } } return n;",
+        2.0,
+    );
+    // A script that declares its own `Array` gets its own, as with
+    // `Number`, `Object` and `JSON`.
+    number(
+        "const Array = { isArray: function (x) { return 7; } }; return Array.isArray(1);",
+        7.0,
+    );
+}
+
+/// `a.indexOf(x)` and `a.includes(x)` on an Array -- ECMA-262 23.1.3.17 and
+/// 23.1.3.16. The two differ in one value: `indexOf` compares with
+/// IsStrictlyEqual and never finds `NaN`; `includes` uses SameValueZero and
+/// does. Both share their name with the String method, so the receiver's
+/// tag decides which runs -- and both receivers are exercised in one
+/// program below, which is the case a text-only dispatch would get wrong.
+#[test]
+fn array_index_of_and_includes_compare_strictly() {
+    number("return [1, 2, 3].indexOf(2);", 1.0);
+    number("return [1, 2, 3].indexOf(4);", -1.0);
+    number("return [1, 2, 2].indexOf(2);", 1.0);
+    number("return [].indexOf(1);", -1.0);
+    number("return [\"a\", \"b\"].indexOf(\"b\");", 1.0);
+    number(
+        "let s = \"b\"; return [\"a\", \"b\"].indexOf(s + \"\");",
+        1.0,
+    );
+    // Strict: no coercion across tags.
+    number("return [1, \"1\"].indexOf(\"1\");", 1.0);
+    number("return [true].indexOf(1);", -1.0);
+    number("return [null].indexOf(undefined);", -1.0);
+    number("return [undefined].indexOf(undefined);", 0.0);
+    // Identity for records.
+    number("let o = {}; return [1, o].indexOf(o);", 1.0);
+    number("return [{}].indexOf({});", -1.0);
+    number("let a = [1]; return [a, [1]].indexOf(a);", 0.0);
+    // NaN: never found by indexOf, found by includes.
+    number("let n = 0 / 0; return [n].indexOf(n);", -1.0);
+    boolean("let n = 0 / 0; return [1, n].includes(n);", true);
+    boolean("let n = 0 / 0; return [1, 2].includes(n);", false);
+    boolean("return [1, 2].includes(2);", true);
+    boolean("return [1, 2].includes(3);", false);
+    boolean("return [].includes(undefined);", false);
+    boolean("return [undefined].includes(undefined);", true);
+    boolean("return [\"x\"].includes(\"x\");", true);
+    boolean("return [0].includes(-0);", true);
+    // The String receiver still answers as before, in the same program.
+    number(
+        "let a = [\"b\"]; let s = \"abc\"; return s.indexOf(\"c\") * 10 + a.indexOf(\"b\");",
+        20.0,
+    );
+    boolean(
+        "let a = [\"b\"]; let s = \"abc\"; return s.includes(\"d\") || a.includes(\"b\");",
+        true,
+    );
+    // The receiver is not mutated.
+    number(
+        "let a = [1, 2]; a.indexOf(2); a.includes(1); return a.length;",
+        2.0,
+    );
+}
+
+/// `a.concat(x)` and `a.concat(x, y)` -- ECMA-262 23.1.3.1 without symbols:
+/// an Array argument spreads, anything else is one element.
+#[test]
+fn concat_spreads_arrays_and_appends_everything_else() {
+    number("return [1, 2].concat([3, 4]).length;", 4.0);
+    number("return [1, 2].concat([3, 4])[3];", 4.0);
+    number("return [1].concat(2).length;", 2.0);
+    number("return [1].concat(2)[1];", 2.0);
+    string("return [\"a\"].concat(\"b\")[1];", "b");
+    number("return [].concat([]).length;", 0.0);
+    number("return [].concat([1])[0];", 1.0);
+    // Two arguments, each spread or appended on its own.
+    number("return [1].concat([2], [3]).length;", 3.0);
+    number("return [1].concat([2], [3])[2];", 3.0);
+    number("return [1].concat([2, 3], 4).length;", 4.0);
+    number("return [1].concat([2, 3], 4)[3];", 4.0);
+    // One level only: a nested array is an element.
+    number("return [1].concat([[2, 3]]).length;", 2.0);
+    number("return [1].concat([[2, 3]])[1].length;", 2.0);
+    // `undefined` and `null` are elements too.
+    number("return [1].concat(undefined).length;", 2.0);
+    number("return [1].concat([null, undefined]).length;", 3.0);
+    // A new array: neither operand is touched, and the result is real.
+    number(
+        "let a = [1]; let b = [2]; a.concat(b); return a.length + b.length;",
+        2.0,
+    );
+    number(
+        "let a = [1]; let c = a.concat([2]); c.push(3); return a.length * 10 + c.length;",
+        13.0,
+    );
+    // The demand site: argv from three lists.
+    string(
+        "function argv(base, sel, act) { return base.concat(sel, act).join(\" \"); } return argv([\"--target\", \"x\"], [\"a\"], [\"b\", \"c\"]);",
+        "--target x a b c",
+    );
+}
+
+/// `a.join(sep)` -- ECMA-262 23.1.3.18. `undefined` and `null` elements are
+/// empty (step 7.c); the separator defaults to `","`; every other element
+/// is ToString.
+#[test]
+fn join_writes_every_element_with_the_separator_between() {
+    string("return [1, 2, 3].join(\"-\");", "1-2-3");
+    string("return [\"a\", \"b\"].join();", "a,b");
+    string("return [\"a\", \"b\"].join(undefined);", "a,b");
+    string("return [].join(\"-\");", "");
+    string("return [].join();", "");
+    string("return [1].join(\"-\");", "1");
+    string("return [undefined, null, 1].join(\"|\");", "||1");
+    string("return [null].join(\",\");", "");
+    string("return [1.5, true, false].join(\" \");", "1.5 true false");
+    string("return [\"x\", \"y\"].join(\"\");", "xy");
+    string("return [\"a\", \"b\"].join(1);", "a1b");
+    string("return [\"a\", \"b\"].join(\", \");", "a, b");
+    // Bytes, not characters: multi-byte elements and separators copy whole.
+    string(
+        "return [\"caf\u{e9}\", \"\u{1f600}\"].join(\"\u{2192}\");",
+        "caf\u{e9}\u{2192}\u{1f600}",
+    );
+    // The receiver is untouched, and the answer is an ordinary String.
+    number("let a = [1, 2]; a.join(\"-\"); return a.length;", 2.0);
+    number("return [1, 2].join(\"-\").length;", 3.0);
+    // Built from a loop, which is how a path is spelled.
+    string(
+        "let p = []; for (const s of [\"File\", \"Do Thing\"]) { p.push(s); } return p.join(\"/\");",
+        "File/Do Thing",
+    );
+    // An Object or an Array element has no string form here: the same
+    // named refusal `\"\" + o` raises, never `[object Object]`.
+    assert!(attempt("return [{}].join(\",\");").is_err());
+    assert!(attempt("return [[1]].join(\",\");").is_err());
+}
+
+// =========================================================================
 // What must NOT change, whichever variant wins
 // =========================================================================
 
@@ -276,13 +440,15 @@ fn an_unknown_member_is_still_refused_the_way_its_receiver_refuses_it() {
     ] {
         assert!(attempt(source).is_err(), "{source:?} must still trap");
     }
-    // An Array: reading is `undefined`, calling is the fault.
+    // An Array: reading is `undefined`, calling is the fault. (`join` sat
+    // in this list until 2026-08-31, when it became a method; `splice`
+    // took its seat.)
     undefined("let a = [1]; return a.filter;");
-    undefined("let a = [1]; return a.join;");
+    undefined("let a = [1]; return a.splice;");
     undefined("let a = [1]; return a.forEach;");
     for source in [
         "let a = [1]; return a.filter(x => x);",
-        "let a = [1]; return a.join(\",\");",
+        "let a = [1]; return a.splice(0);",
     ] {
         assert!(attempt(source).is_err(), "{source:?} must still trap");
     }

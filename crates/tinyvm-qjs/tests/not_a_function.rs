@@ -41,7 +41,7 @@ fn an_uncatchable_program_names_the_callee() {
     for (source, name) in [
         (r#"let f = undefined; return f(1);"#, "f"),
         (r#"let o = { a: 1 }; return o.missing(2);"#, "missing"),
-        (r#"let a = [1]; return a.concat([2]).length;"#, "concat"),
+        (r#"let a = [1]; return a.splice(0).length;"#, "splice"),
         (r#"let n = 3; return n();"#, "n"),
         (r#"let o = { f: 7 }; return o.f();"#, "f"),
         (
@@ -63,8 +63,8 @@ fn a_program_that_can_catch_gets_the_type_error() {
             "TypeError: f is not a function",
         ),
         (
-            r#"let a = [1]; try { a.concat([2]); } catch (e) { return e; } return "ran";"#,
-            "TypeError: concat is not a function",
+            r#"let a = [1]; try { a.splice(0); } catch (e) { return e; } return "ran";"#,
+            "TypeError: splice is not a function",
         ),
         (
             r#"let o = { f: 7 }; try { o.f(); } catch (e) { return e; } return "ran";"#,

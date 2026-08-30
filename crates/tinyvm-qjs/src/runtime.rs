@@ -1621,7 +1621,14 @@ fn str_concat(ctx: &Ctx) -> FnBuild {
 /// memory is post-MVP, and this compiler's output has to clear tinyvm's load
 /// gate on MVP terms. The wide loads carry alignment hint 0, which MVP allows
 /// at any address.
-fn copy_loop(b: &mut Vec<Ins>, src: u32, len: u32, dst: u32, shift: Option<u32>, i: u32) {
+pub(crate) fn copy_loop(
+    b: &mut Vec<Ins>,
+    src: u32,
+    len: u32,
+    dst: u32,
+    shift: Option<u32>,
+    i: u32,
+) {
     b.push(Ins::I32Const(0));
     b.push(Ins::LocalSet(i));
     // Whole words: while i + 8 <= len, spelled !(len < i + 8).

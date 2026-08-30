@@ -1472,8 +1472,8 @@ pub(crate) mod m1 {
             }
         }
 
-        /// `Object.keys(x)` folded to `x.__keys()`, or the arguments handed
-        /// back untouched.
+        /// `Object.keys(x)` folded to `x.__keys()` and `Array.isArray(x)` to
+        /// `x.__is_array()`, or the arguments handed back untouched.
         ///
         /// ECMA-262 20.1.2.17 with the own-enumerable-string-keys rule, over
         /// records that hold only such keys -- so "every entry, in insertion
@@ -1485,7 +1485,14 @@ pub(crate) mod m1 {
         /// Twelve sites in the downstream migration corpus want this, all as
         /// `for (const k of Object.keys(o))`. A script that declares its own
         /// `Object` gets its own, as with `Number` and `JSON`.
-        fn fold_object_keys_call(
+        ///
+        /// `Array.isArray` (23.1.2.2) joined on 2026-08-31 under the same
+        /// rule: the downstream `rh_compat.qjs` spelled it by hand as "an
+        /// object with a numeric `length`", which an object literal with a
+        /// `length` key satisfies and an array should. One namespace, one
+        /// member, one reserved method name each; a second table row is the
+        /// whole cost of the second one.
+        fn fold_namespace_call(
             &mut self,
             callee: &Expr,
             args: Vec<Expr>,
@@ -1501,10 +1508,12 @@ pub(crate) mod m1 {
             let ExprKind::Name(name) = &object.kind else {
                 return Ok(Err(args));
             };
-            if name.text != OBJECT || member != "keys" {
-                return Ok(Err(args));
-            }
-            if declared(&self.options.names, OBJECT) || self.is_declared_in_scope(OBJECT) {
+            let (namespace, method) = match (name.text.as_str(), member.as_str()) {
+                (OBJECT, "keys") => (OBJECT, OBJ_KEYS_METHOD),
+                (ARRAY, "isArray") => (ARRAY, IS_ARRAY_METHOD),
+                _ => return Ok(Err(args)),
+            };
+            if declared(&self.options.names, namespace) || self.is_declared_in_scope(namespace) {
                 return Ok(Err(args));
             }
             let mut args = args;
@@ -1512,7 +1521,7 @@ pub(crate) mod m1 {
                 return Err(unsupported(
                     Boundary::FullJs,
                     &format!(
-                        "`Object.keys` called with {} arguments; it takes one",
+                        "`{namespace}.{member}` called with {} arguments; it takes one",
                         args.len()
                     ),
                     span.offset(),
@@ -1525,7 +1534,7 @@ pub(crate) mod m1 {
                     callee: Box::new(Expr {
                         kind: ExprKind::Member {
                             object: Box::new(receiver),
-                            key: MemberKey::Static(OBJ_KEYS_METHOD.to_owned()),
+                            key: MemberKey::Static(method.to_owned()),
                         },
                         span,
                     }),
@@ -2534,7 +2543,7 @@ pub(crate) mod m1 {
                         // run-time TypeError rather than a syntax one.
                         self.relabel(&expr, Role::Call);
                         let args = self.arguments()?;
-                        let args = match self.fold_object_keys_call(&expr, args, span)? {
+                        let args = match self.fold_namespace_call(&expr, args, span)? {
                             Ok(folded) => {
                                 expr = folded;
                                 continue;
@@ -3260,6 +3269,11 @@ pub(crate) mod m1 {
     /// leading underscores because no script writes one -- the lexer accepts
     /// it, the method table recognises it, and nothing else does.
     const OBJ_KEYS_METHOD: &str = "__keys";
+    /// The namespace `Array.isArray(x)` is spelled under.
+    const ARRAY: &str = "Array";
+    /// The reserved method name `Array.isArray(x)` folds to: `x.__is_array()`,
+    /// under the same rule as [`OBJ_KEYS_METHOD`].
+    const IS_ARRAY_METHOD: &str = "__is_array";
 
     fn declared(names: &Names, name: &str) -> bool {
         match names {

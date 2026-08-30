@@ -20,16 +20,16 @@
 //! by charging every unrelated function value instead.
 
 use super::repr::{
-    self, BlockType, Ins, ValType, WIDTH, box_number, box_string, unbox_array, unbox_number,
-    unbox_string,
+    self, BlockType, Ins, TAG_NULL, TAG_NUMBER, TAG_UNDEFINED, ValType, WIDTH, box_number,
+    box_string, unbox_array, unbox_number, unbox_string,
 };
 // `map`'s prefab is the one function that builds an array and calls back into
 // a function value; `box_function` is variant A's and B's property read.
 use super::array::{ARR_ELEMS, ARR_LEN, Ar, ELEM_BYTES, ELEM_PAYLOAD, ELEM_TAG};
-use super::repr::{box_array, const_bool, const_undefined, unbox_object};
+use super::repr::{box_array, box_bool, const_bool, const_undefined, unbox_object};
 use super::runtime::{
     ALIGN_WORD, ENTRY_BYTES, ENTRY_KEY, FAULT_CAPABILITY, FN_ELEMENT, FN_ENV, FnBuild, OBJ_ENTRIES,
-    OBJ_LEN, RefusalNames, Rt, RtFunc, record_named_fault,
+    OBJ_LEN, RefusalNames, Rt, RtFunc, copy_loop, record_named_fault,
 };
 
 /// Where this set sits, and where the unconditional runtime sits. The same
@@ -71,6 +71,10 @@ pub(crate) struct Ctx {
     /// reads it then.
     pub(crate) case_table: i32,
     pub(crate) case_runs: u32,
+    /// The interned `","` that `a.join()` and `a.join(undefined)` separate
+    /// with (ECMA-262 23.1.3.18 step 3). Zero when the plan does not carry
+    /// [`Me::Join`]; nothing reads it then.
+    pub(crate) comma: i32,
 }
 
 impl Ctx {
@@ -171,6 +175,26 @@ pub(crate) enum Me {
     /// deleted. Re-measuring after that fix is what §2.6 of the skill demands
     /// before judging a variant -- and it changed C's number by 4x.
     MapBound,
+    /// `Array.isArray(x)` -- ECMA-262 23.1.2.2, arriving as `x.__is_array()`
+    /// from the parser's fold (the `Object.keys` route). One tag test; the
+    /// receiver is *any* value, so the call site does not dispatch at all.
+    IsArray,
+    /// `a.concat(x)` -- ECMA-262 23.1.3.1 with one argument and no symbols:
+    /// a new array of the receiver's elements followed by `x`'s if `x` is an
+    /// array, or by `x` itself if it is not. The downstream `cu-macos-smoke`
+    /// built its argv by hand for want of it.
+    Concat,
+    /// `a.concat(x, y)`: the two-argument form, [`Me::Concat`] twice. Its
+    /// own variant because arity is part of what a call site denotes.
+    Concat2,
+    /// `a.join(sep)` -- ECMA-262 23.1.3.18. `undefined` and `null` elements
+    /// are empty (step 7.c); every other element goes through ToString, so
+    /// an Object or an Array element is the same named refusal `"" + o` is
+    /// -- never a fabricated `[object Object]`.
+    Join,
+    /// `a.join()`: the separator defaults to `","`. Three instructions
+    /// around [`Me::Join`].
+    JoinDefault,
 }
 
 /// Every function this variant can emit, in module order. **Not** what a
@@ -198,6 +222,11 @@ pub(crate) const SET: &[Me] = &[
     Me::Push,
     Me::Pop,
     Me::MapBound,
+    Me::IsArray,
+    Me::Concat,
+    Me::Concat2,
+    Me::Join,
+    Me::JoinDefault,
 ];
 
 /// Which of [`SET`] a particular module carries, and where each one lands.
@@ -294,6 +323,11 @@ impl Me {
             Me::Push => "__m_push",
             Me::Pop => "__m_pop",
             Me::MapBound => "__m_map_bound",
+            Me::IsArray => "__m_is_array",
+            Me::Concat => "__m_concat",
+            Me::Concat2 => "__m_concat2",
+            Me::Join => "__m_join",
+            Me::JoinDefault => "__m_join_default",
         }
     }
 
@@ -318,6 +352,11 @@ impl Me {
             ("push", 1) => Some(Me::Push),
             ("pop", 0) => Some(Me::Pop),
             ("map", 1) => Some(Me::MapBound),
+            ("__is_array", 0) => Some(Me::IsArray),
+            ("concat", 1) => Some(Me::Concat),
+            ("concat", 2) => Some(Me::Concat2),
+            ("join", 1) => Some(Me::Join),
+            ("join", 0) => Some(Me::JoinDefault),
             _ => None,
         }
     }
@@ -326,22 +365,54 @@ impl Me {
     /// methods, two receivers -- so the call site's type test is per method,
     /// not one shared test. Small, but it is the call site that carries it,
     /// which is the shape criterion ⑥ is collecting.
-    pub(crate) fn receiver_is_array(self) -> bool {
-        matches!(self, Me::Push | Me::Pop | Me::MapBound)
-    }
-
-    /// Whether the receiver is an Object record. The third receiver kind: the
-    /// call site used to test "array, else string", which sent an object
+    ///
+    /// The third receiver kind ([`Recv::Obj`]) arrived with `Object.keys`:
+    /// the call site used to test "array, else string", which sent an object
     /// receiver down the property path and into the String refusal --
-    /// `Object.keys({})` trapped on its first day for exactly that.
-    pub(crate) fn receiver_is_object(self) -> bool {
-        matches!(self, Me::ObjKeys)
+    /// `Object.keys({})` trapped on its first day for exactly that. The
+    /// fourth ([`Recv::StrOrArr`]) arrived with array `indexOf` /
+    /// `includes`: one name, two receivers, and the text cannot tell them
+    /// apart, so the prefab dispatches on the tag itself and the call site
+    /// admits either. The fifth ([`Recv::Any`]) is `Array.isArray`, whose
+    /// whole job is the tag test.
+    pub(crate) fn receiver(self) -> Recv {
+        match self {
+            Me::Push
+            | Me::Pop
+            | Me::MapBound
+            | Me::Concat
+            | Me::Concat2
+            | Me::Join
+            | Me::JoinDefault => Recv::Arr,
+            Me::ObjKeys => Recv::Obj,
+            Me::IndexOf | Me::Includes => Recv::StrOrArr,
+            Me::IsArray => Recv::Any,
+            Me::Trim
+            | Me::StartsWith
+            | Me::EndsWith
+            | Me::Split
+            | Me::ToLowerCase
+            | Me::Slice
+            | Me::SliceFrom
+            | Me::Replace
+            | Me::ReplaceAll => Recv::Str,
+            Me::WsWidth
+            | Me::Units
+            | Me::Substr
+            | Me::Decode
+            | Me::Encode
+            | Me::LowerCp
+            | Me::SliceCore => unreachable!("a helper is never a call site"),
+        }
     }
 
     /// Whether this method's body reaches into the array set, which the
     /// *array* gate controls. See [`Ctx::array_base`].
     pub(crate) fn needs_arrays(self) -> bool {
-        matches!(self, Me::Push | Me::MapBound | Me::Split | Me::ObjKeys)
+        matches!(
+            self,
+            Me::Push | Me::MapBound | Me::Split | Me::ObjKeys | Me::Concat
+        )
     }
 
     /// What this method's body calls, so [`Plan`] can pull them in.
@@ -362,8 +433,28 @@ impl Me {
             Me::Decode | Me::Encode | Me::LowerCp => Vec::new(),
             Me::Replace | Me::ReplaceAll | Me::ObjKeys => Vec::new(),
             Me::WsWidth | Me::Units | Me::Push | Me::Pop | Me::MapBound => Vec::new(),
+            Me::IsArray | Me::Concat => Vec::new(),
+            Me::Concat2 => vec![Me::Concat],
+            // `Substr` for the empty answer `[].join()` gives: a fresh
+            // zero-length record rather than a second interned "".
+            Me::Join => vec![Me::Substr],
+            Me::JoinDefault => vec![Me::Join, Me::Substr],
         }
     }
+}
+
+/// What a call site must see in the receiver before it calls the prefab
+/// directly; anything else is the ordinary property read and indirect call.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Recv {
+    Str,
+    Arr,
+    Obj,
+    /// A String or an Array: the prefab tests the tag again and takes the
+    /// arm the receiver wants.
+    StrOrArr,
+    /// No test at all: the prefab is the answer for every value.
+    Any,
 }
 
 pub(crate) fn build(ctx: &Ctx) -> Vec<RtFunc> {
@@ -381,7 +472,7 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
         Me::Units => (vec![i32_, i32_], vec![i32_], units()),
         Me::Trim => (values(1), values(1), trim(ctx)),
         Me::IndexOf => (values(2), values(1), index_of(ctx)),
-        Me::Includes => (values(2), values(1), includes()),
+        Me::Includes => (values(2), values(1), includes(ctx)),
         Me::StartsWith => (values(2), values(1), affix(Affix::Start)),
         Me::EndsWith => (values(2), values(1), affix(Affix::End)),
         Me::Substr => (
@@ -411,6 +502,11 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
         Me::Push => (values(2), values(1), push(ctx)),
         Me::Pop => (values(1), values(1), pop()),
         Me::MapBound => (values(2), values(1), map_bound(ctx)),
+        Me::IsArray => (values(1), values(1), is_array_prefab()),
+        Me::Concat => (values(2), values(1), concat(ctx)),
+        Me::Concat2 => (values(3), values(1), concat2(ctx)),
+        Me::Join => (values(2), values(1), join(ctx)),
+        Me::JoinDefault => (values(1), values(1), join_default(ctx)),
     };
     RtFunc {
         name: me.symbol(),
@@ -888,6 +984,7 @@ fn index_of(ctx: &Ctx) -> FnBuild {
     let p = f.local(ValType::I32);
     let w = f.local(ValType::I32);
 
+    array_search(ctx, &mut f, Found::Index);
     unbox_string(0, &mut f.body);
     f.body.push(Ins::LocalSet(h));
     unbox_string(WIDTH, &mut f.body);
@@ -1025,7 +1122,7 @@ enum Affix {
 ///
 /// Compare `.length`, where the same reasoning does **not** apply: a count of
 /// characters is not a count of bytes, which is why that one decodes.
-fn includes() -> FnBuild {
+fn includes(ctx: &Ctx) -> FnBuild {
     let mut f = FnBuild::new(2 * WIDTH);
     let h = f.local(ValType::I32);
     let nd = f.local(ValType::I32);
@@ -1037,6 +1134,7 @@ fn includes() -> FnBuild {
     let p = f.local(ValType::I32);
     let w = f.local(ValType::I32);
 
+    array_search(ctx, &mut f, Found::Bool);
     unbox_string(0, &mut f.body);
     f.body.push(Ins::LocalSet(h));
     unbox_string(WIDTH, &mut f.body);
@@ -2592,6 +2690,568 @@ fn map_bound(ctx: &Ctx) -> FnBuild {
     let mut boxed = Vec::new();
     box_array(&inner, &mut boxed);
     f.body.extend(boxed);
+    f
+}
+
+/// What an array search answers: `indexOf`'s position or `includes`'s yes.
+#[derive(Clone, Copy, PartialEq)]
+enum Found {
+    Index,
+    Bool,
+}
+
+/// The Array arm of `indexOf` (ECMA-262 23.1.3.17) and `includes`
+/// (23.1.3.16), emitted at the top of the String body: when the receiver's
+/// tag is `TAG_ARRAY` the elements are searched and the function returns
+/// here; otherwise nothing happened and the String body follows.
+///
+/// One name, two receivers, and the text at the call site cannot tell them
+/// apart -- `x.indexOf(y)` is a String method or an Array one depending on
+/// what `x` holds at run time. So this is one prefab with a tag test rather
+/// than two prefabs and a third call-site arm: the call site admits either
+/// tag ([`Recv::StrOrArr`]) and the dispatch happens once, here. A program
+/// that calls `indexOf` only on Strings pays this arm's bytes; that is the
+/// price of the name being shared, and it is recorded in the pin ledger.
+///
+/// Elements are compared as 7.2.16 IsStrictlyEqual compares V1 pairs --
+/// same tag, then a Number by value, a String by bytes (`__str_eq`), and
+/// every other tag by payload -- inlined rather than through `__strict_eq`,
+/// because the call was the whole price: 58 steps an element with it, 20
+/// without, on a miss over Numbers. `indexOf` stops there (23.1.3.17 uses
+/// IsStrictlyEqual, so `NaN` is never found); `includes` uses SameValueZero
+/// (23.1.3.16), which differs in exactly one case -- `NaN` finds `NaN` -- and
+/// that case is one extra test per element only when the needle *is* `NaN`.
+///
+/// `fromIndex` is not taken: neither call site in the demand corpus passes
+/// one, and an arity that is not specialised is the ordinary property path.
+fn array_search(ctx: &Ctx, f: &mut FnBuild, found: Found) {
+    let a = f.local(ValType::I32);
+    let n = f.local(ValType::I32);
+    let elems = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+    let e = f.local(ValType::I32);
+    let nan = f.local(ValType::I32);
+    let hit = f.local(ValType::I32);
+    let nt = f.local(ValType::I32);
+    let b = &mut f.body;
+
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Const(repr::TAG_ARRAY));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(1));
+    b.push(Ins::I32WrapI64);
+    b.push(Ins::LocalSet(a));
+    b.push(Ins::LocalGet(a));
+    b.push(Ins::I32Load(ALIGN_WORD, ARR_LEN));
+    b.push(Ins::LocalSet(n));
+    b.push(Ins::LocalGet(a));
+    b.push(Ins::I32Load(ALIGN_WORD, ARR_ELEMS));
+    b.push(Ins::LocalSet(elems));
+    b.push(Ins::LocalGet(WIDTH));
+    b.push(Ins::LocalSet(nt));
+
+    // SameValueZero's one difference: a NaN needle. Decided once, before
+    // the loop, so a search for anything else pays one test in total.
+    if found == Found::Bool {
+        b.push(Ins::LocalGet(WIDTH));
+        b.push(Ins::I32Const(TAG_NUMBER));
+        b.push(Ins::I32Eq);
+        b.push(Ins::If(BlockType::Empty));
+        b.push(Ins::LocalGet(WIDTH + 1));
+        b.push(Ins::F64ReinterpretI64);
+        b.push(Ins::LocalGet(WIDTH + 1));
+        b.push(Ins::F64ReinterpretI64);
+        b.push(Ins::F64Ne);
+        b.push(Ins::LocalSet(nan));
+        b.push(Ins::End);
+    }
+
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(elems));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(ELEM_BYTES));
+    b.push(Ins::I32Mul);
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(e));
+    // IsStrictlyEqual, inline: nothing matches across tags, and within
+    // one the payload's meaning decides. Three `if`s over the needle's tag
+    // rather than an if/else chain -- this instruction set has no `else`
+    // -- and the tag test first, so an element of another tag costs one
+    // comparison.
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(hit));
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::I32Load(ALIGN_WORD, ELEM_TAG));
+    b.push(Ins::LocalGet(nt));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(nt));
+    b.push(Ins::I32Const(TAG_NUMBER));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::I64Load(ALIGN_WORD, ELEM_PAYLOAD));
+    b.push(Ins::F64ReinterpretI64);
+    b.push(Ins::LocalGet(WIDTH + 1));
+    b.push(Ins::F64ReinterpretI64);
+    b.push(Ins::F64Eq);
+    b.push(Ins::LocalSet(hit));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(nt));
+    b.push(Ins::I32Const(repr::TAG_STRING));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::I64Load(ALIGN_WORD, ELEM_PAYLOAD));
+    b.push(Ins::I32WrapI64);
+    b.push(Ins::LocalGet(WIDTH + 1));
+    b.push(Ins::I32WrapI64);
+    b.push(ctx.rt(Rt::StrEq));
+    b.push(Ins::LocalSet(hit));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(nt));
+    b.push(Ins::I32Const(TAG_NUMBER));
+    b.push(Ins::I32Ne);
+    b.push(Ins::LocalGet(nt));
+    b.push(Ins::I32Const(repr::TAG_STRING));
+    b.push(Ins::I32Ne);
+    b.push(Ins::I32And);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::I64Load(ALIGN_WORD, ELEM_PAYLOAD));
+    b.push(Ins::LocalGet(WIDTH + 1));
+    b.push(Ins::I64Eq);
+    b.push(Ins::LocalSet(hit));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    if found == Found::Bool {
+        b.push(Ins::LocalGet(nan));
+        b.push(Ins::If(BlockType::Empty));
+        b.push(Ins::LocalGet(e));
+        b.push(Ins::I32Load(ALIGN_WORD, ELEM_TAG));
+        b.push(Ins::I32Const(TAG_NUMBER));
+        b.push(Ins::I32Eq);
+        b.push(Ins::If(BlockType::Empty));
+        b.push(Ins::LocalGet(e));
+        b.push(Ins::I64Load(ALIGN_WORD, ELEM_PAYLOAD));
+        b.push(Ins::F64ReinterpretI64);
+        b.push(Ins::LocalGet(e));
+        b.push(Ins::I64Load(ALIGN_WORD, ELEM_PAYLOAD));
+        b.push(Ins::F64ReinterpretI64);
+        b.push(Ins::F64Ne);
+        b.push(Ins::LocalGet(hit));
+        b.push(Ins::I32Or);
+        b.push(Ins::LocalSet(hit));
+        b.push(Ins::End);
+        b.push(Ins::End);
+    }
+    b.push(Ins::LocalGet(hit));
+    b.push(Ins::If(BlockType::Empty));
+    match found {
+        Found::Index => {
+            let inner = vec![Ins::LocalGet(i), Ins::F64ConvertI32S];
+            let mut boxed = Vec::new();
+            box_number(&inner, &mut boxed);
+            b.extend(boxed);
+        }
+        Found::Bool => const_bool(true, b),
+    }
+    b.push(Ins::Return);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    match found {
+        Found::Index => number_const(b, -1),
+        Found::Bool => const_bool(false, b),
+    }
+    b.push(Ins::Return);
+    b.push(Ins::End);
+}
+
+/// `Array.isArray(x)` -- ECMA-262 23.1.2.2, as `x.__is_array()`.
+///
+/// The tag *is* the answer: this engine has exactly one array
+/// representation and no proxies, so 7.2.2's other steps have nothing to
+/// look at. Takes any value, which is why the call site does not test the
+/// receiver first ([`Recv::Any`]).
+fn is_array_prefab() -> FnBuild {
+    let mut f = FnBuild::new(WIDTH);
+    let inner = vec![Ins::LocalGet(0), Ins::I32Const(repr::TAG_ARRAY), Ins::I32Eq];
+    let mut out = Vec::new();
+    box_bool(&inner, &mut out);
+    f.body.extend(out);
+    f
+}
+
+/// `a.concat(x)` -- ECMA-262 23.1.3.1 with one argument.
+///
+/// Step 5's IsConcatSpreadable is the tag test: an Array argument
+/// contributes its elements, anything else contributes itself. The new
+/// array is built at its final size, so nothing grows; the elements are
+/// copied as V1 pairs, which is what "shallow" means here -- a nested
+/// array or object is shared, not cloned, exactly as the spec's `Set`
+/// shares the value.
+fn concat(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH);
+    let a = f.local(ValType::I32);
+    let n = f.local(ValType::I32);
+    let m = f.local(ValType::I32);
+    let src = f.local(ValType::I32);
+    let out = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+    let e = f.local(ValType::I32);
+    let dst = f.local(ValType::I32);
+
+    unbox_array(0, &mut f.body);
+    f.body.push(Ins::LocalSet(a));
+
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(a));
+    b.push(Ins::I32Load(ALIGN_WORD, ARR_LEN));
+    b.push(Ins::LocalSet(n));
+    // How many the argument contributes: its length when it is an array,
+    // one otherwise. Decided once so the allocation is exact.
+    b.push(Ins::I32Const(1));
+    b.push(Ins::LocalSet(m));
+    b.push(Ins::LocalGet(WIDTH));
+    b.push(Ins::I32Const(repr::TAG_ARRAY));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(WIDTH + 1));
+    b.push(Ins::I32WrapI64);
+    b.push(Ins::LocalTee(src));
+    b.push(Ins::I32Load(ALIGN_WORD, ARR_LEN));
+    b.push(Ins::LocalSet(m));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::LocalGet(m));
+    b.push(Ins::I32Add);
+    b.push(ctx.arr(Ar::New));
+    b.push(Ins::LocalSet(out));
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::I32Load(ALIGN_WORD, ARR_ELEMS));
+    b.push(Ins::LocalSet(dst));
+
+    // The receiver's elements, then the argument's -- the same loop over
+    // two vectors, written once and run twice. Stored straight into the
+    // vector rather than through `__arr_push`: the capacity is exact, so
+    // the grow test the push would run is dead, and the call was half the
+    // price (53 -> 24 steps an element). The length is written once, at
+    // the end.
+    for (vector, count) in [(a, n), (src, m)] {
+        if vector == src {
+            b.push(Ins::LocalGet(WIDTH));
+            b.push(Ins::I32Const(repr::TAG_ARRAY));
+            b.push(Ins::I32Eq);
+            b.push(Ins::If(BlockType::Empty));
+        }
+        b.push(Ins::I32Const(0));
+        b.push(Ins::LocalSet(i));
+        b.push(Ins::Block(BlockType::Empty));
+        b.push(Ins::Loop(BlockType::Empty));
+        b.push(Ins::LocalGet(i));
+        b.push(Ins::LocalGet(count));
+        b.push(Ins::I32GeU);
+        b.push(Ins::BrIf(1));
+        b.push(Ins::LocalGet(vector));
+        b.push(Ins::I32Load(ALIGN_WORD, ARR_ELEMS));
+        b.push(Ins::LocalGet(i));
+        b.push(Ins::I32Const(ELEM_BYTES));
+        b.push(Ins::I32Mul);
+        b.push(Ins::I32Add);
+        b.push(Ins::LocalSet(e));
+        b.push(Ins::LocalGet(dst));
+        b.push(Ins::LocalGet(e));
+        b.push(Ins::I32Load(ALIGN_WORD, ELEM_TAG));
+        b.push(Ins::I32Store(ALIGN_WORD, ELEM_TAG));
+        b.push(Ins::LocalGet(dst));
+        b.push(Ins::LocalGet(e));
+        b.push(Ins::I64Load(ALIGN_WORD, ELEM_PAYLOAD));
+        b.push(Ins::I64Store(ALIGN_WORD, ELEM_PAYLOAD));
+        b.push(Ins::LocalGet(dst));
+        b.push(Ins::I32Const(ELEM_BYTES));
+        b.push(Ins::I32Add);
+        b.push(Ins::LocalSet(dst));
+        b.push(Ins::LocalGet(i));
+        b.push(Ins::I32Const(1));
+        b.push(Ins::I32Add);
+        b.push(Ins::LocalSet(i));
+        b.push(Ins::Br(0));
+        b.push(Ins::End);
+        b.push(Ins::End);
+        if vector == src {
+            b.push(Ins::End);
+        }
+    }
+    // A non-array argument is one element, itself.
+    b.push(Ins::LocalGet(WIDTH));
+    b.push(Ins::I32Const(repr::TAG_ARRAY));
+    b.push(Ins::I32Ne);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(dst));
+    b.push(Ins::LocalGet(WIDTH));
+    b.push(Ins::I32Store(ALIGN_WORD, ELEM_TAG));
+    b.push(Ins::LocalGet(dst));
+    b.push(Ins::LocalGet(WIDTH + 1));
+    b.push(Ins::I64Store(ALIGN_WORD, ELEM_PAYLOAD));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::LocalGet(m));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Store(ALIGN_WORD, ARR_LEN));
+
+    let inner = vec![Ins::LocalGet(out)];
+    let mut boxed = Vec::new();
+    box_array(&inner, &mut boxed);
+    f.body.extend(boxed);
+    f
+}
+
+/// `a.concat(x, y)`: `a.concat(x).concat(y)`, which is what 23.1.3.1's loop
+/// over the argument list amounts to. The intermediate array is left to the
+/// heap, as every intermediate is.
+fn concat2(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(3 * WIDTH);
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::LocalGet(1));
+    b.push(Ins::LocalGet(WIDTH));
+    b.push(Ins::LocalGet(WIDTH + 1));
+    b.push(ctx.me(Me::Concat));
+    b.push(Ins::LocalGet(2 * WIDTH));
+    b.push(Ins::LocalGet(2 * WIDTH + 1));
+    b.push(ctx.me(Me::Concat));
+    f
+}
+
+/// Copy the `n`-byte body of the string record at `src` into the record at
+/// `dst` from body offset `at`, and leave `at + n` in `at`. The copy is
+/// `__str_concat`'s own word loop.
+fn copy_body(b: &mut Vec<Ins>, dst: u32, at: u32, src: u32, n: u32, k: u32) {
+    copy_loop(b, src, n, dst, Some(at), k);
+    b.push(Ins::LocalGet(at));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(at));
+}
+
+/// `a.join(sep)` -- ECMA-262 23.1.3.18.
+///
+/// Two passes, so the answer is built once at its exact size rather than
+/// by repeated concatenation (quadratic in bytes on a heap that never
+/// frees). The first pass converts every element -- `undefined` and `null`
+/// to nothing (step 7.c), everything else through `__to_string`, whose
+/// refusal of an Object or an Array is the same named fault `"" + o`
+/// raises -- and parks the record pointers in a scratch word vector while
+/// summing their lengths; the second copies them out with the separator
+/// between. The scratch vector is `4n` bytes and is left to the heap.
+///
+/// A separator that is not a String goes through ToString (step 3-4);
+/// `undefined` is the one value that means "use a comma" rather than
+/// "spell me", and [`Me::JoinDefault`] is how a call with no argument
+/// reaches that.
+fn join(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH);
+    let a = f.local(ValType::I32);
+    let n = f.local(ValType::I32);
+    let elems = f.local(ValType::I32);
+    let sep = f.local(ValType::I32);
+    let sl = f.local(ValType::I32);
+    let ptrs = f.local(ValType::I32);
+    let total = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+    let e = f.local(ValType::I32);
+    let piece = f.local(ValType::I32);
+    let pl = f.local(ValType::I32);
+    let out = f.local(ValType::I32);
+    let at = f.local(ValType::I32);
+    let k = f.local(ValType::I32);
+
+    unbox_array(0, &mut f.body);
+    f.body.push(Ins::LocalSet(a));
+
+    let b = &mut f.body;
+    // The separator: a comma for `undefined`, ToString otherwise.
+    b.push(Ins::LocalGet(WIDTH));
+    b.push(Ins::I32Const(TAG_UNDEFINED));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(ctx.comma));
+    b.push(Ins::LocalSet(sep));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(WIDTH));
+    b.push(Ins::I32Const(TAG_UNDEFINED));
+    b.push(Ins::I32Ne);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(WIDTH));
+    b.push(Ins::LocalGet(WIDTH + 1));
+    b.push(ctx.rt(Rt::ToStr));
+    b.push(Ins::LocalSet(sep));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(sep));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalSet(sl));
+
+    b.push(Ins::LocalGet(a));
+    b.push(Ins::I32Load(ALIGN_WORD, ARR_LEN));
+    b.push(Ins::LocalSet(n));
+    b.push(Ins::LocalGet(a));
+    b.push(Ins::I32Load(ALIGN_WORD, ARR_ELEMS));
+    b.push(Ins::LocalSet(elems));
+
+    // Step 6: an empty array joins to the empty String.
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    let empty = vec![
+        Ins::I32Const(0),
+        Ins::I32Const(0),
+        Ins::I32Const(0),
+        ctx.me(Me::Substr),
+    ];
+    let mut boxed = Vec::new();
+    box_string(&empty, &mut boxed);
+    b.extend(boxed);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    // Pass one: convert, park, and measure.
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32Mul);
+    b.push(ctx.rt(Rt::Alloc));
+    b.push(Ins::LocalSet(ptrs));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Sub);
+    b.push(Ins::LocalGet(sl));
+    b.push(Ins::I32Mul);
+    b.push(Ins::LocalSet(total));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(elems));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(ELEM_BYTES));
+    b.push(Ins::I32Mul);
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(e));
+    // A zero pointer stands for "nothing": undefined and null (step 7.c).
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(piece));
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::I32Load(ALIGN_WORD, ELEM_TAG));
+    b.push(Ins::I32Const(TAG_UNDEFINED));
+    b.push(Ins::I32Ne);
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::I32Load(ALIGN_WORD, ELEM_TAG));
+    b.push(Ins::I32Const(TAG_NULL));
+    b.push(Ins::I32Ne);
+    b.push(Ins::I32And);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::I32Load(ALIGN_WORD, ELEM_TAG));
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::I64Load(ALIGN_WORD, ELEM_PAYLOAD));
+    b.push(ctx.rt(Rt::ToStr));
+    b.push(Ins::LocalTee(piece));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalGet(total));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(total));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(ptrs));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32Mul);
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(piece));
+    b.push(Ins::I32Store(ALIGN_WORD, 0));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    // Pass two: one allocation, then the bytes in order.
+    b.push(Ins::LocalGet(total));
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32Add);
+    b.push(ctx.rt(Rt::Alloc));
+    b.push(Ins::LocalSet(out));
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(total));
+    b.push(Ins::I32Store(ALIGN_WORD, 0));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(at));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::If(BlockType::Empty));
+    copy_body(b, out, at, sep, sl, k);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(ptrs));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32Mul);
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalTee(piece));
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(piece));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalSet(pl));
+    copy_body(b, out, at, piece, pl, k);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    let inner = vec![Ins::LocalGet(out)];
+    let mut boxed = Vec::new();
+    box_string(&inner, &mut boxed);
+    f.body.extend(boxed);
+    f
+}
+
+/// `a.join()`: [`Me::Join`] with `undefined`, which it reads as the comma.
+fn join_default(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(WIDTH);
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::LocalGet(1));
+    const_undefined(b);
+    b.push(ctx.me(Me::Join));
     f
 }
 
