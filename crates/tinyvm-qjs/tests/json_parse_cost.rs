@@ -102,3 +102,86 @@ fn plain_ascii_strings_are_copied_in_runs() {
         "a plain string byte cost {per_byte} steps; it was ~119"
     );
 }
+
+fn lit(text: &str) -> String {
+    let mut s = String::from("\"");
+    for ch in text.chars() {
+        match ch {
+            '"' => s.push_str("\\\""),
+            '\\' => s.push_str("\\\\"),
+            '\n' => s.push_str("\\n"),
+            '\t' => s.push_str("\\t"),
+            c => s.push(c),
+        }
+    }
+    s.push('"');
+    s
+}
+
+/// What parsing `text` costs, with the literal's own cost taken out.
+fn parse_cost_of(text: &str) -> u64 {
+    let l = lit(text);
+    let base = steps(&format!("let t = {l}; return t.length;"));
+    let parse = steps(&format!("let t = {l}; return typeof JSON.parse(t);"));
+    parse - base
+}
+
+/// A broker answer the way `agenterm cli ... --json` prints one: pretty,
+/// two-space indented, objects of short keys with string, number and boolean
+/// values, a list of them under one key -- `ui-bootstrap`'s shape. Sixty
+/// percent of its bytes are indentation.
+fn pretty_answer(tabs: usize) -> String {
+    let mut s =
+        String::from("{\n  \"schema_version\": 2,\n  \"active_tab_id\": \"@7\",\n  \"tabs\": [\n");
+    for i in 0..tabs {
+        s.push_str(&format!(
+            "    {{\n      \"id\": \"@{i}\",\n      \"title\": \"headless-{i}\",\n      \"note\": \"\",\n      \"screen\": {{\n        \"rows\": 24,\n        \"columns\": 90,\n        \"alternate\": false\n      }},\n      \"active\": {},\n      \"pinned\": false\n    }}{}\n",
+            i == 0,
+            if i + 1 < tabs { "," } else { "" }
+        ));
+    }
+    s.push_str("  ],\n  \"server_pid\": 78158\n}\n");
+    s
+}
+
+#[test]
+fn a_pretty_broker_answer_has_a_known_price_per_byte() {
+    // server-smoke's bill, profiled 2026-08-30 (`plan/design-host-op-budget.md`
+    // §7 downstream): 225 KB of such answers cost 13.56M steps, 43% of the
+    // journey, at 58-64 steps a byte -- 39 of them on every indentation
+    // byte, ~760 fixed on every key and string.
+    let small = pretty_answer(8);
+    let large = pretty_answer(200);
+    let per_small = parse_cost_of(&small) / small.len() as u64;
+    let per_large = parse_cost_of(&large) / large.len() as u64;
+    println!(
+        "JSON.parse of a pretty answer: {} bytes at {per_small}/byte, {} bytes at {per_large}/byte",
+        small.len(),
+        large.len()
+    );
+    assert!(
+        per_large < 90,
+        "a pretty answer byte cost {per_large} steps"
+    );
+}
+
+#[test]
+fn json_whitespace_has_a_known_price() {
+    let spaces = parse_cost_of(&format!("{}1", " ".repeat(1000)));
+    let one = parse_cost_of("1");
+    let per_byte = (spaces - one) / 1000;
+    println!("JSON.parse over 1 000 spaces: {per_byte} steps per byte");
+    assert!(per_byte < 50, "a whitespace byte cost {per_byte} steps");
+}
+
+#[test]
+fn a_short_string_has_a_known_fixed_price() {
+    let strings = parse_cost_of(&format!("[{}]", vec!["\"ab\""; 200].join(",")));
+    let empty = parse_cost_of("[]");
+    let per = (strings - empty) / 200;
+    println!("JSON.parse of \"ab\" in an array: {per} steps each");
+    assert!(
+        per < 900,
+        "a two-character string cost {per} steps to parse"
+    );
+}

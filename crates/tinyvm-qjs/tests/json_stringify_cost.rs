@@ -82,3 +82,48 @@ fn read_string(instance: &tinyvm::WasmInstance, ptr: i32) -> String {
     let len = u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]) as usize;
     String::from_utf8(bytes[at + 4..at + 4 + len].to_vec()).expect("valid UTF-8")
 }
+
+#[test]
+fn a_flat_object_of_thirty_properties_has_a_known_price() {
+    let props: Vec<String> = (0..30).map(|i| format!("k{i:02}: \"v{i}\"")).collect();
+    let build = format!("let o = {{{}}};", props.join(", "));
+    let base = steps(&format!("{build} return 1;"));
+    let one = steps(&format!("{build} return JSON.stringify(o).length;"));
+    let per = (one - base) / 30;
+    println!(
+        "JSON.stringify of a 30-property flat object: {} steps, {per} per property",
+        one - base
+    );
+    assert!(per < 1_500, "a flat property cost {per} steps to serialize");
+}
+
+#[test]
+fn a_journal_record_has_a_known_price() {
+    // `test_harness.qjs::append_command_record`'s record: a 13-digit
+    // millisecond timestamp, an argument list, and a bounded `output` that
+    // is itself pretty JSON, so a quote or a newline every twenty bytes.
+    // server-smoke writes 34 of them three times each (journal, `[record]`,
+    // and the folded log): 7.05M steps, 23% of the journey (2026-08-30).
+    let record = r#"let record = { recorded_at_ms: 1788101296722, arguments: ["ui-lease", "attach", "--client-id", "server-smoke-ui-1788101296722-78157", "--client-pid", "78157"], expected_failure: false, exit_code: 0, output: "{\n  \"schema_version\": 2,\n  \"lease_id\": \"ui-1314e-1a0532483bb-1\",\n  \"client_id\": \"server-smoke-ui-1788101296722-78157\",\n  \"client_pid\": 78157,\n  \"server_pid\": 78158,\n  \"position\": {\n    \"server_epoch\": \"78158-1788101296-732145000\",\n    \"sequence\": 4\n  },\n  \"expires_unix_ms\": 1788101302083,\n  \"ttl_ms\": 5000,\n  \"observed_sequence\": 0\n}\n" };"#;
+    let base = steps(&format!("{record} return record.exit_code;"));
+    let one = steps(&format!("{record} return JSON.stringify(record).length;"));
+    println!("JSON.stringify of a journal record: {} steps", one - base);
+    assert!(
+        one - base < 100_000,
+        "a journal record cost {} steps",
+        one - base
+    );
+    // The timestamp alone: an integer past the i32 range leaves the digit
+    // loop and takes the general double-to-string path.
+    let small = steps("let o = {a: 1}; return JSON.stringify(o).length;");
+    let big = steps("let o = {a: 1788101436756}; return JSON.stringify(o).length;");
+    println!(
+        "a 13-digit integer costs {} steps more than `1` to serialize",
+        big - small
+    );
+    assert!(
+        big - small < 40_000,
+        "a millisecond timestamp cost {} steps",
+        big - small
+    );
+}
