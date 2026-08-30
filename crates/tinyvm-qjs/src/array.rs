@@ -25,7 +25,8 @@
 //! 4. **There are no holes.** See [`arr_set`].
 
 use super::repr::{
-    self, BlockType, Ins, TAG_ARRAY, TAG_NUMBER, TAG_OBJECT, ValType, WIDTH, const_undefined,
+    self, BlockType, Ins, TAG_ARRAY, TAG_NUMBER, TAG_OBJECT, TAG_STRING, ValType, WIDTH,
+    const_undefined,
 };
 use super::runtime::{
     ALIGN_WORD, FAULT_INVALID_WRITE, FnBuild, RefusalNames, Rt, RtFunc, StringPool,
@@ -168,6 +169,11 @@ pub(crate) struct Ctx {
     /// The reasons a refused write names; `None` in a program that cannot
     /// reach one (see `emit`).
     pub(crate) refusal_names: Option<RefusalNames>,
+    /// Index of `__m_str_index`, when the program writes a computed read
+    /// the text does not settle: [`prop_get`] hands a String receiver there
+    /// so `s[i]` is the code unit. `None` keeps the String receiver on the
+    /// `__obj_get` path it always took.
+    pub(crate) str_index: Option<u32>,
 }
 
 impl Ctx {
@@ -599,6 +605,24 @@ fn prop_get(ctx: &Ctx) -> FnBuild {
     b.push(Ins::I32Const(TAG_ARRAY));
     b.push(Ins::I32Ne);
     b.push(Ins::If(BlockType::Empty));
+    // A String receiver, in a program that reads `s[i]`: the method set
+    // answers the index (`__m_str_index`), and falls through to the same
+    // `__obj_get` for any other key. After the Array test, so `a[i]` does
+    // not pay for it; before the conversion, so the index is still a
+    // Number when it arrives.
+    if let Some(str_index) = ctx.str_index {
+        b.push(Ins::LocalGet(recv));
+        b.push(Ins::I32Const(TAG_STRING));
+        b.push(Ins::I32Eq);
+        b.push(Ins::If(BlockType::Empty));
+        b.push(Ins::LocalGet(recv));
+        b.push(Ins::LocalGet(recv + 1));
+        b.push(Ins::LocalGet(key));
+        b.push(Ins::LocalGet(key + 1));
+        b.push(Ins::Call(str_index));
+        b.push(Ins::Return);
+        b.push(Ins::End);
+    }
     b.push(Ins::LocalGet(recv));
     b.push(Ins::LocalGet(recv + 1));
     b.push(Ins::LocalGet(key));

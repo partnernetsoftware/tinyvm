@@ -216,6 +216,27 @@ pub(crate) enum Me {
     /// "does `x` sort before `y`", which is the only question a merge asks.
     /// A helper.
     SortLess,
+    /// `s.charCodeAt(i)` -- ECMA-262 22.1.3.3. The UTF-16 code unit at
+    /// position `i`, found by the same code-unit walk `slice` does; a
+    /// position inside a surrogate pair answers that half, which is a
+    /// *Number* and needs no refusal. NaN past either end.
+    CharCodeAt,
+    /// `s.charAt(i)` -- 22.1.3.2: `slice(i, i + 1)`, so a position on the
+    /// second half of a pair is the same named refusal a `slice` boundary
+    /// there is. `""` past either end.
+    CharAt,
+    /// `s.substring(a, b)` -- 22.1.3.24: both positions clamped to
+    /// `[0, length]`, then swapped if out of order. `slice` with those two
+    /// rules in place of its negative-from-the-end rule.
+    Substring,
+    /// `s.substring(a)`: `b` is the length.
+    SubstringFrom,
+    /// `s[i]`, the computed read on a String receiver: the code unit at an
+    /// integer index as a one-unit String, `undefined` past the end, and
+    /// the ordinary property path for any other key. Never a call site;
+    /// wanted by the scan for a program that writes a computed read whose
+    /// key the text does not settle.
+    StrIndex,
 }
 
 /// Every function this variant can emit, in module order. **Not** what a
@@ -252,6 +273,11 @@ pub(crate) const SET: &[Me] = &[
     Me::SortWith,
     Me::SortCore,
     Me::SortLess,
+    Me::CharCodeAt,
+    Me::CharAt,
+    Me::Substring,
+    Me::SubstringFrom,
+    Me::StrIndex,
 ];
 
 /// Which of [`SET`] a particular module carries, and where each one lands.
@@ -357,6 +383,11 @@ impl Me {
             Me::SortWith => "__m_sort_with",
             Me::SortCore => "__m_sort_core",
             Me::SortLess => "__m_sort_less",
+            Me::CharCodeAt => "__m_char_code_at",
+            Me::CharAt => "__m_char_at",
+            Me::Substring => "__m_substring",
+            Me::SubstringFrom => "__m_substring_from",
+            Me::StrIndex => "__m_str_index",
         }
     }
 
@@ -388,6 +419,10 @@ impl Me {
             ("join", 0) => Some(Me::JoinDefault),
             ("sort", 0) => Some(Me::Sort),
             ("sort", 1) => Some(Me::SortWith),
+            ("charCodeAt", 1) => Some(Me::CharCodeAt),
+            ("charAt", 1) => Some(Me::CharAt),
+            ("substring", 2) => Some(Me::Substring),
+            ("substring", 1) => Some(Me::SubstringFrom),
             _ => None,
         }
     }
@@ -428,7 +463,11 @@ impl Me {
             | Me::Slice
             | Me::SliceFrom
             | Me::Replace
-            | Me::ReplaceAll => Recv::Str,
+            | Me::ReplaceAll
+            | Me::CharCodeAt
+            | Me::CharAt
+            | Me::Substring
+            | Me::SubstringFrom => Recv::Str,
             Me::WsWidth
             | Me::Units
             | Me::Substr
@@ -437,7 +476,8 @@ impl Me {
             | Me::LowerCp
             | Me::SliceCore
             | Me::SortCore
-            | Me::SortLess => unreachable!("a helper is never a call site"),
+            | Me::SortLess
+            | Me::StrIndex => unreachable!("a helper is never a call site"),
         }
     }
 
@@ -477,6 +517,10 @@ impl Me {
             Me::Sort | Me::SortWith => vec![Me::SortCore, Me::SortLess],
             Me::SortCore => vec![Me::SortLess],
             Me::SortLess => Vec::new(),
+            Me::CharCodeAt => vec![Me::Decode],
+            Me::CharAt | Me::Substring | Me::SubstringFrom | Me::StrIndex => {
+                vec![Me::SliceCore, Me::Substr]
+            }
         }
     }
 }
@@ -549,6 +593,11 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
         Me::SortWith => (values(2), values(1), sort(ctx, true)),
         Me::SortCore => (values(2), vec![], sort_core(ctx)),
         Me::SortLess => (values(3), vec![i32_], sort_less(ctx)),
+        Me::CharCodeAt => (values(2), values(1), char_code_at(ctx)),
+        Me::CharAt => (values(2), values(1), char_at(ctx)),
+        Me::Substring => (values(3), values(1), substring(ctx, true)),
+        Me::SubstringFrom => (values(2), values(1), substring(ctx, false)),
+        Me::StrIndex => (values(2), values(1), str_index(ctx)),
     };
     RtFunc {
         name: me.symbol(),
@@ -2187,6 +2236,7 @@ fn slice_core(ctx: &Ctx) -> FnBuild {
     let bt = f.local(ValType::I32);
     let byte = f.local(ValType::I32);
     let w = f.local(ValType::I32);
+    let t = f.local(ValType::I32);
     let b = &mut f.body;
 
     b.push(Ins::LocalGet(from));
@@ -2210,6 +2260,10 @@ fn slice_core(ctx: &Ctx) -> FnBuild {
     b.push(Ins::LocalSet(bf));
     b.push(Ins::LocalGet(hl));
     b.push(Ins::LocalSet(bt));
+    // The position the walk is heading for: `from` until it is found,
+    // `to` after. What `ascii_skip` must not step past.
+    b.push(Ins::LocalGet(from));
+    b.push(Ins::LocalSet(t));
 
     b.push(Ins::Block(BlockType::Empty));
     b.push(Ins::Loop(BlockType::Empty));
@@ -2217,6 +2271,10 @@ fn slice_core(ctx: &Ctx) -> FnBuild {
     b.push(Ins::LocalGet(hl));
     b.push(Ins::I32GeU);
     b.push(Ins::BrIf(1));
+    // Since 2026-08-31: eight ASCII bytes at a time while the position is
+    // further than that (`slice(0, 10)` never takes it; `s[900]` on a
+    // 1 000-character line takes it 112 times).
+    ascii_skip(b, h, i, hl, u, t);
     b.push(Ins::LocalGet(h));
     b.push(Ins::LocalGet(i));
     b.push(Ins::I32Add);
@@ -2234,6 +2292,8 @@ fn slice_core(ctx: &Ctx) -> FnBuild {
     b.push(Ins::If(BlockType::Empty));
     b.push(Ins::LocalGet(i));
     b.push(Ins::LocalSet(bf));
+    b.push(Ins::LocalGet(to));
+    b.push(Ins::LocalSet(t));
     b.push(Ins::End);
     b.push(Ins::LocalGet(u));
     b.push(Ins::LocalGet(to));
@@ -2292,6 +2352,55 @@ fn slice_core(ctx: &Ctx) -> FnBuild {
     b.push(Ins::I32Sub);
     b.push(ctx.me(Me::Substr));
     f
+}
+
+/// Eight plain-ASCII bytes are eight code units: at the top of a
+/// code-unit walk, while eight bytes remain, the next eight are all below
+/// 0x80 (two words, or-ed, against `0x80808080` -- `__len`'s test) and
+/// the position being looked for is at least eight units away, step over
+/// them in one go. Emitted inside the walk's `loop`, so the `br` is to
+/// depth 1 from inside the `if`. `t` holds the position the walk is
+/// heading for.
+fn ascii_skip(b: &mut Vec<Ins>, h: u32, i: u32, hl: u32, u: u32, t: u32) {
+    // !(t < u + 8) && !(hl < i + 8)
+    b.push(Ins::LocalGet(t));
+    b.push(Ins::LocalGet(u));
+    b.push(Ins::I32Const(8));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32LtU);
+    b.push(Ins::I32Eqz);
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(8));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32LtU);
+    b.push(Ins::I32Eqz);
+    b.push(Ins::I32And);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load(0, 4));
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load(0, 8));
+    b.push(Ins::I32Or);
+    b.push(Ins::I32Const(0x8080_8080u32 as i32));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(8));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::LocalGet(u));
+    b.push(Ins::I32Const(8));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(u));
+    b.push(Ins::Br(2));
+    b.push(Ins::End);
+    b.push(Ins::End);
 }
 
 /// Whether an occurrence loop stops after the first match.
@@ -3672,6 +3781,404 @@ fn sort_less(ctx: &Ctx) -> FnBuild {
     b.push(Ins::Call(ctx.str_cmp));
     b.push(Ins::I32Const(-1));
     b.push(Ins::I32Eq);
+    f
+}
+
+/// The integer a position argument denotes: ToIntegerOrInfinity (ECMA-262
+/// 7.1.5) narrowed to `i32` -- NaN is 0, the value is clamped into the
+/// `i32` range before the truncation so the truncation cannot trap, and
+/// the clamp changes nothing a string could be long enough to notice. The
+/// argument is a Number or it traps in `unbox_number`, which is this
+/// engine's standing narrowing for method arguments (see `slice`).
+fn integer_arg(b: &mut Vec<Ins>, arg: u32, r: u32, into: u32) {
+    unbox_number(arg, b);
+    b.push(Ins::LocalSet(r));
+    b.push(Ins::LocalGet(r));
+    b.push(Ins::LocalGet(r));
+    b.push(Ins::F64Ne);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::F64Const(0.0));
+    b.push(Ins::LocalSet(r));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(r));
+    b.push(Ins::F64Const(2_147_483_647.0));
+    b.push(Ins::F64Gt);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::F64Const(2_147_483_647.0));
+    b.push(Ins::LocalSet(r));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(r));
+    b.push(Ins::F64Const(-2_147_483_647.0));
+    b.push(Ins::F64Lt);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::F64Const(-2_147_483_647.0));
+    b.push(Ins::LocalSet(r));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(r));
+    b.push(Ins::I32TruncF64S);
+    b.push(Ins::LocalSet(into));
+}
+
+/// A fresh empty String: `substr` of nothing.
+fn empty_string(ctx: &Ctx, b: &mut Vec<Ins>) {
+    let inner = vec![
+        Ins::I32Const(0),
+        Ins::I32Const(0),
+        Ins::I32Const(0),
+        ctx.me(Me::Substr),
+    ];
+    let mut boxed = Vec::new();
+    box_string(&inner, &mut boxed);
+    b.extend(boxed);
+}
+
+/// `s.charCodeAt(i)` -- ECMA-262 22.1.3.3.
+///
+/// The walk is `slice_core`'s -- a lead byte starts a code unit, a 4-byte
+/// sequence is two -- with the character decoded when the position is
+/// reached. A one-, two- or three-byte character *is* its code unit; a
+/// four-byte one is a surrogate pair, and the position says which half:
+/// `0xD800 + ((cp - 0x10000) >> 10)` or `0xDC00 + ((cp - 0x10000) & 0x3FF)`.
+/// That half is a Number, and a Number is representable, which is why this
+/// method needs no refusal where `charAt` on the same position does.
+/// `NaN` for a position before the start or at or past the end (step 6).
+fn char_code_at(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH);
+    let h = f.local(ValType::I32);
+    let idx = f.local(ValType::I32);
+    let hl = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+    let u = f.local(ValType::I32);
+    let byte = f.local(ValType::I32);
+    let units = f.local(ValType::I32);
+    let cp = f.local(ValType::I32);
+    let w = f.local(ValType::I32);
+    let r = f.local(ValType::F64);
+
+    unbox_string(0, &mut f.body);
+    f.body.push(Ins::LocalSet(h));
+    integer_arg(&mut f.body, WIDTH, r, idx);
+
+    let b = &mut f.body;
+    let nan = |b: &mut Vec<Ins>| {
+        let mut boxed = Vec::new();
+        box_number(&[Ins::F64Const(f64::NAN)], &mut boxed);
+        b.extend(boxed);
+        b.push(Ins::Return);
+    };
+    b.push(Ins::LocalGet(idx));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::I32LtS);
+    b.push(Ins::If(BlockType::Empty));
+    nan(b);
+    b.push(Ins::End);
+
+    // The walk is `slice_core`'s: a byte at a time, a lead byte counts one
+    // unit or two, and nothing is decoded until the position is reached
+    // -- decoding every character on the way cost 76 steps a unit, the
+    // count costs ~20.
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalSet(hl));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    ascii_skip(b, h, i, hl, u, idx);
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::LocalSet(byte));
+    b.push(Ins::LocalGet(byte));
+    b.push(Ins::I32Const(0xc0));
+    b.push(Ins::I32And);
+    b.push(Ins::I32Const(0x80));
+    b.push(Ins::I32Ne);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(byte));
+    b.push(Ins::I32Const(0xf0));
+    b.push(Ins::I32GeU);
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(units));
+    // Reached: the position is this character's first unit, or the
+    // second of a pair's two.
+    b.push(Ins::LocalGet(u));
+    b.push(Ins::LocalGet(idx));
+    b.push(Ins::I32Eq);
+    b.push(Ins::LocalGet(units));
+    b.push(Ins::I32Const(2));
+    b.push(Ins::I32Eq);
+    b.push(Ins::LocalGet(u));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(idx));
+    b.push(Ins::I32Eq);
+    b.push(Ins::I32And);
+    b.push(Ins::I32Or);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32Add);
+    b.push(ctx.me(Me::Decode));
+    b.push(Ins::LocalSet(w));
+    b.push(Ins::LocalSet(cp));
+    // One to three bytes: the character is its unit.
+    b.push(Ins::LocalGet(units));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    let mut boxed = Vec::new();
+    box_number(&[Ins::LocalGet(cp), Ins::F64ConvertI32S], &mut boxed);
+    b.extend(boxed);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+    // Four: the high half at the first unit, the low at the second.
+    b.push(Ins::LocalGet(u));
+    b.push(Ins::LocalGet(idx));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    let mut boxed = Vec::new();
+    box_number(
+        &[
+            Ins::LocalGet(cp),
+            Ins::I32Const(0x10000),
+            Ins::I32Sub,
+            Ins::I32Const(10),
+            Ins::I32ShrU,
+            Ins::I32Const(0xd800),
+            Ins::I32Add,
+            Ins::F64ConvertI32S,
+        ],
+        &mut boxed,
+    );
+    b.extend(boxed);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+    let mut boxed = Vec::new();
+    box_number(
+        &[
+            Ins::LocalGet(cp),
+            Ins::I32Const(0x10000),
+            Ins::I32Sub,
+            Ins::I32Const(0x3ff),
+            Ins::I32And,
+            Ins::I32Const(0xdc00),
+            Ins::I32Add,
+            Ins::F64ConvertI32S,
+        ],
+        &mut boxed,
+    );
+    b.extend(boxed);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(u));
+    b.push(Ins::LocalGet(units));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(u));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    nan(b);
+    f
+}
+
+/// `s.charAt(i)` -- ECMA-262 22.1.3.2: the one-unit String at `i`, or
+/// `""` outside the string (step 5). `slice(i, i + 1)` through the shared
+/// core, so a position on the second half of a surrogate pair is the core's
+/// own named refusal -- there is no UTF-8 for that half, and this engine
+/// does not fabricate one.
+fn char_at(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH);
+    let h = f.local(ValType::I32);
+    let idx = f.local(ValType::I32);
+    let r = f.local(ValType::F64);
+
+    unbox_string(0, &mut f.body);
+    f.body.push(Ins::LocalSet(h));
+    integer_arg(&mut f.body, WIDTH, r, idx);
+
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(idx));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::I32LtS);
+    b.push(Ins::If(BlockType::Empty));
+    empty_string(ctx, b);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+    // `idx + 1` must not wrap: the clamp above stops one short of i32::MAX.
+    let inner = vec![
+        Ins::LocalGet(h),
+        Ins::LocalGet(idx),
+        Ins::LocalGet(idx),
+        Ins::I32Const(1),
+        Ins::I32Add,
+        ctx.me(Me::SliceCore),
+    ];
+    let mut boxed = Vec::new();
+    box_string(&inner, &mut boxed);
+    b.extend(boxed);
+    f
+}
+
+/// `s.substring(a[, b])` -- ECMA-262 22.1.3.24.
+///
+/// Where `slice` counts a negative position from the end, `substring`
+/// clamps it to 0 (step 5-6), and where `slice` answers `""` for
+/// `from > to`, `substring` swaps them (step 7-8). Both clamp to the length,
+/// which the core does on its own by treating a position past the end as
+/// the end. The one-argument form takes `b` as the length (step 4).
+fn substring(ctx: &Ctx, has_end: bool) -> FnBuild {
+    let mut f = FnBuild::new(if has_end { 3 * WIDTH } else { 2 * WIDTH });
+    let h = f.local(ValType::I32);
+    let from = f.local(ValType::I32);
+    let to = f.local(ValType::I32);
+    let swap = f.local(ValType::I32);
+    let r = f.local(ValType::F64);
+
+    unbox_string(0, &mut f.body);
+    f.body.push(Ins::LocalSet(h));
+    integer_arg(&mut f.body, WIDTH, r, from);
+    if has_end {
+        integer_arg(&mut f.body, 2 * WIDTH, r, to);
+    } else {
+        f.body.push(Ins::I32Const(i32::MAX));
+        f.body.push(Ins::LocalSet(to));
+    }
+
+    let b = &mut f.body;
+    for edge in [from, to] {
+        b.push(Ins::LocalGet(edge));
+        b.push(Ins::I32Const(0));
+        b.push(Ins::I32LtS);
+        b.push(Ins::If(BlockType::Empty));
+        b.push(Ins::I32Const(0));
+        b.push(Ins::LocalSet(edge));
+        b.push(Ins::End);
+    }
+    b.push(Ins::LocalGet(to));
+    b.push(Ins::LocalGet(from));
+    b.push(Ins::I32LtS);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(from));
+    b.push(Ins::LocalSet(swap));
+    b.push(Ins::LocalGet(to));
+    b.push(Ins::LocalSet(from));
+    b.push(Ins::LocalGet(swap));
+    b.push(Ins::LocalSet(to));
+    b.push(Ins::End);
+    let inner = vec![
+        Ins::LocalGet(h),
+        Ins::LocalGet(from),
+        Ins::LocalGet(to),
+        ctx.me(Me::SliceCore),
+    ];
+    let mut boxed = Vec::new();
+    box_string(&inner, &mut boxed);
+    b.extend(boxed);
+    f
+}
+
+/// `__m_str_index(receiver, key) -> value`: a computed read whose receiver
+/// turned out to be a String.
+///
+/// ECMA-262 10.4.3.5 (String exotic `[[GetOwnProperty]]`): an integer
+/// index below the length is the one-unit String there (through the
+/// shared core, so the second half of a pair is the core's named refusal),
+/// an integer index at or past it is `undefined`, and every other key is
+/// an ordinary property read -- `s["length"]` answers, `s.foo` names
+/// itself as it did. The index test is inline rather than `__arr_index`'s
+/// so a program with no arrays can carry this without the array set.
+///
+/// Reached two ways, for one price: in a program with arrays `__prop_get`
+/// hands its String receivers here (the Array arm stays first, so `a[i]`
+/// pays nothing); in one without, the emitter lowers every computed read
+/// to this call, and the fall-through below *is* the lowering it replaced.
+fn str_index(ctx: &Ctx) -> FnBuild {
+    let recv = 0;
+    let key = WIDTH;
+    let mut f = FnBuild::new(2 * WIDTH);
+    let d = f.local(ValType::F64);
+    let idx = f.local(ValType::I32);
+    let r = f.local(ValType::I32);
+    let b = &mut f.body;
+
+    b.push(Ins::LocalGet(recv));
+    b.push(Ins::I32Const(repr::TAG_STRING));
+    b.push(Ins::I32Eq);
+    b.push(Ins::LocalGet(key));
+    b.push(Ins::I32Const(TAG_NUMBER));
+    b.push(Ins::I32Eq);
+    b.push(Ins::I32And);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(key + 1));
+    b.push(Ins::F64ReinterpretI64);
+    b.push(Ins::LocalSet(d));
+    // `0 <= d < 2^31 - 1`, which NaN fails, and then integral.
+    b.push(Ins::LocalGet(d));
+    b.push(Ins::F64Const(0.0));
+    b.push(Ins::F64Ge);
+    b.push(Ins::LocalGet(d));
+    b.push(Ins::F64Const(2_147_483_647.0));
+    b.push(Ins::F64Lt);
+    b.push(Ins::I32And);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(d));
+    b.push(Ins::I32TruncF64S);
+    b.push(Ins::LocalSet(idx));
+    b.push(Ins::LocalGet(idx));
+    b.push(Ins::F64ConvertI32S);
+    b.push(Ins::LocalGet(d));
+    b.push(Ins::F64Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(recv + 1));
+    b.push(Ins::I32WrapI64);
+    b.push(Ins::LocalGet(idx));
+    b.push(Ins::LocalGet(idx));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(ctx.me(Me::SliceCore));
+    b.push(Ins::LocalSet(r));
+    // An index in range yields one unit; the core's empty answer is the
+    // end of the string, and 10.4.3.5 says `undefined` there.
+    b.push(Ins::LocalGet(r));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    const_undefined(b);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+    let mut boxed = Vec::new();
+    box_string(&[Ins::LocalGet(r)], &mut boxed);
+    b.extend(boxed);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+    b.push(Ins::End);
+    // A Number that is not an index -- negative, fractional, NaN -- names
+    // no property a String has (10.4.3.5 step 1.b falls through to an
+    // ordinary object with no such key): `undefined`, as the spec says,
+    // and not the missing-property refusal, which is for names a real
+    // String *does* answer.
+    const_undefined(b);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(recv));
+    b.push(Ins::LocalGet(recv + 1));
+    b.push(Ins::LocalGet(key));
+    b.push(Ins::LocalGet(key + 1));
+    b.push(ctx.rt(Rt::ToStr));
+    b.push(ctx.rt(Rt::ObjGet));
     f
 }
 

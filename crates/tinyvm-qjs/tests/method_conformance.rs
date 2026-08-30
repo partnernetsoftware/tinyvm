@@ -476,6 +476,107 @@ fn sort_is_stable_in_place_and_returns_the_receiver() {
     assert!(attempt("return [{}, {}].sort();").is_err());
 }
 
+/// `s.charCodeAt(i)` -- ECMA-262 22.1.3.3 -- and `s.charAt(i)` (22.1.3.2),
+/// on UTF-16 positions. A surrogate half is a Number and `charCodeAt`
+/// answers it; `charAt` on the same position would have to fabricate a
+/// lone surrogate, which UTF-8 cannot hold, so that is the named refusal
+/// the mid-pair `slice` boundary already is (`tests/refused_operations.rs`).
+#[test]
+fn char_code_at_and_char_at_read_utf16_positions() {
+    number("return \"abc\".charCodeAt(0);", 97.0);
+    number("return \"abc\".charCodeAt(2);", 99.0);
+    number("return \"abc\".charCodeAt(1.7);", 98.0);
+    number("return \"caf\u{e9}\".charCodeAt(3);", 0xe9 as f64);
+    number("return \"\u{4e2d}\u{6587}\".charCodeAt(1);", 0x6587 as f64);
+    // A pair: the two halves, and the unit after it is unit 2 not 1.
+    number("return \"\u{1f600}\".charCodeAt(0);", 0xd83d as f64);
+    number("return \"\u{1f600}\".charCodeAt(1);", 0xde00 as f64);
+    number("return \"\u{1f600}x\".charCodeAt(2);", 120.0);
+    number("return \"a\u{1f600}\".charCodeAt(2);", 0xde00 as f64);
+    // Outside the string: NaN (step 6), spelled as `x !== x`.
+    boolean("let n = \"ab\".charCodeAt(2); return n !== n;", true);
+    boolean("let n = \"ab\".charCodeAt(-1); return n !== n;", true);
+    boolean("let n = \"\".charCodeAt(0); return n !== n;", true);
+    // The demand site: a byte from a character, in a loop.
+    number(
+        "let s = \"AZ\"; let sum = 0; for (let i = 0; i < s.length; i = i + 1) { sum = sum + s.charCodeAt(i); } return sum;",
+        155.0,
+    );
+    string("return \"abc\".charAt(0);", "a");
+    string("return \"abc\".charAt(2);", "c");
+    string("return \"abc\".charAt(3);", "");
+    string("return \"abc\".charAt(-1);", "");
+    string("return \"caf\u{e9}\".charAt(3);", "\u{e9}");
+    string("return \"a\u{1f600}b\".charAt(3);", "b");
+    string("return \"\u{4e2d}\u{6587}\".charAt(1);", "\u{6587}");
+    // Half a pair has no UTF-8: refused, not fabricated.
+    assert!(attempt("return \"\u{1f600}\".charAt(1);").is_err());
+}
+
+/// `s[i]` -- ECMA-262 10.4.3.5: an integer index below the length is the
+/// unit there, at or past it is `undefined`, and every other key is the
+/// ordinary property read. Read only: a write is the refusal it was.
+#[test]
+fn a_string_indexes_by_code_unit() {
+    string("let s = \"abc\"; return s[0];", "a");
+    string("let s = \"abc\"; let i = 2; return s[i];", "c");
+    string("let s = \"caf\u{e9}\"; return s[3];", "\u{e9}");
+    undefined("let s = \"abc\"; return s[3];");
+    undefined("let s = \"abc\"; return s[-1];");
+    undefined("let s = \"abc\"; return s[1.5];");
+    undefined("let s = \"\"; return s[0];");
+    number("let s = \"abc\"; let k = \"length\"; return s[k];", 3.0);
+    // A program with arrays takes the array set's road to the same answer,
+    // and `a[i]` next to it still answers as an array.
+    string(
+        "let a = [\"x\"]; let s = \"abc\"; let i = 1; return s[i] + a[0];",
+        "bx",
+    );
+    // And one without arrays takes the emitter's.
+    string(
+        "let s = \"abc\"; let o = {k: \"v\"}; let i = 1; let n = \"k\"; return s[i] + o[n];",
+        "bv",
+    );
+    // The demand site: every character of a string, by index.
+    string(
+        "let s = \"abc\"; let out = \"\"; for (let i = 0; i < s.length; i = i + 1) { out = s[i] + out; } return out;",
+        "cba",
+    );
+    // The index is a Number: `s["0"]` is a String key and stays the
+    // property read (10.4.3.5 would answer `a`; this engine's `__arr_index`
+    // divergence is recorded at array.rs, and this is the same line).
+    assert!(attempt("let s = \"abc\"; return s[\"0\"];").is_err());
+    // Half a pair: the same named refusal `charAt` and `slice` give.
+    assert!(attempt("let s = \"\u{1f600}\"; return s[1];").is_err());
+}
+
+/// `s.substring(a[, b])` -- ECMA-262 22.1.3.24: clamp to `[0, length]`,
+/// swap when out of order. The two rules `slice` does not have.
+#[test]
+fn substring_clamps_and_swaps() {
+    string("return \"abcdef\".substring(1, 3);", "bc");
+    string("return \"abcdef\".substring(3, 1);", "bc");
+    string("return \"abcdef\".substring(2);", "cdef");
+    string("return \"abcdef\".substring(-2, 2);", "ab");
+    string("return \"abcdef\".substring(4, 100);", "ef");
+    string("return \"abcdef\".substring(100, 4);", "ef");
+    string("return \"abcdef\".substring(2, 2);", "");
+    string("return \"abcdef\".substring(0);", "abcdef");
+    string("return \"abcdef\".substring(-5);", "abcdef");
+    string("return \"abcdef\".substring(0 / 0, 2);", "ab");
+    string("return \"abcdef\".substring(1.9, 3.1);", "bc");
+    string("return \"caf\u{e9} ok\".substring(3, 5);", "\u{e9} ");
+    string("return \"a\u{1f600}b\".substring(1, 3);", "\u{1f600}");
+    string("return \"a\u{1f600}b\".substring(3);", "b");
+    // The demand site: the last `limit` characters.
+    string(
+        "function tail(t, limit) { return t.length <= limit ? t : t.substring(t.length - limit); } return tail(\"abcdefgh\", 3);",
+        "fgh",
+    );
+    // Half a pair is the named refusal, as for `slice`.
+    assert!(attempt("return \"\u{1f600}\".substring(0, 1);").is_err());
+}
+
 // =========================================================================
 // What must NOT change, whichever variant wins
 // =========================================================================

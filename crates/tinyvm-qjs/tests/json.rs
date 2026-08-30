@@ -181,6 +181,7 @@ impl Bases {
             func_base: self.js.arrays,
             runtime_base: self.rt.func_base,
             names: self.array_names,
+            str_index: None,
         }));
         all
     }

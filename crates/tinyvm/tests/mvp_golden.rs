@@ -656,7 +656,19 @@ fn parse_prd_leaves(prd: &str, marker: &str) -> Vec<String> {
 // `prd/PRD.md`'s acceptance section now writes the command set down, with this
 // package in it, so the next gap is caught by the gate rather than by someone
 // deciding to look.
-const LEAF_TESTS: [(&str, &str); 267] = [
+const LEAF_TESTS: [(&str, &str); 270] = [
+    (
+        "`charCodeAt(i)`：UTF-16 位置，代理项的半边是个数，照答      2026-08-31；733 B；ASCII 八字节一步，1 000 字符第 999 位 2 126 步",
+        "char_code_at_and_char_at_read_utf16_positions",
+    ),
+    (
+        "`charAt(i)` / `substring(a[, b])`：与 slice 共一个码元核心     2026-08-31；869 / 1 026 / 909 B；落在代理对中间 = slice 的同一句拒绝",
+        "substring_clamps_and_swaps",
+    ),
+    (
+        "`s[i]`（只读）：键是整数就是那一码元，越界 undefined       2026-08-31；768 B；门是「文本定不了的计算键读」，`o[k]` 也付（+716，记在账上）",
+        "a_string_indexes_by_code_unit",
+    ),
     (
         "`sort([cmp])`：自底向上归并，稳定、原地、返回自身，undefined 殿后  2026-08-31；948 / 1 116 B；1 000 个数 + 比较器 1.71M 步，1 000 个串默认序 4.21M 步（手写归并 13.8M，3.3×）",
         "sort_is_stable_in_place_and_returns_the_receiver",

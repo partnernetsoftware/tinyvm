@@ -726,12 +726,20 @@ pub(crate) mod m1 {
             Vec::new()
         };
 
+        // Where `s[i]` is answered, for the two consumers that hand a String
+        // receiver there: `__prop_get` in the array set, and the emitter's
+        // computed read in a program without one.
+        let str_index = scan
+            .methods
+            .wants(method::Me::StrIndex)
+            .then(|| method_base + scan.methods.offset(method::Me::StrIndex));
         let array_set: Vec<runtime::RtFunc> = if scan.arrays {
             array::build(&array::Ctx {
                 refusal_names: ctx.refusal_names,
                 func_base: arr_base,
                 runtime_base,
                 names: array::Names::intern(&mut pool),
+                str_index,
             })
         } else {
             Vec::new()
@@ -859,6 +867,7 @@ pub(crate) mod m1 {
                 scan.indirect.then_some(call_check_base),
                 scan.arrays.then_some(arr_base),
                 (!scan.methods.is_empty()).then(|| (method_base, scan.methods.clone())),
+                str_index,
                 unwind,
                 json,
                 user_base,
@@ -1422,6 +1431,16 @@ pub(crate) mod m1 {
         /// program with only dotted access needs none of the three constant
         /// answers -- see [`runtime::KeyNames`].
         computed_key: bool,
+        /// Whether the program writes a computed read whose key the text
+        /// does not settle as a String: `o[k]`, `a[i]`, `s[0]` -- not
+        /// `o["a"]`, and not the index the `for … of` fold synthesises
+        /// (its receiver is checked to be an Array before the loop). Only
+        /// such a read can find a String receiver and an integer key, so
+        /// only such a program carries `__m_str_index` and the code-unit
+        /// walk behind it. Not exact -- `a[i]` turns it on -- and it cannot
+        /// be: what a receiver holds is a run-time fact, the same limit
+        /// `string_length` records for the same reason.
+        string_index: bool,
         /// Some assignment or update writes through a member expression
         /// (`o.k = v`, `a[i] = v`, `x.n++`). Only such a program can reach a
         /// refused write, so only it carries the names for one.
@@ -1603,6 +1622,11 @@ pub(crate) mod m1 {
         // `record_captures` has already settled every function's layout by
         // the time a `Program` exists, so the scan only has to ask.
         out.captures = program.functions.iter().any(|f| !f.captures.is_empty());
+        // `s[i]` is not a name a program writes, so the method it needs is
+        // wanted here, off the scan bit, rather than at a call site.
+        if out.string_index {
+            out.methods.want(method::Me::StrIndex);
+        }
         Ok(out)
     }
 
@@ -1824,6 +1848,9 @@ pub(crate) mod m1 {
                     }
                     ast::MemberKey::Computed(key) => {
                         scan.computed_key = true;
+                        scan.string_index |= !matches!(&key.kind, ast::ExprKind::Str(_))
+                            && !matches!(&key.kind,
+                                ast::ExprKind::Name(n) if n.text == " i");
                         // A computed key *could* be the string "length", so
                         // the flag goes on -- unless the text already settles
                         // it. A number literal is never that string, and a
@@ -1929,6 +1956,11 @@ pub(crate) mod m1 {
         /// `__prop_get` / `__prop_set`, taking the key as a whole V1 pair so
         /// an index never becomes digits. Carries the index of `__arr_new`.
         Prop(u32),
+        /// `__m_str_index`, taking the key as a pair: a computed *read* in a
+        /// program with no array set, whose receiver may be a String. Its
+        /// fall-through is exactly [`Accessor::Obj`]'s call, so every other
+        /// receiver answers as it did. A write never takes this arm.
+        Str(u32),
     }
 
     /// What an assignment or an update writes to: ECMA-262's ~simple~
@@ -2039,6 +2071,9 @@ pub(crate) mod m1 {
         /// nothing has exactly the local layout it had before closures
         /// existed. Wasm local `0` of a capturing function is its environment.
         env_param: u32,
+        /// Index of `__m_str_index`, for a computed read in a program with
+        /// no array set: see [`Accessor::Str`].
+        str_index: Option<u32>,
         /// Index of `__arr_new`, or `None` for a program the array gate
         /// refused -- which emits none of that set and keeps the pre-array
         /// lowering of a computed access, exactly as it was.
@@ -2107,6 +2142,7 @@ pub(crate) mod m1 {
             call_check: Option<u32>,
             arrays: Option<u32>,
             methods: Option<(u32, method::Plan)>,
+            str_index: Option<u32>,
             unwind: Option<Unwind>,
             json: Option<Json>,
             user_base: u32,
@@ -2161,6 +2197,7 @@ pub(crate) mod m1 {
                 call_check,
                 arrays,
                 methods,
+                str_index,
                 unwind,
                 json,
                 user_base,
@@ -3478,6 +3515,11 @@ pub(crate) mod m1 {
                             self.key_pair(key)?;
                             self.push(Ins::Call(base + Ar::PropGet.offset()));
                         }
+                        Accessor::Str(index) => {
+                            self.key_pair(key)?;
+                            self.push(Ins::Call(index));
+                            self.throw_check();
+                        }
                     }
                     Ok(())
                 }
@@ -3595,10 +3637,11 @@ pub(crate) mod m1 {
         /// Still not a per-call-site exemption, which is the rule
         /// [`Lower::key`] states: this asks a property of the whole program,
         /// never a guess about one receiver's type.
-        fn accessor(&self, _key: &ast::MemberKey) -> Accessor {
-            match self.arrays {
-                Some(base) => Accessor::Prop(base),
-                None => Accessor::Obj,
+        fn accessor(&self, key: &ast::MemberKey) -> Accessor {
+            match (self.arrays, key, self.str_index) {
+                (Some(base), _, _) => Accessor::Prop(base),
+                (None, ast::MemberKey::Computed(_), Some(index)) => Accessor::Str(index),
+                (None, _, _) => Accessor::Obj,
             }
         }
 
@@ -4486,7 +4529,10 @@ pub(crate) mod m1 {
                     self.expr(object)?;
                     store_local(slot, &mut self.f.body);
                     let held = match self.accessor(key) {
-                        Accessor::Obj => {
+                        // A write on a String receiver is refused by
+                        // `__obj_set` whatever the key, so a target never
+                        // needs the String index arm.
+                        Accessor::Obj | Accessor::Str(_) => {
                             let raw = self.take_raw();
                             self.key(key)?;
                             self.push(Ins::LocalSet(raw));

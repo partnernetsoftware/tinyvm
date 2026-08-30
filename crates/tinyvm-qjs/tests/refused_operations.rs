@@ -134,3 +134,28 @@ fn ordinary_writes_still_answer() {
         );
     }
 }
+
+/// `charAt`, `s[i]` and `substring` reach the same core `slice` does, so a
+/// position on the second half of a surrogate pair is the same named
+/// boundary -- one sentence, one fault, whichever spelling asked. (2026-08-31;
+/// `charCodeAt` on that position answers the half as a Number and is not
+/// here.)
+#[test]
+fn every_character_access_names_the_same_surrogate_boundary() {
+    for source in [
+        r#"return "\u{1f600}".charAt(1);"#,
+        r#"let s = "\u{1f600}"; return s[1];"#,
+        r#"let s = "\u{1f600}"; let i = 1; return s[i];"#,
+        r#"return "\u{1f600}".substring(0, 1);"#,
+        r#"return "\u{1f600}x".substring(1);"#,
+    ] {
+        let (fault, reason, capability) = run_and_read(source);
+        assert_eq!(fault, Some(GuestFault::CapabilityBoundary), "{source}");
+        assert_eq!(reason, None, "{source}");
+        assert_eq!(
+            capability.as_deref(),
+            Some("a slice boundary inside a surrogate pair"),
+            "{source}"
+        );
+    }
+}

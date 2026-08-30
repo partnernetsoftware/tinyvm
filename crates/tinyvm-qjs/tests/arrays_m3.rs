@@ -687,9 +687,17 @@ fn a_program_with_no_array_and_no_json_is_byte_identical_to_what_it_was() {
         // +58 on 2026-08-30: `__len` counts eight plain-ASCII bytes a step
         // (180 000 -> 19 900 steps on 6 000 characters, tests/length_cost.rs).
         // Only programs that can reach the string-`.length` arm carry it.
+        // +716 on 2026-08-31: a computed read whose key the text does not
+        // settle as a String could be `s[i]`, so the program carries
+        // `__m_str_index` and the code-unit walk behind it
+        // (`slice_core` + `substr`), and every such read goes through it
+        // first. The gate is inexact for the reason `string_length`'s is,
+        // and this row -- an object read paying for a String method -- is
+        // that inexactness written down (tests/char_access_m3.rs). The
+        // row below, whose key the text settles, did not move.
         (
             "let o = {a:1}; let k = \"a\"; return o[k];",
-            10_796, /* +7 on 2026-08-30: the nameless capability arm now clears the detail word before it stops, so a named refusal read later cannot inherit an older name (tests/refused_operations.rs) */
+            11_512, /* +7 on 2026-08-30: the nameless capability arm now clears the detail word before it stops, so a named refusal read later cannot inherit an older name (tests/refused_operations.rs) */
         ),
         ("let o = {a:1}; return o[\"a\"];", 10_570),
     ] {
