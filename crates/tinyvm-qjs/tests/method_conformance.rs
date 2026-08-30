@@ -405,6 +405,77 @@ fn join_writes_every_element_with_the_separator_between() {
     assert!(attempt("return [[1]].join(\",\");").is_err());
 }
 
+/// `a.sort()` and `a.sort(f)` -- ECMA-262 23.1.3.30: stable, in place, the
+/// receiver returned. The default order is String order of the ToString
+/// forms -- `[10, 9, 1]` sorts to `[1, 10, 9]`, which is the spec and every
+/// engine, not a defect -- and `undefined` sorts last under both forms.
+#[test]
+fn sort_is_stable_in_place_and_returns_the_receiver() {
+    string("return [3, 1, 2].sort().join();", "1,2,3");
+    string("return [10, 9, 1].sort().join();", "1,10,9");
+    string("return [1, 100, 2, 20].sort().join();", "1,100,2,20");
+    string("return [\"b\", \"a\", \"c\"].sort().join();", "a,b,c");
+    string("return [2, \"10\", 1].sort().join();", "1,10,2");
+    // Code-unit order: `é` (U+00E9) is after `z`.
+    string(
+        "return [\"\u{e9}\", \"z\", \"a\"].sort().join(\"\");",
+        "az\u{e9}",
+    );
+    string(
+        "return [\"b\", undefined, \"a\"].sort().join(\"-\");",
+        "a-b-",
+    );
+    number("return [\"b\", undefined, \"a\"].sort().length;", 3.0);
+    undefined("return [\"b\", undefined, \"a\"].sort()[2];");
+    number("return [].sort().length;", 0.0);
+    number("return [1].sort()[0];", 1.0);
+    // In place, and the answer *is* the receiver.
+    number("let a = [2, 1]; a.sort(); return a[0];", 1.0);
+    boolean("let a = [2, 1]; return a.sort() === a;", true);
+    number("let a = [2, 1]; let b = a; a.sort(); return b[0];", 1.0);
+    // A comparator: numeric, descending, named, closing over a binding.
+    string("return [10, 9, 1].sort((a, b) => a - b).join();", "1,9,10");
+    string("return [10, 9, 1].sort((a, b) => b - a).join();", "10,9,1");
+    string(
+        "function up(a, b) { return a - b; } return [3, 2, 1].sort(up).join();",
+        "1,2,3",
+    );
+    string(
+        "let sign = -1; return [1, 2, 3].sort((a, b) => sign * (a - b)).join();",
+        "3,2,1",
+    );
+    // Stable: equal keys keep their order, under a comparator and by default.
+    string(
+        "let a = [{k: 1, v: \"a\"}, {k: 0, v: \"b\"}, {k: 1, v: \"c\"}, {k: 0, v: \"d\"}]; return a.sort((x, y) => x.k - y.k).map(o => o.v).join(\"\");",
+        "bdac",
+    );
+    string(
+        "let a = [{k: 1, v: \"a\"}, {k: 1, v: \"b\"}, {k: 1, v: \"c\"}]; return a.sort((x, y) => x.k - y.k).map(o => o.v).join(\"\");",
+        "abc",
+    );
+    // A comparator answering NaN is 0: nothing moves (step 6).
+    string("return [3, 1, 2].sort((a, b) => 0 / 0).join();", "3,1,2");
+    // `undefined` is last under a comparator too, and the comparator never
+    // sees it (steps 1-3 come first).
+    string(
+        "let calls = 0; let a = [undefined, 2, 1].sort((x, y) => { calls = calls + 1; return x - y; }); return a.join(\"-\") + \":\" + calls;",
+        "1-2-:1",
+    );
+    // Eight elements: more than one merge pass, every run shape.
+    string(
+        "return [8, 3, 5, 1, 7, 2, 6, 4].sort((a, b) => a - b).join();",
+        "1,2,3,4,5,6,7,8",
+    );
+    string(
+        "return [\"h\", \"c\", \"e\", \"a\", \"g\", \"b\", \"f\", \"d\", \"i\"].sort().join(\"\");",
+        "abcdefghi",
+    );
+    // A comparator that is not a function is the TypeError of step 1;
+    // an Object element has no default string form (the named refusal).
+    assert!(attempt("return [2, 1].sort(1);").is_err());
+    assert!(attempt("return [{}, {}].sort();").is_err());
+}
+
 // =========================================================================
 // What must NOT change, whichever variant wins
 // =========================================================================

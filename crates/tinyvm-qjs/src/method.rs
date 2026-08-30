@@ -28,8 +28,8 @@ use super::repr::{
 use super::array::{ARR_ELEMS, ARR_LEN, Ar, ELEM_BYTES, ELEM_PAYLOAD, ELEM_TAG};
 use super::repr::{box_array, box_bool, const_bool, const_undefined, unbox_object};
 use super::runtime::{
-    ALIGN_WORD, ENTRY_BYTES, ENTRY_KEY, FAULT_CAPABILITY, FN_ELEMENT, FN_ENV, FnBuild, OBJ_ENTRIES,
-    OBJ_LEN, RefusalNames, Rt, RtFunc, copy_loop, record_named_fault,
+    ALIGN_WORD, ENTRY_BYTES, ENTRY_KEY, FAULT_CAPABILITY, FAULT_NOT_A_FUNCTION, FN_ELEMENT, FN_ENV,
+    FnBuild, OBJ_ENTRIES, OBJ_LEN, RefusalNames, Rt, RtFunc, copy_loop, record_named_fault,
 };
 
 /// Where this set sits, and where the unconditional runtime sits. The same
@@ -75,6 +75,14 @@ pub(crate) struct Ctx {
     /// with (ECMA-262 23.1.3.18 step 3). Zero when the plan does not carry
     /// [`Me::Join`]; nothing reads it then.
     pub(crate) comma: i32,
+    /// The interned `"comparefn"` a `sort(x)` whose `x` is not a function
+    /// names itself with (ECMA-262 23.1.3.30 step 1 is a TypeError); the
+    /// host reads it back as the callee of `FAULT_NOT_A_FUNCTION`. Zero when
+    /// the plan does not carry [`Me::SortWith`].
+    pub(crate) comparefn: i32,
+    /// Function index of `__str_cmp`, the code-unit comparison `<` uses;
+    /// `sort`'s default order is that comparison over ToString forms.
+    pub(crate) str_cmp: u32,
 }
 
 impl Ctx {
@@ -195,6 +203,19 @@ pub(crate) enum Me {
     /// `a.join()`: the separator defaults to `","`. Three instructions
     /// around [`Me::Join`].
     JoinDefault,
+    /// `a.sort()` -- ECMA-262 23.1.3.30 with no comparator: String order
+    /// of the elements' ToString forms, `undefined` last. Two hand-written
+    /// merge sorts in the downstream corpus are what this retires.
+    Sort,
+    /// `a.sort(f)`: the comparator form. Its own variant for the arity.
+    SortWith,
+    /// `sort_core(a, cmp)`: the merge sort both forms share -- stable, in
+    /// place, `n` elements of scratch. A helper.
+    SortCore,
+    /// `sort_less(x, y, cmp) -> i32`: 23.1.3.30's SortCompare reduced to
+    /// "does `x` sort before `y`", which is the only question a merge asks.
+    /// A helper.
+    SortLess,
 }
 
 /// Every function this variant can emit, in module order. **Not** what a
@@ -227,6 +248,10 @@ pub(crate) const SET: &[Me] = &[
     Me::Concat2,
     Me::Join,
     Me::JoinDefault,
+    Me::Sort,
+    Me::SortWith,
+    Me::SortCore,
+    Me::SortLess,
 ];
 
 /// Which of [`SET`] a particular module carries, and where each one lands.
@@ -328,6 +353,10 @@ impl Me {
             Me::Concat2 => "__m_concat2",
             Me::Join => "__m_join",
             Me::JoinDefault => "__m_join_default",
+            Me::Sort => "__m_sort",
+            Me::SortWith => "__m_sort_with",
+            Me::SortCore => "__m_sort_core",
+            Me::SortLess => "__m_sort_less",
         }
     }
 
@@ -357,6 +386,8 @@ impl Me {
             ("concat", 2) => Some(Me::Concat2),
             ("join", 1) => Some(Me::Join),
             ("join", 0) => Some(Me::JoinDefault),
+            ("sort", 0) => Some(Me::Sort),
+            ("sort", 1) => Some(Me::SortWith),
             _ => None,
         }
     }
@@ -383,7 +414,9 @@ impl Me {
             | Me::Concat
             | Me::Concat2
             | Me::Join
-            | Me::JoinDefault => Recv::Arr,
+            | Me::JoinDefault
+            | Me::Sort
+            | Me::SortWith => Recv::Arr,
             Me::ObjKeys => Recv::Obj,
             Me::IndexOf | Me::Includes => Recv::StrOrArr,
             Me::IsArray => Recv::Any,
@@ -402,7 +435,9 @@ impl Me {
             | Me::Decode
             | Me::Encode
             | Me::LowerCp
-            | Me::SliceCore => unreachable!("a helper is never a call site"),
+            | Me::SliceCore
+            | Me::SortCore
+            | Me::SortLess => unreachable!("a helper is never a call site"),
         }
     }
 
@@ -439,6 +474,9 @@ impl Me {
             // zero-length record rather than a second interned "".
             Me::Join => vec![Me::Substr],
             Me::JoinDefault => vec![Me::Join, Me::Substr],
+            Me::Sort | Me::SortWith => vec![Me::SortCore, Me::SortLess],
+            Me::SortCore => vec![Me::SortLess],
+            Me::SortLess => Vec::new(),
         }
     }
 }
@@ -507,6 +545,10 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
         Me::Concat2 => (values(3), values(1), concat2(ctx)),
         Me::Join => (values(2), values(1), join(ctx)),
         Me::JoinDefault => (values(1), values(1), join_default(ctx)),
+        Me::Sort => (values(1), values(1), sort(ctx, false)),
+        Me::SortWith => (values(2), values(1), sort(ctx, true)),
+        Me::SortCore => (values(2), vec![], sort_core(ctx)),
+        Me::SortLess => (values(3), vec![i32_], sort_less(ctx)),
     };
     RtFunc {
         name: me.symbol(),
@@ -3252,6 +3294,384 @@ fn join_default(ctx: &Ctx) -> FnBuild {
     b.push(Ins::LocalGet(1));
     const_undefined(b);
     b.push(ctx.me(Me::Join));
+    f
+}
+
+/// `a.sort()` and `a.sort(f)` -- ECMA-262 23.1.3.30.
+///
+/// Both are [`Me::SortCore`] on the receiver's record plus the answer, which
+/// step 11 makes the receiver itself. A comparator that is not a function
+/// is the TypeError of step 1, named `comparefn` for the host
+/// (`FAULT_NOT_A_FUNCTION`); `undefined` is the default order.
+fn sort(ctx: &Ctx, with: bool) -> FnBuild {
+    let mut f = FnBuild::new(if with { 2 * WIDTH } else { WIDTH });
+    let a = f.local(ValType::I32);
+    unbox_array(0, &mut f.body);
+    f.body.push(Ins::LocalSet(a));
+
+    let b = &mut f.body;
+    if with {
+        b.push(Ins::LocalGet(WIDTH));
+        b.push(Ins::I32Const(repr::TAG_FUNCTION));
+        b.push(Ins::I32Ne);
+        b.push(Ins::LocalGet(WIDTH));
+        b.push(Ins::I32Const(TAG_UNDEFINED));
+        b.push(Ins::I32Ne);
+        b.push(Ins::I32And);
+        b.push(Ins::If(BlockType::Empty));
+        record_named_fault(ctx.comparefn, FAULT_NOT_A_FUNCTION, b);
+        b.push(Ins::Unreachable);
+        b.push(Ins::End);
+    }
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::LocalGet(1));
+    if with {
+        b.push(Ins::LocalGet(WIDTH));
+        b.push(Ins::LocalGet(WIDTH + 1));
+    } else {
+        const_undefined(b);
+    }
+    b.push(ctx.me(Me::SortCore));
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::LocalGet(1));
+    f
+}
+
+/// `sort_core(a, cmp)`: a bottom-up merge sort of the record's vector.
+///
+/// # Why a merge sort, and why this one
+///
+/// 23.1.3.30 step 9 asks for a stable sort, and the corpus that wanted this
+/// method had already written one by hand twice -- `prune_target_incremental`
+/// says why in its own comment: "a root can hold up to 100000 records, which
+/// insertion sort would not finish in budget". A merge sort is `n log n`
+/// comparisons and stable by construction (a tie takes the left run), and
+/// bottom-up needs no recursion, which matters in an engine that bounds
+/// call depth.
+///
+/// One scratch vector of `n` elements, allocated once and left to the heap.
+/// Each pass merges runs of `width` from one vector into the other; the
+/// vectors swap roles rather than copying back, and a final copy happens
+/// only when the last pass left the answer in the scratch. `n < 2` does
+/// nothing at all.
+fn sort_core(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH);
+    let a = f.local(ValType::I32);
+    let n = f.local(ValType::I32);
+    let src = f.local(ValType::I32);
+    let dst = f.local(ValType::I32);
+    let width = f.local(ValType::I32);
+    let lo = f.local(ValType::I32);
+    let mid = f.local(ValType::I32);
+    let hi = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+    let j = f.local(ValType::I32);
+    let k = f.local(ValType::I32);
+    let take_right = f.local(ValType::I32);
+    let from = f.local(ValType::I32);
+    let swap = f.local(ValType::I32);
+    let cmp = WIDTH;
+
+    unbox_array(0, &mut f.body);
+    f.body.push(Ins::LocalSet(a));
+
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(a));
+    b.push(Ins::I32Load(ALIGN_WORD, ARR_LEN));
+    b.push(Ins::LocalSet(n));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Const(2));
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    b.push(Ins::LocalGet(a));
+    b.push(Ins::I32Load(ALIGN_WORD, ARR_ELEMS));
+    b.push(Ins::LocalSet(src));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Const(ELEM_BYTES));
+    b.push(Ins::I32Mul);
+    b.push(ctx.rt(Rt::Alloc));
+    b.push(Ins::LocalSet(dst));
+
+    // One element, `src[from]` -> `dst[k]`, then `k += 1`. The three words
+    // are copied as a word and a doubleword.
+    let move_one = |b: &mut Vec<Ins>| {
+        b.push(Ins::LocalGet(dst));
+        b.push(Ins::LocalGet(k));
+        b.push(Ins::I32Const(ELEM_BYTES));
+        b.push(Ins::I32Mul);
+        b.push(Ins::I32Add);
+        b.push(Ins::LocalGet(src));
+        b.push(Ins::LocalGet(from));
+        b.push(Ins::I32Const(ELEM_BYTES));
+        b.push(Ins::I32Mul);
+        b.push(Ins::I32Add);
+        b.push(Ins::LocalTee(from));
+        b.push(Ins::I32Load(ALIGN_WORD, ELEM_TAG));
+        b.push(Ins::I32Store(ALIGN_WORD, ELEM_TAG));
+        b.push(Ins::LocalGet(dst));
+        b.push(Ins::LocalGet(k));
+        b.push(Ins::I32Const(ELEM_BYTES));
+        b.push(Ins::I32Mul);
+        b.push(Ins::I32Add);
+        b.push(Ins::LocalGet(from));
+        b.push(Ins::I64Load(ALIGN_WORD, ELEM_PAYLOAD));
+        b.push(Ins::I64Store(ALIGN_WORD, ELEM_PAYLOAD));
+        b.push(Ins::LocalGet(k));
+        b.push(Ins::I32Const(1));
+        b.push(Ins::I32Add);
+        b.push(Ins::LocalSet(k));
+    };
+    // Push `src[index]` as a V1 pair.
+    let element = |b: &mut Vec<Ins>, index: u32| {
+        b.push(Ins::LocalGet(src));
+        b.push(Ins::LocalGet(index));
+        b.push(Ins::I32Const(ELEM_BYTES));
+        b.push(Ins::I32Mul);
+        b.push(Ins::I32Add);
+        b.push(Ins::I32Load(ALIGN_WORD, ELEM_TAG));
+        b.push(Ins::LocalGet(src));
+        b.push(Ins::LocalGet(index));
+        b.push(Ins::I32Const(ELEM_BYTES));
+        b.push(Ins::I32Mul);
+        b.push(Ins::I32Add);
+        b.push(Ins::I64Load(ALIGN_WORD, ELEM_PAYLOAD));
+    };
+
+    b.push(Ins::I32Const(1));
+    b.push(Ins::LocalSet(width));
+    // Passes: while width < n.
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(width));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(lo));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(k));
+    // Runs: while lo < n.
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(lo));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    // mid = min(lo + width, n); hi = min(lo + 2 width, n).
+    for (bound, times) in [(mid, 1), (hi, 2)] {
+        b.push(Ins::LocalGet(lo));
+        b.push(Ins::LocalGet(width));
+        if times == 2 {
+            b.push(Ins::I32Const(2));
+            b.push(Ins::I32Mul);
+        }
+        b.push(Ins::I32Add);
+        b.push(Ins::LocalSet(bound));
+        b.push(Ins::LocalGet(bound));
+        b.push(Ins::LocalGet(n));
+        b.push(Ins::I32GeU);
+        b.push(Ins::If(BlockType::Empty));
+        b.push(Ins::LocalGet(n));
+        b.push(Ins::LocalSet(bound));
+        b.push(Ins::End);
+    }
+    b.push(Ins::LocalGet(lo));
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::LocalGet(mid));
+    b.push(Ins::LocalSet(j));
+    // Merge: while i < mid or j < hi.
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(mid));
+    b.push(Ins::I32GeU);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::LocalGet(hi));
+    b.push(Ins::I32GeU);
+    b.push(Ins::I32And);
+    b.push(Ins::BrIf(1));
+    // The right element is taken only when the left run is spent, or when
+    // it sorts strictly before the left head -- a tie takes the left, which
+    // is what makes this stable.
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(mid));
+    b.push(Ins::I32GeU);
+    b.push(Ins::LocalSet(take_right));
+    b.push(Ins::LocalGet(take_right));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::LocalGet(hi));
+    b.push(Ins::I32LtU);
+    b.push(Ins::I32And);
+    b.push(Ins::If(BlockType::Empty));
+    element(b, j);
+    element(b, i);
+    b.push(Ins::LocalGet(cmp));
+    b.push(Ins::LocalGet(cmp + 1));
+    b.push(ctx.me(Me::SortLess));
+    b.push(Ins::LocalSet(take_right));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(take_right));
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::LocalSet(from));
+    move_one(b);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(j));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(take_right));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalSet(from));
+    move_one(b);
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::End);
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(hi));
+    b.push(Ins::LocalSet(lo));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    // The pass wrote `dst`; swap the roles for the next.
+    b.push(Ins::LocalGet(src));
+    b.push(Ins::LocalSet(swap));
+    b.push(Ins::LocalGet(dst));
+    b.push(Ins::LocalSet(src));
+    b.push(Ins::LocalGet(swap));
+    b.push(Ins::LocalSet(dst));
+    b.push(Ins::LocalGet(width));
+    b.push(Ins::I32Const(2));
+    b.push(Ins::I32Mul);
+    b.push(Ins::LocalSet(width));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+
+    // The answer is in `src`. When that is the scratch, copy it home:
+    // the record's own vector must hold it, because every other reference
+    // to this array reads that vector.
+    b.push(Ins::LocalGet(src));
+    b.push(Ins::LocalGet(a));
+    b.push(Ins::I32Load(ALIGN_WORD, ARR_ELEMS));
+    b.push(Ins::I32Ne);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(k));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(from));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(k));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(k));
+    b.push(Ins::LocalSet(from));
+    move_one(b);
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    b.push(Ins::End);
+    f
+}
+
+/// `sort_less(x, y, cmp) -> i32`: whether `x` sorts strictly before `y`.
+///
+/// 23.1.3.30's SortCompare, with the parts a merge does not ask about
+/// left out. `undefined` sorts after everything and equal to itself
+/// (steps 1-3, and there are no holes). With no comparator, both sides
+/// go through ToString and the code-unit comparison `<` uses
+/// (`__str_cmp`), so `[10, 9, 1].sort()` is `[1, 10, 9]` exactly as the
+/// spec says and every engine does; an Object element is the same named
+/// refusal `"" + o` is. With one, the comparator is called back the way
+/// `map`'s is, its answer goes through ToNumber, and NaN is 0 (step 6):
+/// "strictly before" is then `v < 0`.
+fn sort_less(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(3 * WIDTH);
+    let x = 0;
+    let y = WIDTH;
+    let cmp = 2 * WIDTH;
+    let v = f.local(ValType::F64);
+    let tag = f.local(ValType::I32);
+    let payload = f.local(ValType::I64);
+    let b = &mut f.body;
+
+    // Step 1-3: undefined last.
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::I32Const(TAG_UNDEFINED));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::Return);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(y));
+    b.push(Ins::I32Const(TAG_UNDEFINED));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::Return);
+    b.push(Ins::End);
+
+    // Step 4: the comparator, when there is one.
+    if let Some((type_index, arity)) = ctx.uniform {
+        b.push(Ins::LocalGet(cmp));
+        b.push(Ins::I32Const(repr::TAG_FUNCTION));
+        b.push(Ins::I32Eq);
+        b.push(Ins::If(BlockType::Empty));
+        // The same call `map_bound` makes: environment, arguments padded
+        // to the uniform arity, element, `call_indirect`.
+        b.push(Ins::LocalGet(cmp + 1));
+        b.push(Ins::I32WrapI64);
+        b.push(Ins::I32Load(ALIGN_WORD, FN_ENV));
+        b.push(Ins::LocalGet(x));
+        b.push(Ins::LocalGet(x + 1));
+        if arity >= 2 {
+            b.push(Ins::LocalGet(y));
+            b.push(Ins::LocalGet(y + 1));
+        }
+        for _ in 2..arity {
+            const_undefined(b);
+        }
+        b.push(Ins::LocalGet(cmp + 1));
+        b.push(Ins::I32WrapI64);
+        b.push(Ins::I32Load(ALIGN_WORD, FN_ELEMENT));
+        b.push(Ins::CallIndirect(type_index, 0));
+        b.push(Ins::LocalSet(payload));
+        b.push(Ins::LocalSet(tag));
+        b.push(Ins::LocalGet(tag));
+        b.push(Ins::LocalGet(payload));
+        b.push(ctx.rt(Rt::ToNumber));
+        b.push(Ins::LocalSet(v));
+        // NaN is 0, and 0 is not "before"; `v < 0` is false for NaN
+        // already, so the test needs no NaN arm of its own.
+        b.push(Ins::LocalGet(v));
+        b.push(Ins::F64Const(0.0));
+        b.push(Ins::F64Lt);
+        b.push(Ins::Return);
+        b.push(Ins::End);
+    }
+
+    // Step 5-9: String order of the ToString forms.
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::LocalGet(x + 1));
+    b.push(ctx.rt(Rt::ToStr));
+    b.push(Ins::LocalGet(y));
+    b.push(Ins::LocalGet(y + 1));
+    b.push(ctx.rt(Rt::ToStr));
+    b.push(Ins::Call(ctx.str_cmp));
+    b.push(Ins::I32Const(-1));
+    b.push(Ins::I32Eq);
     f
 }
 

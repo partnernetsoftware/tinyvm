@@ -784,6 +784,12 @@ pub(crate) mod m1 {
                 } else {
                     0
                 },
+                comparefn: if scan.methods.wants(method::Me::SortWith) {
+                    pool.intern("comparefn")
+                } else {
+                    0
+                },
+                str_cmp: convert_base + convert::Cv::StrCmp.offset(),
             })
         };
 

@@ -42,6 +42,8 @@ fn an_uncatchable_program_names_the_callee() {
         (r#"let f = undefined; return f(1);"#, "f"),
         (r#"let o = { a: 1 }; return o.missing(2);"#, "missing"),
         (r#"let a = [1]; return a.splice(0).length;"#, "splice"),
+        // 23.1.3.30 step 1, named for the host as the parameter it is.
+        (r#"let a = [2, 1]; return a.sort(1).length;"#, "comparefn"),
         (r#"let n = 3; return n();"#, "n"),
         (r#"let o = { f: 7 }; return o.f();"#, "f"),
         (

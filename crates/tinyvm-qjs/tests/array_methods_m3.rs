@@ -47,6 +47,11 @@ fn each_method_has_a_published_price() {
         ("let a = [1, 2]; return a.concat(3, 4).length;", 639),
         ("let a = [1, 2]; return a.join(\"-\").length;", 871),
         ("let a = [1, 2]; return a.join().length;", 885),
+        ("let a = [1, 2]; return a.sort().length;", 948),
+        (
+            "let a = [1, 2]; return a.sort((x, y) => x - y).length;",
+            1_116,
+        ),
     ];
     let got: Vec<usize> = rows
         .iter()

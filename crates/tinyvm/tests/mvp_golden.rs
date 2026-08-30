@@ -656,7 +656,11 @@ fn parse_prd_leaves(prd: &str, marker: &str) -> Vec<String> {
 // `prd/PRD.md`'s acceptance section now writes the command set down, with this
 // package in it, so the next gap is caught by the gate rather than by someone
 // deciding to look.
-const LEAF_TESTS: [(&str, &str); 266] = [
+const LEAF_TESTS: [(&str, &str); 267] = [
+    (
+        "`sort([cmp])`：自底向上归并，稳定、原地、返回自身，undefined 殿后  2026-08-31；948 / 1 116 B；1 000 个数 + 比较器 1.71M 步，1 000 个串默认序 4.21M 步（手写归并 13.8M，3.3×）",
+        "sort_is_stable_in_place_and_returns_the_receiver",
+    ),
     (
         "`Array.isArray(x)`：折成 `x.__is_array()`，任意接收者   2026-08-31；59 B；`rh_compat` 曾手写「有数字 length 的对象」",
         "is_array_answers_the_tag_and_nothing_else",
