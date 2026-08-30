@@ -1395,6 +1395,8 @@ fn num_to_string(ctx: &Ctx) -> FnBuild {
     let i = f.local(ValType::I32);
     let ee = f.local(ValType::I32);
     let wide = f.local(ValType::I32);
+    let hi = f.local(ValType::I32);
+    let hf = f.local(ValType::F64);
     let b = &mut f.body;
 
     // Step 1.
@@ -1438,19 +1440,53 @@ fn num_to_string(ctx: &Ctx) -> FnBuild {
         },
     );
 
-    // Fast path, ahead of Dragon4: an integer below 2^31 prints as its
-    // digits (steps 6-7 with k == n, no exponent, no point), and the general
-    // path cost ~5 200 steps for `"" + n` -- the single most expensive thing
-    // a migrated script did per line. Measured through the CLI at 1012da1.
+    // Fast path, ahead of Dragon4: a safe integer -- `|x| < 2^53`, so every
+    // digit is exact -- prints as its digits (steps 6-7 with k == n, no
+    // exponent, no point). The general path cost ~5 200 steps for `"" + n`
+    // (measured through the CLI at 1012da1) and the first fast path stopped
+    // at 2^31, so a 13-digit millisecond timestamp still paid **32 786**
+    // steps -- server-smoke serialized 102 of them, 12% of the journey
+    // (agenterm plan/design-host-op-budget.md §7). The instruction set has
+    // no i64 division, so the value is split in f64 into `hi * 1e9 + lo`,
+    // both below 2^31, and the two halves take the same i32 digit loop; the
+    // split is exact because every quantity is an integer below 2^53. The
+    // quotient is correctly rounded, not truncated, so it can be one too
+    // large when `x` sits just under a multiple of 1e9; a negative `lo`
+    // says so and is repaired.
     if_then(
         b,
         |b| {
-            b.extend_from_slice(&[ld(x), Ins::F64Const(2_147_483_648.0), Ins::F64Lt]);
+            b.extend_from_slice(&[ld(x), Ins::F64Const(9_007_199_254_740_992.0), Ins::F64Lt]);
             b.extend_from_slice(&[ld(x), ld(x), Ins::F64Trunc, Ins::F64Eq, Ins::I32And]);
         },
         |b| {
+            // hi = trunc(x / 1e9); lo = x - hi * 1e9, repaired if negative.
+            b.extend_from_slice(&[
+                ld(x),
+                Ins::F64Const(1e9),
+                Ins::F64Div,
+                Ins::F64Trunc,
+                st(hf),
+            ]);
+            b.extend_from_slice(&[
+                ld(x),
+                ld(hf),
+                Ins::F64Const(1e9),
+                Ins::F64Mul,
+                Ins::F64Sub,
+                st(x),
+            ]);
+            if_then(
+                b,
+                |b| b.extend_from_slice(&[ld(x), Ins::F64Const(0.0), Ins::F64Lt]),
+                |b| {
+                    b.extend_from_slice(&[ld(hf), Ins::F64Const(1.0), Ins::F64Sub, st(hf)]);
+                    b.extend_from_slice(&[ld(x), Ins::F64Const(1e9), Ins::F64Add, st(x)]);
+                },
+            );
             b.extend_from_slice(&[ld(x), Ins::I32TruncF64S, st(n)]);
-            b.extend_from_slice(&[ic(STRING_HEADER + 12), ctx.alloc(), st(p)]);
+            b.extend_from_slice(&[ld(hf), Ins::I32TruncF64S, st(hi)]);
+            b.extend_from_slice(&[ic(STRING_HEADER + 20), ctx.alloc(), st(p)]);
             b.extend_from_slice(&[ic(0), st(w)]);
             if_then(
                 b,
@@ -1461,20 +1497,62 @@ fn num_to_string(ctx: &Ctx) -> FnBuild {
                     bump(b, w, 1);
                 },
             );
-            // How many digits: at least one, so 0 prints as "0".
-            b.extend_from_slice(&[ld(n), st(k), ic(0), st(i)]);
-            while_loop(
+            // How many digits: `i` from the low half, `ee` from the high one.
+            // With no high half, at least one, so 0 prints as "0"; with one,
+            // the low half is exactly nine, zero-padded, and the high half
+            // counts its own.
+            b.extend_from_slice(&[ic(0), st(i), ic(0), st(ee)]);
+            if_then(
                 b,
+                |b| b.extend_from_slice(&[ld(hi), Ins::I32Eqz]),
                 |b| {
-                    b.extend_from_slice(&[ld(k), ic(0), Ins::I32Ne, ld(i), Ins::I32Eqz, Ins::I32Or])
-                },
-                |b| {
-                    bump(b, i, 1);
-                    b.extend_from_slice(&[ld(k), ic(10), Ins::I32DivS, st(k)]);
+                    b.extend_from_slice(&[ld(n), st(k)]);
+                    while_loop(
+                        b,
+                        |b| {
+                            b.extend_from_slice(&[
+                                ld(k),
+                                ic(0),
+                                Ins::I32Ne,
+                                ld(i),
+                                Ins::I32Eqz,
+                                Ins::I32Or,
+                            ])
+                        },
+                        |b| {
+                            bump(b, i, 1);
+                            b.extend_from_slice(&[ld(k), ic(10), Ins::I32DivS, st(k)]);
+                        },
+                    );
                 },
             );
-            // Written from the end, least significant digit first.
-            b.extend_from_slice(&[ld(w), ld(i), Ins::I32Add, st(w), ld(w), st(k)]);
+            if_then(
+                b,
+                |b| b.push(ld(hi)),
+                |b| {
+                    b.extend_from_slice(&[ic(9), st(i), ld(hi), st(k)]);
+                    while_loop(
+                        b,
+                        |b| b.extend_from_slice(&[ld(k), ic(0), Ins::I32Ne]),
+                        |b| {
+                            bump(b, ee, 1);
+                            b.extend_from_slice(&[ld(k), ic(10), Ins::I32DivS, st(k)]);
+                        },
+                    );
+                },
+            );
+            // Written from the end, least significant digit first: the low
+            // half, then the high half in front of it.
+            b.extend_from_slice(&[
+                ld(w),
+                ld(i),
+                Ins::I32Add,
+                ld(ee),
+                Ins::I32Add,
+                st(w),
+                ld(w),
+                st(k),
+            ]);
             while_loop(
                 b,
                 |b| b.extend_from_slice(&[ld(i), ic(0), Ins::I32Ne]),
@@ -1485,6 +1563,18 @@ fn num_to_string(ctx: &Ctx) -> FnBuild {
                     b.extend_from_slice(&[ld(n), ic(10), Ins::I32RemS, ic(48), Ins::I32Add]);
                     b.push(Ins::I32Store8(0, STRING_HEADER as u32));
                     b.extend_from_slice(&[ld(n), ic(10), Ins::I32DivS, st(n)]);
+                },
+            );
+            while_loop(
+                b,
+                |b| b.extend_from_slice(&[ld(ee), ic(0), Ins::I32Ne]),
+                |b| {
+                    bump(b, k, -1);
+                    bump(b, ee, -1);
+                    b.extend_from_slice(&[ld(p), ld(k), Ins::I32Add]);
+                    b.extend_from_slice(&[ld(hi), ic(10), Ins::I32RemS, ic(48), Ins::I32Add]);
+                    b.push(Ins::I32Store8(0, STRING_HEADER as u32));
+                    b.extend_from_slice(&[ld(hi), ic(10), Ins::I32DivS, st(hi)]);
                 },
             );
             b.extend_from_slice(&[

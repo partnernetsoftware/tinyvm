@@ -62,8 +62,8 @@ fn a_caught_throw_leaves_no_message() {
 #[test]
 fn a_program_that_never_throws_pays_nothing() {
     for (source, want) in [
-        ("return 1;", 10_007),
-        ("let o = {a:1}; o.b = 2; return o.a;", 10_580), /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
+        ("return 1;", 10_198),
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_771), /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(n, want, "{source:?} is {n} bytes");

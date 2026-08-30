@@ -133,7 +133,7 @@ fn what_slice_costs_is_written_down() {
     );
     assert_eq!(
         compile_qjs_m1("return 1;").expect("compiles").len(),
-        10_007,
+        10_198,
         "a program that never slices pays nothing"
     );
 }

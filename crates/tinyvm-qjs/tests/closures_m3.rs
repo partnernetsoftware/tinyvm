@@ -246,14 +246,14 @@ fn a_program_with_no_capture_is_byte_identical_to_what_it_was() {
     // weight than the byte-count body it replaced. Nothing here started paying
     // for anything -- the opposite.
     for (source, want) in [
-        ("return 1;", 10_007),
-        ("let o = {a:1}; o.b = 2; return o.a;", 10_580), /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
+        ("return 1;", 10_198),
+        ("let o = {a:1}; o.b = 2; return o.a;", 10_771), /* +23 on 2026-08-29: a program that reads a static property can reach `__obj_get` with a String receiver, and the arm that names the missing property is 23 bytes; see runtime.rs `FAULT_MISSING_STRING_METHOD` */
         (
             "function mk() { return function () { return 1; }; } let f = mk(); return f();",
             // +153 on 2026-08-30: a program with an indirect call carries `__call_check`
             // and its trampoline (a call on a non-function is a named refusal,
             // tests/not_a_function.rs); "return 1;" did not move.
-            10_529, /* +17 on 2026-08-30: the `qjs.lines` section, paid by every program that declares a function; see arrays_m3; +2 the same night: the section carries the column beside the line */
+            10_720, /* +17 on 2026-08-30: the `qjs.lines` section, paid by every program that declares a function; see arrays_m3; +2 the same night: the section carries the column beside the line */
         ),
         // +23 on 2026-08-29: a program with an unwind channel now records the
         // thrown String's address in the entry epilogue, so the host can read
@@ -268,7 +268,9 @@ fn a_program_with_no_capture_is_byte_identical_to_what_it_was() {
         // measures the run once for both call sites); real broker answers
         // 58-64 -> 34-42 steps a byte (tests/json_parse_cost.rs,
         // plan/design-json-parse-fast.md). Same rule: only JSON programs.
-        ("return JSON.stringify({a:1});", 17_096),
+        // +191 on 2026-08-31 for every row here: `__num_to_string` covers
+        // the safe-integer range; see arrays_m3.
+        ("return JSON.stringify({a:1});", 17_287),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(

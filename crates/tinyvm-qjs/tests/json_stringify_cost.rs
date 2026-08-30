@@ -104,17 +104,20 @@ fn a_journal_record_has_a_known_price() {
     // is itself pretty JSON, so a quote or a newline every twenty bytes.
     // server-smoke writes 34 of them three times each (journal, `[record]`,
     // and the folded log): 7.05M steps, 23% of the journey (2026-08-30).
+    // 82k a record then; 51k on 2026-08-31, once the timestamp's digits
+    // stopped going through Dragon4.
     let record = r#"let record = { recorded_at_ms: 1788101296722, arguments: ["ui-lease", "attach", "--client-id", "server-smoke-ui-1788101296722-78157", "--client-pid", "78157"], expected_failure: false, exit_code: 0, output: "{\n  \"schema_version\": 2,\n  \"lease_id\": \"ui-1314e-1a0532483bb-1\",\n  \"client_id\": \"server-smoke-ui-1788101296722-78157\",\n  \"client_pid\": 78157,\n  \"server_pid\": 78158,\n  \"position\": {\n    \"server_epoch\": \"78158-1788101296-732145000\",\n    \"sequence\": 4\n  },\n  \"expires_unix_ms\": 1788101302083,\n  \"ttl_ms\": 5000,\n  \"observed_sequence\": 0\n}\n" };"#;
     let base = steps(&format!("{record} return record.exit_code;"));
     let one = steps(&format!("{record} return JSON.stringify(record).length;"));
     println!("JSON.stringify of a journal record: {} steps", one - base);
     assert!(
-        one - base < 100_000,
-        "a journal record cost {} steps",
+        one - base < 60_000,
+        "a journal record cost {} steps; it was 51k",
         one - base
     );
-    // The timestamp alone: an integer past the i32 range leaves the digit
-    // loop and takes the general double-to-string path.
+    // The timestamp alone: 32 567 while an integer past the i32 range left
+    // the digit loop for the general double-to-string path; 541 since the
+    // loop covers the safe-integer range (2026-08-31).
     let small = steps("let o = {a: 1}; return JSON.stringify(o).length;");
     let big = steps("let o = {a: 1788101436756}; return JSON.stringify(o).length;");
     println!(
@@ -122,8 +125,8 @@ fn a_journal_record_has_a_known_price() {
         big - small
     );
     assert!(
-        big - small < 40_000,
-        "a millisecond timestamp cost {} steps",
+        big - small < 1_200,
+        "a millisecond timestamp cost {} steps; it was 541",
         big - small
     );
 }
