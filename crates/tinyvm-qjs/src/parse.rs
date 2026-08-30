@@ -332,12 +332,22 @@ pub(crate) mod m1 {
     const BP_CONDITIONAL: u8 = 4;
     const BP_OR: u8 = 6;
     const BP_AND: u8 = 8;
-    const BP_EQUALITY: u8 = 10;
-    const BP_RELATIONAL: u8 = 12;
-    const BP_ADDITIVE: u8 = 14;
-    const BP_MULTIPLICATIVE: u8 = 16;
+    /// ECMA-262 13.12: `|`, then `^`, then `&`, each binding tighter than
+    /// the last and all of them between `&&` and `==` -- `a & b == c` is
+    /// `a & (b == c)`, which is the famous trap and the spec's own order.
+    /// Landing them (2026-08-31) pushed every rung above `&&` up by six.
+    const BP_BITOR: u8 = 10;
+    const BP_BITXOR: u8 = 12;
+    const BP_BITAND: u8 = 14;
+    const BP_EQUALITY: u8 = 16;
+    const BP_RELATIONAL: u8 = 18;
+    /// 13.9: the shifts sit between the relational and additive rungs, so
+    /// `1 << 2 + 3` is `1 << 5`.
+    const BP_SHIFT: u8 = 20;
+    const BP_ADDITIVE: u8 = 22;
+    const BP_MULTIPLICATIVE: u8 = 24;
     /// Unary and update, above every infix level: `-a * 2` is `(-a) * 2`.
-    const BP_PREFIX: u8 = 18;
+    const BP_PREFIX: u8 = 26;
 
     /// How much native stack one script's syntax may spend, counted in frames
     /// of recursive descent.
@@ -2404,6 +2414,10 @@ pub(crate) mod m1 {
                     self.advance();
                     UnaryOp::Not
                 }
+                TokenKind::Tilde => {
+                    self.advance();
+                    UnaryOp::BitNot
+                }
                 // 13.5.3. A keyword rather than punctuation, but the same
                 // rung of the ladder as `!`, `+` and `-`, so it parses here
                 // and its operand is a UnaryExpression.
@@ -3393,8 +3407,17 @@ pub(crate) mod m1 {
             T::StarEq => (Infix::Assign(Some(BinaryOp::Mul)), BP_ASSIGN),
             T::SlashEq => (Infix::Assign(Some(BinaryOp::Div)), BP_ASSIGN),
             T::PercentEq => (Infix::Assign(Some(BinaryOp::Rem)), BP_ASSIGN),
+            T::AmpEq => (Infix::Assign(Some(BinaryOp::BitAnd)), BP_ASSIGN),
+            T::PipeEq => (Infix::Assign(Some(BinaryOp::BitOr)), BP_ASSIGN),
+            T::CaretEq => (Infix::Assign(Some(BinaryOp::BitXor)), BP_ASSIGN),
+            T::ShlEq => (Infix::Assign(Some(BinaryOp::Shl)), BP_ASSIGN),
+            T::ShrEq => (Infix::Assign(Some(BinaryOp::Shr)), BP_ASSIGN),
+            T::UShrEq => (Infix::Assign(Some(BinaryOp::UShr)), BP_ASSIGN),
             T::PipePipe => (Infix::Logical(LogicalOp::Or), BP_OR),
             T::AmpAmp => (Infix::Logical(LogicalOp::And), BP_AND),
+            T::Pipe => (Infix::Binary(BinaryOp::BitOr), BP_BITOR),
+            T::Caret => (Infix::Binary(BinaryOp::BitXor), BP_BITXOR),
+            T::Amp => (Infix::Binary(BinaryOp::BitAnd), BP_BITAND),
             T::EqEq => (Infix::Binary(BinaryOp::Eq), BP_EQUALITY),
             T::BangEq => (Infix::Binary(BinaryOp::Ne), BP_EQUALITY),
             T::EqEqEq => (Infix::Binary(BinaryOp::StrictEq), BP_EQUALITY),
@@ -3403,6 +3426,9 @@ pub(crate) mod m1 {
             T::LtEq => (Infix::Binary(BinaryOp::Le), BP_RELATIONAL),
             T::Gt => (Infix::Binary(BinaryOp::Gt), BP_RELATIONAL),
             T::GtEq => (Infix::Binary(BinaryOp::Ge), BP_RELATIONAL),
+            T::Shl => (Infix::Binary(BinaryOp::Shl), BP_SHIFT),
+            T::Shr => (Infix::Binary(BinaryOp::Shr), BP_SHIFT),
+            T::UShr => (Infix::Binary(BinaryOp::UShr), BP_SHIFT),
             T::Plus => (Infix::Binary(BinaryOp::Add), BP_ADDITIVE),
             T::Minus => (Infix::Binary(BinaryOp::Sub), BP_ADDITIVE),
             T::Star => (Infix::Binary(BinaryOp::Mul), BP_MULTIPLICATIVE),

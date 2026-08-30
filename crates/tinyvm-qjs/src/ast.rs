@@ -554,6 +554,8 @@ pub(crate) mod m1 {
         /// Unary `+`: ToNumber, not a no-op.
         Plus,
         Not,
+        /// `~`: ToInt32, then every bit flipped (13.5.6).
+        BitNot,
         /// `typeof`: the ECMA-262 13.5.3 name of the operand's language type,
         /// as a String. The one unary operator whose result is not a Number
         /// or a Boolean.
@@ -583,9 +585,27 @@ pub(crate) mod m1 {
         Ne,
         StrictEq,
         StrictNe,
+        /// The bitwise and shift operators (13.10, 13.12), all over
+        /// ToInt32 of both operands; `>>>` alone reads its result as
+        /// unsigned. Gated: only a program that writes one carries the
+        /// conversion (`method::Me::ToInt32`) and the operator's own body.
+        BitAnd,
+        BitOr,
+        BitXor,
+        Shl,
+        Shr,
+        UShr,
     }
 
     impl BinaryOp {
+        /// Whether the operator is one of the six ToInt32 ones.
+        pub(crate) fn is_bitwise(self) -> bool {
+            matches!(
+                self,
+                Self::BitAnd | Self::BitOr | Self::BitXor | Self::Shl | Self::Shr | Self::UShr
+            )
+        }
+
         /// How the operator is written. For diagnostics and for tests that
         /// assert a tree *shape*, which is the readable way to state a
         /// precedence claim.
@@ -604,6 +624,12 @@ pub(crate) mod m1 {
                 Self::Ne => "!=",
                 Self::StrictEq => "===",
                 Self::StrictNe => "!==",
+                Self::BitAnd => "&",
+                Self::BitOr => "|",
+                Self::BitXor => "^",
+                Self::Shl => "<<",
+                Self::Shr => ">>",
+                Self::UShr => ">>>",
             }
         }
     }

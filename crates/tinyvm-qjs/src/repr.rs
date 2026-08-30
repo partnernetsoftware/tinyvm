@@ -203,8 +203,15 @@ pub(crate) enum Ins {
     /// UTF-8's leading bits apart -- the signed form would smear the sign bit
     /// into a code point.
     I32ShrU,
+    /// `^`, the signed shift and the four rounding/`sqrt`/`min`/`max` forms
+    /// below arrived with the bitwise operators and `Math` (2026-08-31);
+    /// before that `a ^ b` was spelled `(a | b) - (a & b)` and `~x` as
+    /// `-1 - x`.
+    I32Xor,
+    I32ShrS,
     // i64
     I64Eq,
+    I64Add,
     // f64
     F64Eq,
     F64Ne,
@@ -214,6 +221,12 @@ pub(crate) enum Ins {
     F64Ge,
     F64Abs,
     F64Neg,
+    F64Ceil,
+    F64Floor,
+    F64Nearest,
+    F64Sqrt,
+    F64Min,
+    F64Max,
     F64Add,
     F64Sub,
     F64Mul,
@@ -225,6 +238,7 @@ pub(crate) enum Ins {
     I32WrapI64,
     I64ExtendI32U,
     F64ConvertI32S,
+    F64ConvertI32U,
     F64ReinterpretI64,
     I64ReinterpretF64,
 }

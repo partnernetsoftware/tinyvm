@@ -656,7 +656,11 @@ fn parse_prd_leaves(prd: &str, marker: &str) -> Vec<String> {
 // `prd/PRD.md`'s acceptance section now writes the command set down, with this
 // package in it, so the next gap is caught by the gate rather than by someone
 // deciding to look.
-const LEAF_TESTS: [(&str, &str); 271] = [
+const LEAF_TESTS: [(&str, &str); 272] = [
+    (
+        "位运算 `&   ^ ~ << >> >>>` 与六个复合赋值：ToInt32 一个 prefab，逐运算符门控  2026-08-31；每个运算符 ~170 B、45 步（2^31 外 65）；`xor16` 手写 16 轮 14.5M → `^` 267k 步（54×）",
+        "the_six_operators_on_small_integers",
+    ),
     (
         "`JSON.stringify(v, null, space)`：数 1..10 / 串前 10 码元，25.5.2 原样  2026-08-31；JSON 程序 +501 B；50 个小对象 space=2 281 965 步（61/输出字节），紧凑路 178 202 不动；replacer 仍具名拒绝",
         "a_number_space_indents_by_that_many_spaces",

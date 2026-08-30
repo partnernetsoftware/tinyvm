@@ -21,11 +21,12 @@
 
 use super::repr::{
     self, BlockType, Ins, TAG_NULL, TAG_NUMBER, TAG_UNDEFINED, ValType, WIDTH, box_number,
-    box_string, unbox_array, unbox_number, unbox_string,
+    box_string, load_local, unbox_array, unbox_number, unbox_string,
 };
 // `map`'s prefab is the one function that builds an array and calls back into
 // a function value; `box_function` is variant A's and B's property read.
 use super::array::{ARR_ELEMS, ARR_LEN, Ar, ELEM_BYTES, ELEM_PAYLOAD, ELEM_TAG};
+use super::ast::m1 as ast;
 use super::repr::{box_array, box_bool, const_bool, const_undefined, unbox_object};
 use super::runtime::{
     ALIGN_WORD, ENTRY_BYTES, ENTRY_KEY, FAULT_CAPABILITY, FAULT_NOT_A_FUNCTION, FN_ELEMENT, FN_ENV,
@@ -237,6 +238,23 @@ pub(crate) enum Me {
     /// wanted by the scan for a program that writes a computed read whose
     /// key the text does not settle.
     StrIndex,
+    /// ECMA-262 7.1.6 ToInt32 of a value, as a raw `i32`: the one
+    /// conversion the six bitwise operators and `~` share, and the whole of
+    /// what a program pays beyond the operator it writes. Never a call
+    /// site; wanted as a helper.
+    ToInt32,
+    /// The bitwise and shift operators (13.10, 13.12) and `~` (13.5.6).
+    /// Not methods -- an operator has no name to call it by -- but gated
+    /// the way a method is: the scan wants the one the program writes, and
+    /// a program that writes none carries none. `UShr` alone reads its
+    /// result as unsigned (7.1.7 ToUint32 has the same bits).
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    UShr,
+    BitNot,
 }
 
 /// Every function this variant can emit, in module order. **Not** what a
@@ -278,6 +296,14 @@ pub(crate) const SET: &[Me] = &[
     Me::Substring,
     Me::SubstringFrom,
     Me::StrIndex,
+    Me::ToInt32,
+    Me::BitAnd,
+    Me::BitOr,
+    Me::BitXor,
+    Me::Shl,
+    Me::Shr,
+    Me::UShr,
+    Me::BitNot,
 ];
 
 /// Which of [`SET`] a particular module carries, and where each one lands.
@@ -388,7 +414,29 @@ impl Me {
             Me::Substring => "__m_substring",
             Me::SubstringFrom => "__m_substring_from",
             Me::StrIndex => "__m_str_index",
+            Me::ToInt32 => "__m_to_int32",
+            Me::BitAnd => "__m_bit_and",
+            Me::BitOr => "__m_bit_or",
+            Me::BitXor => "__m_bit_xor",
+            Me::Shl => "__m_shl",
+            Me::Shr => "__m_shr",
+            Me::UShr => "__m_ushr",
+            Me::BitNot => "__m_bit_not",
         }
+    }
+
+    /// The prefab behind one bitwise operator. `None` for every other
+    /// operator, which the unconditional runtime answers.
+    pub(crate) fn of_binary(op: ast::BinaryOp) -> Option<Self> {
+        Some(match op {
+            ast::BinaryOp::BitAnd => Me::BitAnd,
+            ast::BinaryOp::BitOr => Me::BitOr,
+            ast::BinaryOp::BitXor => Me::BitXor,
+            ast::BinaryOp::Shl => Me::Shl,
+            ast::BinaryOp::Shr => Me::Shr,
+            ast::BinaryOp::UShr => Me::UShr,
+            _ => return None,
+        })
     }
 
     /// The method a `recv.name(args)` call site denotes, or `None` when this
@@ -477,7 +525,15 @@ impl Me {
             | Me::SliceCore
             | Me::SortCore
             | Me::SortLess
-            | Me::StrIndex => unreachable!("a helper is never a call site"),
+            | Me::StrIndex
+            | Me::ToInt32
+            | Me::BitAnd
+            | Me::BitOr
+            | Me::BitXor
+            | Me::Shl
+            | Me::Shr
+            | Me::UShr
+            | Me::BitNot => unreachable!("a helper or an operator is never a call site"),
         }
     }
 
@@ -520,6 +576,10 @@ impl Me {
             Me::CharCodeAt => vec![Me::Decode],
             Me::CharAt | Me::Substring | Me::SubstringFrom | Me::StrIndex => {
                 vec![Me::SliceCore, Me::Substr]
+            }
+            Me::ToInt32 => Vec::new(),
+            Me::BitAnd | Me::BitOr | Me::BitXor | Me::Shl | Me::Shr | Me::UShr | Me::BitNot => {
+                vec![Me::ToInt32]
             }
         }
     }
@@ -598,6 +658,14 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
         Me::Substring => (values(3), values(1), substring(ctx, true)),
         Me::SubstringFrom => (values(2), values(1), substring(ctx, false)),
         Me::StrIndex => (values(2), values(1), str_index(ctx)),
+        Me::ToInt32 => (values(1), vec![i32_], to_int32(ctx)),
+        Me::BitAnd => (values(2), values(1), bitwise(ctx, Bit::And)),
+        Me::BitOr => (values(2), values(1), bitwise(ctx, Bit::Or)),
+        Me::BitXor => (values(2), values(1), bitwise(ctx, Bit::Xor)),
+        Me::Shl => (values(2), values(1), bitwise(ctx, Bit::Shl)),
+        Me::Shr => (values(2), values(1), bitwise(ctx, Bit::Shr)),
+        Me::UShr => (values(2), values(1), bitwise(ctx, Bit::UShr)),
+        Me::BitNot => (values(1), values(1), bit_not(ctx)),
     };
     RtFunc {
         name: me.symbol(),
@@ -4235,5 +4303,132 @@ fn pop() -> FnBuild {
     b.push(Ins::I32Load(ALIGN_WORD, ELEM_TAG));
     b.push(Ins::LocalGet(a));
     b.push(Ins::I64Load(ALIGN_WORD, ELEM_PAYLOAD));
+    f
+}
+
+// ---- the bitwise operators ---------------------------------------------
+
+/// `__m_to_int32(v) -> i32`: ECMA-262 7.1.6 over ToNumber.
+///
+/// NaN and the two infinities are 0 (steps 2-3); everything else is
+/// truncated and reduced modulo 2^32 into the signed range (steps 4-5).
+/// The reduction is `x - 2^32 * floor(x / 2^32)`, and every operation in it
+/// is exact: the division and the multiplication scale by a power of two,
+/// `floor` of a double is a double, and the final subtraction is of two
+/// integers whose difference is below 2^32 -- Sterbenz for `|x| >= 2^33`,
+/// and plain representability below that. The common case, `|x| < 2^31`,
+/// takes none of that road: one compare and `i32.trunc_f64_s`, which cannot
+/// trap there.
+fn to_int32(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(WIDTH);
+    let x = f.local(ValType::F64);
+    let b = &mut f.body;
+    load_local(0, b);
+    b.push(ctx.rt(Rt::ToNumber));
+    b.push(Ins::LocalTee(x));
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Ne);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::Return);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Trunc);
+    b.push(Ins::LocalTee(x));
+    b.push(Ins::F64Abs);
+    b.push(Ins::F64Const(2_147_483_648.0));
+    b.push(Ins::F64Lt);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::I32TruncF64S);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Abs);
+    b.push(Ins::F64Const(f64::INFINITY));
+    b.push(Ins::F64Eq);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::Return);
+    b.push(Ins::End);
+    // x = x - 2^32 * floor(x / 2^32), in [0, 2^32)
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Const(4_294_967_296.0));
+    b.push(Ins::F64Div);
+    b.push(Ins::F64Floor);
+    b.push(Ins::F64Const(4_294_967_296.0));
+    b.push(Ins::F64Mul);
+    b.push(Ins::F64Sub);
+    b.push(Ins::LocalTee(x));
+    b.push(Ins::F64Const(2_147_483_648.0));
+    b.push(Ins::F64Ge);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Const(4_294_967_296.0));
+    b.push(Ins::F64Sub);
+    b.push(Ins::LocalSet(x));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::I32TruncF64S);
+    f
+}
+
+#[derive(Clone, Copy)]
+enum Bit {
+    And,
+    Or,
+    Xor,
+    Shl,
+    Shr,
+    UShr,
+}
+
+/// One of the six binary operators: ToInt32 of each side in order, the
+/// shift count masked to five bits (13.12.1 step 6), the wasm instruction,
+/// and the result read back as a Number -- signed for five of them,
+/// unsigned for `>>>` (13.12.3: `ToUint32` of the left operand has the same
+/// bits, and the shifted-in zeros make the result non-negative).
+fn bitwise(ctx: &Ctx, which: Bit) -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH);
+    let mut inner = Vec::new();
+    load_local(0, &mut inner);
+    inner.push(ctx.me(Me::ToInt32));
+    load_local(WIDTH, &mut inner);
+    inner.push(ctx.me(Me::ToInt32));
+    if matches!(which, Bit::Shl | Bit::Shr | Bit::UShr) {
+        inner.push(Ins::I32Const(31));
+        inner.push(Ins::I32And);
+    }
+    inner.push(match which {
+        Bit::And => Ins::I32And,
+        Bit::Or => Ins::I32Or,
+        Bit::Xor => Ins::I32Xor,
+        Bit::Shl => Ins::I32Shl,
+        Bit::Shr => Ins::I32ShrS,
+        Bit::UShr => Ins::I32ShrU,
+    });
+    inner.push(match which {
+        Bit::UShr => Ins::F64ConvertI32U,
+        _ => Ins::F64ConvertI32S,
+    });
+    let mut boxed = Vec::new();
+    box_number(&inner, &mut boxed);
+    f.body.extend(boxed);
+    f
+}
+
+/// `~x` (13.5.6): ToInt32, every bit flipped, read back signed.
+fn bit_not(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(WIDTH);
+    let mut inner = Vec::new();
+    load_local(0, &mut inner);
+    inner.push(ctx.me(Me::ToInt32));
+    inner.push(Ins::I32Const(-1));
+    inner.push(Ins::I32Xor);
+    inner.push(Ins::F64ConvertI32S);
+    let mut boxed = Vec::new();
+    box_number(&inner, &mut boxed);
+    f.body.extend(boxed);
     f
 }

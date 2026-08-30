@@ -171,6 +171,22 @@ pub(crate) enum TokenKind {
     GtEq,
     AmpAmp,
     PipePipe,
+    // The bitwise and shift operators (ECMA-262 13.10, 13.12) and their
+    // compound assignments, graduated on 2026-08-31: downstream scripts
+    // spelled `xor16` as a sixteen-turn loop for want of `^`.
+    Amp,
+    Pipe,
+    Caret,
+    Tilde,
+    Shl,
+    Shr,
+    UShr,
+    AmpEq,
+    PipeEq,
+    CaretEq,
+    ShlEq,
+    ShrEq,
+    UShrEq,
 
     /// Real JavaScript this engine does not lower yet.
     Unsupported(Unlowered),
@@ -251,6 +267,19 @@ impl TokenKind {
             Self::GtEq => "a `>=`",
             Self::AmpAmp => "a `&&`",
             Self::PipePipe => "a `||`",
+            Self::Amp => "a `&`",
+            Self::Pipe => "a `|`",
+            Self::Caret => "a `^`",
+            Self::Tilde => "a `~`",
+            Self::Shl => "a `<<`",
+            Self::Shr => "a `>>`",
+            Self::UShr => "a `>>>`",
+            Self::AmpEq => "an `&=`",
+            Self::PipeEq => "a `|=`",
+            Self::CaretEq => "a `^=`",
+            Self::ShlEq => "a `<<=`",
+            Self::ShrEq => "a `>>=`",
+            Self::UShrEq => "a `>>>=`",
             Self::Unsupported(_) => "an unsupported construct",
             Self::Eof => "the end of the source",
         }
@@ -285,6 +314,21 @@ impl TokenKind {
                 (Boundary::Subset, "the increment and decrement operators")
             }
             Self::AmpAmp | Self::PipePipe => (Boundary::Subset, "logical operators"),
+            // The M1 front end lowers these since 2026-08-31; the M0 one
+            // still calls them what it always called them.
+            Self::Amp
+            | Self::Pipe
+            | Self::Caret
+            | Self::Tilde
+            | Self::Shl
+            | Self::Shr
+            | Self::UShr
+            | Self::AmpEq
+            | Self::PipeEq
+            | Self::CaretEq
+            | Self::ShlEq
+            | Self::ShrEq
+            | Self::UShrEq => (Boundary::Subset, BITWISE),
             // The lexer graduated this in M3; a front end that cannot build
             // the function still calls it what it always called it.
             Self::FatArrow => (Boundary::FullJs, "arrow functions"),
@@ -1043,12 +1087,13 @@ impl Lexer<'_> {
     fn punctuation(&mut self) -> TokenKind {
         let rest = &self.bytes[self.pos..];
         let (len, kind) = match rest {
-            [b'>', b'>', b'>', b'=', ..] => (4, subset(ASSIGNMENT)),
+            [b'>', b'>', b'>', b'=', ..] => (4, TokenKind::UShrEq),
 
             [b'=', b'=', b'=', ..] => (3, TokenKind::EqEqEq),
             [b'!', b'=', b'=', ..] => (3, TokenKind::BangEqEq),
-            [b'>', b'>', b'>', ..] => (3, subset(BITWISE)),
-            [b'<', b'<', b'=', ..] | [b'>', b'>', b'=', ..] => (3, subset(ASSIGNMENT)),
+            [b'>', b'>', b'>', ..] => (3, TokenKind::UShr),
+            [b'<', b'<', b'=', ..] => (3, TokenKind::ShlEq),
+            [b'>', b'>', b'=', ..] => (3, TokenKind::ShrEq),
             [b'*', b'*', b'=', ..] => (3, subset(ASSIGNMENT)),
             [b'&', b'&', b'=', ..] | [b'|', b'|', b'=', ..] | [b'?', b'?', b'=', ..] => {
                 (3, subset("logical assignment"))
@@ -1061,7 +1106,8 @@ impl Lexer<'_> {
             [b'=', b'>', ..] => (2, TokenKind::FatArrow),
             [b'=', b'=', ..] => (2, TokenKind::EqEq),
             [b'!', b'=', ..] => (2, TokenKind::BangEq),
-            [b'<', b'<', ..] | [b'>', b'>', ..] => (2, subset(BITWISE)),
+            [b'<', b'<', ..] => (2, TokenKind::Shl),
+            [b'>', b'>', ..] => (2, TokenKind::Shr),
             [b'<', b'=', ..] => (2, TokenKind::LtEq),
             [b'>', b'=', ..] => (2, TokenKind::GtEq),
             [b'&', b'&', ..] => (2, TokenKind::AmpAmp),
@@ -1073,7 +1119,9 @@ impl Lexer<'_> {
             [b'*', b'=', ..] => (2, TokenKind::StarEq),
             [b'/', b'=', ..] => (2, TokenKind::SlashEq),
             [b'%', b'=', ..] => (2, TokenKind::PercentEq),
-            [b'&' | b'|' | b'^', b'=', ..] => (2, subset(ASSIGNMENT)),
+            [b'&', b'=', ..] => (2, TokenKind::AmpEq),
+            [b'|', b'=', ..] => (2, TokenKind::PipeEq),
+            [b'^', b'=', ..] => (2, TokenKind::CaretEq),
 
             [b'+', ..] => (1, TokenKind::Plus),
             [b'-', ..] => (1, TokenKind::Minus),
@@ -1094,7 +1142,10 @@ impl Lexer<'_> {
             [b']', ..] => (1, TokenKind::RBracket),
             [b'.', ..] => (1, TokenKind::Dot),
             [b':', ..] => (1, TokenKind::Colon),
-            [b'&' | b'|' | b'^' | b'~', ..] => (1, subset(BITWISE)),
+            [b'&', ..] => (1, TokenKind::Amp),
+            [b'|', ..] => (1, TokenKind::Pipe),
+            [b'^', ..] => (1, TokenKind::Caret),
+            [b'~', ..] => (1, TokenKind::Tilde),
             [b'?', ..] => (1, TokenKind::Question),
             _ => {
                 // Not ASCII punctuation the engine knows. Name the character

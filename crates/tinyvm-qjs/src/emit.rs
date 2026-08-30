@@ -1217,7 +1217,10 @@ pub(crate) mod m1 {
                 Ins::I32Or => ir::Ins::I32Or,
                 Ins::I32Shl => ir::Ins::I32Shl,
                 Ins::I32ShrU => ir::Ins::I32ShrU,
+                Ins::I32Xor => ir::Ins::I32Xor,
+                Ins::I32ShrS => ir::Ins::I32ShrS,
                 Ins::I64Eq => ir::Ins::I64Eq,
+                Ins::I64Add => ir::Ins::I64Add,
                 Ins::F64Eq => ir::Ins::F64Eq,
                 Ins::F64Ne => ir::Ins::F64Ne,
                 Ins::F64Lt => ir::Ins::F64Lt,
@@ -1226,6 +1229,12 @@ pub(crate) mod m1 {
                 Ins::F64Ge => ir::Ins::F64Ge,
                 Ins::F64Abs => ir::Ins::F64Abs,
                 Ins::F64Neg => ir::Ins::F64Neg,
+                Ins::F64Ceil => ir::Ins::F64Ceil,
+                Ins::F64Floor => ir::Ins::F64Floor,
+                Ins::F64Nearest => ir::Ins::F64Nearest,
+                Ins::F64Sqrt => ir::Ins::F64Sqrt,
+                Ins::F64Min => ir::Ins::F64Min,
+                Ins::F64Max => ir::Ins::F64Max,
                 Ins::F64Add => ir::Ins::F64Add,
                 Ins::F64Sub => ir::Ins::F64Sub,
                 Ins::F64Mul => ir::Ins::F64Mul,
@@ -1236,6 +1245,7 @@ pub(crate) mod m1 {
                 Ins::I32WrapI64 => ir::Ins::I32WrapI64,
                 Ins::I64ExtendI32U => ir::Ins::I64ExtendI32U,
                 Ins::F64ConvertI32S => ir::Ins::F64ConvertI32S,
+                Ins::F64ConvertI32U => ir::Ins::F64ConvertI32U,
                 Ins::F64ReinterpretI64 => ir::Ins::F64ReinterpretI64,
                 Ins::I64ReinterpretF64 => ir::Ins::I64ReinterpretF64,
             }
@@ -1873,18 +1883,34 @@ pub(crate) mod m1 {
             }
             ast::ExprKind::Unary(op, operand) => {
                 scan.type_of |= *op == ast::UnaryOp::TypeOf;
+                if *op == ast::UnaryOp::BitNot {
+                    scan.methods.want(method::Me::BitNot);
+                }
                 host_expr(operand, scan)
             }
             ast::ExprKind::Update { target, .. } => {
                 scan.member_write |= matches!(target.kind, ast::ExprKind::Member { .. });
                 host_expr(target, scan)
             }
-            ast::ExprKind::Binary(_, lhs, rhs) | ast::ExprKind::Logical(_, lhs, rhs) => {
+            ast::ExprKind::Binary(op, lhs, rhs) => {
+                // The bitwise gate: an operator has no name a call site
+                // could want it by, so the scan wants it here. Exact --
+                // the text either writes `&` or it does not.
+                if let Some(me) = method::Me::of_binary(*op) {
+                    scan.methods.want(me);
+                }
                 host_expr(lhs, scan)?;
                 host_expr(rhs, scan)
             }
-            ast::ExprKind::Assign { target, value, .. } => {
+            ast::ExprKind::Logical(_, lhs, rhs) => {
+                host_expr(lhs, scan)?;
+                host_expr(rhs, scan)
+            }
+            ast::ExprKind::Assign { op, target, value } => {
                 scan.member_write |= matches!(target.kind, ast::ExprKind::Member { .. });
+                if let Some(me) = op.and_then(method::Me::of_binary) {
+                    scan.methods.want(me);
+                }
                 host_expr(target, scan)?;
                 host_expr(value, scan)
             }
@@ -3536,7 +3562,7 @@ pub(crate) mod m1 {
                 ast::ExprKind::Binary(op, lhs, rhs) => {
                     self.expr(lhs)?;
                     self.expr(rhs)?;
-                    let call = self.ctx.call(binary(*op));
+                    let call = self.binary_call(*op);
                     self.push(call);
                     Ok(())
                 }
@@ -4353,8 +4379,35 @@ pub(crate) mod m1 {
                     })?;
                     box_bool(&inner, &mut self.f.body);
                 }
+                // 13.5.6, through the gated prefab: the scan wanted it for
+                // this `~`, so the plan carries it.
+                ast::UnaryOp::BitNot => {
+                    self.expr(operand)?;
+                    let call = self.method_call(method::Me::BitNot);
+                    self.push(call);
+                }
             }
             Ok(())
+        }
+
+        /// The call one binary operator lowers to: the unconditional runtime
+        /// for the arithmetic and comparison operators, the gated prefab for
+        /// a bitwise one.
+        fn binary_call(&self, op: ast::BinaryOp) -> Ins {
+            match method::Me::of_binary(op) {
+                Some(me) => self.method_call(me),
+                None => self.ctx.call(binary(op)),
+            }
+        }
+
+        /// A direct call into the method set, for a prefab the scan wanted
+        /// off the syntax rather than off a call site.
+        fn method_call(&self, me: method::Me) -> Ins {
+            let (base, plan) = self
+                .methods
+                .as_ref()
+                .expect("the scan turns the set on for every operator that needs it");
+            Ins::Call(base + plan.offset(me))
         }
 
         /// `test ? then : alt`, ECMA-262 13.14.
@@ -4453,7 +4506,7 @@ pub(crate) mod m1 {
                 Some(op) => {
                     self.load_target(&target);
                     self.expr(value)?;
-                    let call = self.ctx.call(binary(op));
+                    let call = self.binary_call(op);
                     self.push(call);
                 }
             }
@@ -4616,6 +4669,14 @@ pub(crate) mod m1 {
             ast::BinaryOp::Ne => Rt::Ne,
             ast::BinaryOp::StrictEq => Rt::StrictEq,
             ast::BinaryOp::StrictNe => Rt::StrictNe,
+            ast::BinaryOp::BitAnd
+            | ast::BinaryOp::BitOr
+            | ast::BinaryOp::BitXor
+            | ast::BinaryOp::Shl
+            | ast::BinaryOp::Shr
+            | ast::BinaryOp::UShr => {
+                unreachable!("a bitwise operator is a gated prefab, not a runtime function")
+            }
         }
     }
 }

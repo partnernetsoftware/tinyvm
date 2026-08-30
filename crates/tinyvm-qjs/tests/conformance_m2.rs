@@ -1472,13 +1472,8 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     // grammars of their own rather than a decimal it could not spell.
     // -- operators ----------------------------------------------------------
     ("2 ** 3", "exponentiation"),
-    ("1 & 2", "bitwise operators"),
-    ("1 | 2", "bitwise operators"),
-    ("1 ^ 2", "bitwise operators"),
-    ("~1", "bitwise operators"),
-    ("1 << 2", "bitwise operators"),
-    ("1 >> 2", "bitwise operators"),
-    ("1 >>> 2", "bitwise operators"),
+    // The seven bitwise and shift forms left this table on 2026-08-31;
+    // `tests/bitwise_conformance.rs` is where their answers are asserted.
     ("null ?? 1", "the nullish coalescing operator"),
     ("let x = 1; x ||= 2; return x;", "logical assignment"),
     ("let x = 1; x &&= 2; return x;", "logical assignment"),

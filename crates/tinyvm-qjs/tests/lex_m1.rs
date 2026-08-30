@@ -149,8 +149,22 @@ fn the_longest_operator_wins() {
     assert_eq!(kinds("!=="), vec![BangEqEq]);
     assert_eq!(kinds("<="), vec![LtEq]);
     assert_eq!(kinds("a<-1"), vec![Ident("a".into()), Lt, Minus, Int(1)]);
-    // `<<` is still out of subset, and must not read as two `<`.
-    assert!(matches!(kinds("<<")[..], [TokenKind::Unsupported(_)]));
+    // `<<` graduated on 2026-08-31 and still must not read as two `<`;
+    // nor `>>>=` as `>>` `>=`, nor `>>>` as `>>` `>`.
+    assert_eq!(kinds("<<"), vec![Shl]);
+    assert_eq!(kinds(">>>="), vec![UShrEq]);
+    assert_eq!(kinds(">>> >"), vec![UShr, Gt]);
+    assert_eq!(
+        kinds("a&&b&c"),
+        vec![
+            Ident("a".into()),
+            AmpAmp,
+            Ident("b".into()),
+            Amp,
+            Ident("c".into())
+        ]
+    );
+    assert_eq!(kinds("~x"), vec![Tilde, Ident("x".into())]);
     assert_eq!(kinds("++ +"), vec![PlusPlus, Plus]);
 }
 
@@ -396,8 +410,11 @@ fn rule_one_and_two_are_offered_to_the_parser_rather_than_guessed_at() {
 fn what_is_still_out_of_subset_still_names_itself() {
     let cases = [
         ("2 ** 3", Boundary::Subset, "exponentiation"),
-        ("1 & 2", Boundary::Subset, "bitwise operators"),
-        ("1 << 2", Boundary::Subset, "bitwise operators"),
+        // `1 & 2` and `1 << 2` stood here until the bitwise operators
+        // landed (2026-08-31); the logical assignments are the operator
+        // forms still ahead of the lexer's graduated set.
+        ("x ||= 2", Boundary::Subset, "logical assignment"),
+        ("x ??= 2", Boundary::Subset, "logical assignment"),
         ("1 ? 2 : 3", Boundary::Subset, "conditional expressions"),
         ("`t`", Boundary::Subset, "template literals"),
         // `1.5` stood here until the lexer learned the whole DecimalLiteral
