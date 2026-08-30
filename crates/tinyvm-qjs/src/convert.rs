@@ -3271,7 +3271,14 @@ pub(crate) mod json {
     const JB_LEN: u32 = 0;
     const JB_CAP: u32 = 4;
     const JB_DATA: u32 = 8;
-    const JB_HEADER: i32 = 12;
+    /// 25.5.2's `gap`: the record of the indentation unit, or 0 for none,
+    /// and the nesting depth the serializer is at. Kept in the buffer rather
+    /// than in globals or parameters because the buffer is already the one
+    /// thing every serializer function is handed, and a `stringify` has
+    /// exactly one buffer.
+    const JB_GAP: u32 = 12;
+    const JB_DEPTH: u32 = 16;
+    const JB_HEADER: i32 = 20;
     /// The first data allocation. Sized for the acceptance target's parameter
     /// objects — `{"tab":"t3","note":"…"}` and its six siblings — so the common
     /// case never grows at all.
@@ -3310,6 +3317,9 @@ pub(crate) mod json {
         JbStr,
         JbBytes,
         JbTake,
+        /// A line feed and the indentation for the current depth -- nothing
+        /// at all when there is no gap.
+        JbNl,
         // 25.5.2, SerializeJSONProperty and friends
         Quote,
         Ser,
@@ -3344,6 +3354,7 @@ pub(crate) mod json {
         Js::JbStr,
         Js::JbBytes,
         Js::JbTake,
+        Js::JbNl,
         Js::Quote,
         Js::Ser,
         Js::SerObj,
@@ -3377,6 +3388,7 @@ pub(crate) mod json {
                 Js::JbStr => "__jb_str",
                 Js::JbBytes => "__jb_bytes",
                 Js::JbTake => "__jb_take",
+                Js::JbNl => "__jb_nl",
                 Js::Quote => "__json_quote",
                 Js::Ser => "__json_ser",
                 Js::SerObj => "__json_ser_obj",
@@ -3451,9 +3463,7 @@ pub(crate) mod json {
                 surrogate: pool
                     .intern("this engine does not support unpaired surrogates in JSON text yet"),
                 cycle: pool.intern("JSON.stringify: converting circular structure to JSON"),
-                replacer: pool.intern(
-                    "this engine does not support a JSON.stringify replacer or space argument yet",
-                ),
+                replacer: pool.intern("this engine does not support a JSON.stringify replacer yet"),
                 reviver: pool.intern("this engine does not support a JSON.parse reviver yet"),
             }
         }
@@ -3569,6 +3579,7 @@ pub(crate) mod json {
             Js::JbStr => (vec![I32, I32], vec![], jb_str(ctx)),
             Js::JbBytes => (vec![I32, I32, I32], vec![], jb_bytes(ctx)),
             Js::JbTake => (vec![I32], vec![I32], jb_take(ctx)),
+            Js::JbNl => (vec![I32], vec![], jb_nl(ctx)),
             Js::Quote => (vec![I32, I32], vec![], json_quote(ctx)),
             Js::Ser => (vec![I32, I64, I32, I32], vec![I32], json_ser(ctx)),
             Js::SerObj => (vec![I32, I32, I32], vec![], json_ser_obj(ctx)),
@@ -3788,8 +3799,57 @@ pub(crate) mod json {
             b.push(ic(JB_FIRST));
             b.push(ctx.alloc());
         });
+        field_set(b, p, JB_GAP, |b| b.push(ic(0)));
+        field_set(b, p, JB_DEPTH, |b| b.push(ic(0)));
         b.push(ld(p));
         f
+    }
+
+    /// `__jb_nl(p)`: with a gap, a line feed and the gap once per level of
+    /// depth (25.5.2.5 step 8.b / 25.5.2.6 step 8.b: `indent` is `gap`
+    /// repeated); without one, nothing. The serializers call it where the
+    /// spec puts a separator, so the compact answer is byte-identical to
+    /// what it was and the indented one is the spec's.
+    fn jb_nl(ctx: &JsonCtx) -> FnBuild {
+        let mut f = FnBuild::new(1);
+        let gap = f.local(ValType::I32);
+        let i = f.local(ValType::I32);
+        let b = &mut f.body;
+        field_get(b, 0, JB_GAP);
+        b.push(st(gap));
+        if_then(
+            b,
+            |b| b.push(ld(gap)),
+            |b| {
+                put(ctx, b, 0, b'\n' as i32);
+                b.push(ic(0));
+                b.push(st(i));
+                while_loop(
+                    b,
+                    |b| {
+                        b.push(ld(i));
+                        field_get(b, 0, JB_DEPTH);
+                        b.push(Ins::I32LtU);
+                    },
+                    |b| {
+                        b.push(ld(0));
+                        b.push(ld(gap));
+                        b.push(ctx.call(Js::JbStr));
+                        bump(b, i, 1);
+                    },
+                );
+            },
+        );
+        f
+    }
+
+    /// `depth += delta` on the buffer at `buf`.
+    fn depth_bump(b: &mut Vec<Ins>, buf: u32, delta: i32) {
+        field_set(b, buf, JB_DEPTH, |b| {
+            field_get(b, buf, JB_DEPTH);
+            b.push(ic(delta));
+            b.push(Ins::I32Add);
+        });
     }
 
     /// `__jb_room(p, n)`: make sure `n` more bytes fit, doubling and copying if
@@ -4358,6 +4418,7 @@ pub(crate) mod json {
         b.push(Ins::I32Store(ALIGN_WORD, CY_OBJ));
 
         put(ctx, b, buf, b'{' as i32);
+        depth_bump(b, buf, 1);
         b.push(ic(1));
         b.push(st(first));
         b.push(ld(0));
@@ -4405,11 +4466,21 @@ pub(crate) mod json {
                             },
                             |b| put(ctx, b, buf, b',' as i32),
                         );
+                        // 25.5.2.5 step 8.b: each member on its own line
+                        // when there is a gap; `__jb_nl` is nothing otherwise.
+                        b.push(ld(buf));
+                        b.push(ctx.call(Js::JbNl));
                         b.push(ld(ep));
                         b.push(Ins::I32Load(ALIGN_WORD, ENTRY_KEY));
                         b.push(ld(buf));
                         b.push(ctx.call(Js::Quote));
                         put(ctx, b, buf, b':' as i32);
+                        // Step 8.b.iv: a space after the colon, with a gap.
+                        if_then(
+                            b,
+                            |b| field_get(b, buf, JB_GAP),
+                            |b| put(ctx, b, buf, b' ' as i32),
+                        );
                         b.push(ld(tag));
                         b.push(ld(ep));
                         b.push(Ins::I64Load(ALIGN_WORD, ENTRY_PAYLOAD));
@@ -4425,6 +4496,20 @@ pub(crate) mod json {
                     },
                 );
                 bump(b, i, 1);
+            },
+        );
+        // Step 9-10: `{}` for no members; otherwise the closing brace on its
+        // own line at the outer depth.
+        depth_bump(b, buf, -1);
+        if_then(
+            b,
+            |b| {
+                b.push(ld(first));
+                b.push(Ins::I32Eqz);
+            },
+            |b| {
+                b.push(ld(buf));
+                b.push(ctx.call(Js::JbNl));
             },
         );
         put(ctx, b, buf, b'}' as i32);
@@ -4493,6 +4578,7 @@ pub(crate) mod json {
         b.push(Ins::I32Store(ALIGN_WORD, CY_OBJ));
 
         put(ctx, b, buf, b'[' as i32);
+        depth_bump(b, buf, 1);
         b.push(ld(0));
         b.push(Ins::I32Load(ALIGN_WORD, ARR_LEN));
         b.push(st(len));
@@ -4514,6 +4600,9 @@ pub(crate) mod json {
                     },
                     |b| put(ctx, b, buf, b',' as i32),
                 );
+                // 25.5.2.6 step 8.b: each element on its own line with a gap.
+                b.push(ld(buf));
+                b.push(ctx.call(Js::JbNl));
                 b.push(ld(elems));
                 b.push(ld(i));
                 b.push(ic(ELEM_BYTES));
@@ -4566,6 +4655,16 @@ pub(crate) mod json {
                 bump(b, i, 1);
             },
         );
+        // Step 9-10: `[]` when empty; otherwise the bracket on its own line.
+        depth_bump(b, buf, -1);
+        if_then(
+            b,
+            |b| b.push(ld(len)),
+            |b| {
+                b.push(ld(buf));
+                b.push(ctx.call(Js::JbNl));
+            },
+        );
         put(ctx, b, buf, b']' as i32);
         f
     }
@@ -4582,23 +4681,234 @@ pub(crate) mod json {
     /// program's uniform arity a floor of three, and nothing at all when the
     /// program already has a three-parameter function, which the acceptance
     /// target does.
+    ///
+    /// # `space`, since 2026-08-31
+    ///
+    /// Steps 5-8, exactly: a Number is clamped to `0..=10` and becomes that
+    /// many spaces; a String is its first ten code units (a fourth pair
+    /// half is not cut -- a pair that would not fit is left out whole, since
+    /// half of one has no UTF-8); anything else is no gap. A `replacer` that
+    /// is not `undefined` or `null` is still refused by name -- step 4 needs
+    /// a callback or a property list, and neither is priced yet.
     fn json_stringify(ctx: &JsonCtx) -> FnBuild {
         let mut f = FnBuild::new(3 * repr::WIDTH);
         let buf = f.local(ValType::I32);
         let wrote = f.local(ValType::I32);
+        let x = f.local(ValType::F64);
+        let n = f.local(ValType::I32);
+        let gap = f.local(ValType::I32);
+        let i = f.local(ValType::I32);
+        let u = f.local(ValType::I32);
+        let byte = f.local(ValType::I32);
         let names = ctx.names;
+        let space = 2 * repr::WIDTH;
 
-        for base in [repr::WIDTH, 2 * repr::WIDTH] {
-            is_nullish(base, &mut f.body);
-            f.body.push(Ins::I32Eqz);
-            f.body.push(Ins::If(BlockType::Empty));
-            fail(ctx, &mut f.body, names.replacer, Ret::Value);
-            f.body.push(Ins::End);
-        }
+        is_nullish(repr::WIDTH, &mut f.body);
+        f.body.push(Ins::I32Eqz);
+        f.body.push(Ins::If(BlockType::Empty));
+        fail(ctx, &mut f.body, names.replacer, Ret::Value);
+        f.body.push(Ins::End);
 
         let b = &mut f.body;
         b.push(ctx.call(Js::JbNew));
         b.push(st(buf));
+
+        // Step 6: a Number space is `min(10, ToIntegerOrInfinity(space))`
+        // spaces, none for anything below 1. NaN fails `x >= 1`, and the
+        // clamp to 10 comes before the truncation so nothing can trap.
+        is_number(space, b);
+        b.push(Ins::If(BlockType::Empty));
+        unbox_number(space, b);
+        b.push(st(x));
+        if_then(
+            b,
+            |b| {
+                b.push(ld(x));
+                b.push(Ins::F64Const(1.0));
+                b.push(Ins::F64Ge);
+            },
+            |b| {
+                if_then(
+                    b,
+                    |b| {
+                        b.push(ld(x));
+                        b.push(Ins::F64Const(10.0));
+                        b.push(Ins::F64Gt);
+                    },
+                    |b| {
+                        b.push(Ins::F64Const(10.0));
+                        b.push(st(x));
+                    },
+                );
+                b.push(ld(x));
+                b.push(Ins::I32TruncF64S);
+                b.push(st(n));
+                b.push(ld(n));
+                b.push(ic(STRING_HEADER));
+                b.push(Ins::I32Add);
+                b.push(ctx.alloc());
+                b.push(st(gap));
+                b.push(ld(gap));
+                b.push(ld(n));
+                b.push(Ins::I32Store(ALIGN_WORD, 0));
+                b.push(ic(0));
+                b.push(st(i));
+                while_loop(
+                    b,
+                    |b| lt(b, i, n),
+                    |b| {
+                        b.push(ld(gap));
+                        b.push(ld(i));
+                        b.push(Ins::I32Add);
+                        b.push(ic(0x20));
+                        b.push(Ins::I32Store8(0, STRING_HEADER as u32));
+                        bump(b, i, 1);
+                    },
+                );
+                field_set(b, buf, JB_GAP, |b| b.push(ld(gap)));
+            },
+        );
+        b.push(Ins::End);
+
+        // Step 7: a String space is its first ten code units. `i` walks the
+        // bytes counting lead bytes as units (two for a four-byte one) and
+        // stops before the eleventh; the prefix is a fresh record when it is
+        // shorter than the whole, and the whole otherwise.
+        is_string(space, b);
+        b.push(Ins::If(BlockType::Empty));
+        unbox_string(space, b);
+        b.push(st(gap));
+        b.push(ld(gap));
+        b.push(Ins::I32Load(ALIGN_WORD, 0));
+        b.push(st(n));
+        b.push(ic(0));
+        b.push(st(i));
+        b.push(ic(0));
+        b.push(st(u));
+        b.push(Ins::Block(BlockType::Empty));
+        b.push(Ins::Loop(BlockType::Empty));
+        b.push(ld(i));
+        b.push(ld(n));
+        b.push(Ins::I32GeU);
+        b.push(Ins::BrIf(1));
+        b.push(ld(gap));
+        b.push(ld(i));
+        b.push(Ins::I32Add);
+        b.push(Ins::I32Load8U(0, STRING_HEADER as u32));
+        b.push(st(byte));
+        if_then(
+            b,
+            |b| {
+                b.push(ld(byte));
+                b.push(ic(0xc0));
+                b.push(Ins::I32And);
+                b.push(ic(0x80));
+                b.push(Ins::I32Ne);
+            },
+            |b| {
+                // A lead byte: one unit, or two for a pair. Stop *before*
+                // it when it would not fit -- `br 2` leaves the loop.
+                b.push(ld(u));
+                b.push(ld(byte));
+                b.push(ic(0xf0));
+                b.push(Ins::I32GeU);
+                b.push(Ins::I32Add);
+                b.push(ic(1));
+                b.push(Ins::I32Add);
+                b.push(st(u));
+                b.push(ld(u));
+                b.push(ic(10));
+                b.push(Ins::I32LtU);
+                b.push(Ins::I32Eqz);
+                b.push(ld(u));
+                b.push(ic(10));
+                b.push(Ins::I32Ne);
+                b.push(Ins::I32And);
+                b.push(Ins::If(BlockType::Empty));
+                b.push(Ins::Br(3));
+                b.push(Ins::End);
+            },
+        );
+        bump(b, i, 1);
+        // Exactly ten units, and the eleventh would start here: done, with
+        // the byte just counted included. Spelled after the bump so `i` is
+        // the prefix length either way.
+        if_then(
+            b,
+            |b| {
+                b.push(ld(u));
+                b.push(ic(10));
+                b.push(Ins::I32Eq);
+                b.push(ld(i));
+                b.push(ld(n));
+                b.push(Ins::I32LtU);
+                b.push(Ins::I32And);
+            },
+            |b| {
+                // Only when the next byte is a lead byte: a continuation
+                // byte still belongs to the tenth unit.
+                b.push(ld(gap));
+                b.push(ld(i));
+                b.push(Ins::I32Add);
+                b.push(Ins::I32Load8U(0, STRING_HEADER as u32));
+                b.push(ic(0xc0));
+                b.push(Ins::I32And);
+                b.push(ic(0x80));
+                b.push(Ins::I32Ne);
+                b.push(Ins::If(BlockType::Empty));
+                b.push(Ins::Br(3));
+                b.push(Ins::End);
+            },
+        );
+        b.push(Ins::Br(0));
+        b.push(Ins::End);
+        b.push(Ins::End);
+        // `i` is the byte length of the prefix. Empty: no gap (step 7.b's
+        // empty gap is 8.a's "no indentation").
+        if_then(
+            b,
+            |b| {
+                b.push(ld(i));
+                b.push(ld(n));
+                b.push(Ins::I32LtU);
+            },
+            |b| {
+                b.push(ld(i));
+                b.push(ic(STRING_HEADER));
+                b.push(Ins::I32Add);
+                b.push(ctx.alloc());
+                b.push(st(n));
+                b.push(ld(n));
+                b.push(ld(i));
+                b.push(Ins::I32Store(ALIGN_WORD, 0));
+                b.push(ic(0));
+                b.push(st(u));
+                while_loop(
+                    b,
+                    |b| lt(b, u, i),
+                    |b| {
+                        b.push(ld(n));
+                        b.push(ld(u));
+                        b.push(Ins::I32Add);
+                        b.push(ld(gap));
+                        b.push(ld(u));
+                        b.push(Ins::I32Add);
+                        b.push(Ins::I32Load8U(0, STRING_HEADER as u32));
+                        b.push(Ins::I32Store8(0, STRING_HEADER as u32));
+                        bump(b, u, 1);
+                    },
+                );
+                b.push(ld(n));
+                b.push(st(gap));
+            },
+        );
+        if_then(
+            b,
+            |b| b.push(ld(i)),
+            |b| field_set(b, buf, JB_GAP, |b| b.push(ld(gap))),
+        );
+        b.push(Ins::End);
+
         b.push(ld(0));
         b.push(ld(1));
         b.push(ld(buf));

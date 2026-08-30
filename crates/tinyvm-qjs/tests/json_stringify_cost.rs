@@ -130,3 +130,32 @@ fn a_journal_record_has_a_known_price() {
         big - small
     );
 }
+
+/// What a gap adds: the same 50 small objects with `space = 2`. Every
+/// property is a line feed, a comma and the indentation, so the pretty
+/// answer is longer and the extra is priced per output byte too; the
+/// compact answer must not have moved (the gap test is one field read per
+/// object and one per property).
+#[test]
+fn a_gap_costs_its_own_bytes_and_nothing_on_the_compact_path() {
+    let build = steps(&format!("{OBJECTS} return a.length;"));
+    let compact = steps(&format!("{OBJECTS} return JSON.stringify(a).length;"));
+    let pretty = steps(&format!(
+        "{OBJECTS} return JSON.stringify(a, null, 2).length;"
+    ));
+    // Compact: 50 * ~40 bytes. Pretty: five lines an object, indented
+    // two and four -- ~92 bytes an object.
+    let per_compact = (compact - build) / (50 * 40);
+    let per_pretty = (pretty - build) / (50 * 92);
+    println!(
+        "JSON.stringify of 50 small objects: compact {} steps (~{per_compact}/byte), \
+         space = 2 {} steps (~{per_pretty}/byte)",
+        compact - build,
+        pretty - build
+    );
+    assert!(
+        per_compact < 100,
+        "compact cost {per_compact} a byte; it was ~89"
+    );
+    assert!(per_pretty < 100, "pretty cost {per_pretty} a byte");
+}

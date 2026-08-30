@@ -721,8 +721,12 @@ fn naming_json_brings_the_array_set_because_parse_can_return_one() {
     // by the word, `__jp_run` + a direct string build in `__json_pstr`);
     // see closures_m3 and plan/design-json-parse-fast.md. The array-set
     // arithmetic below is unchanged.
+    // +501 on 2026-08-31: `JSON.stringify`'s `space` argument (the gap and
+    // depth in the buffer header, `__jb_nl`, the entry's reading of the
+    // argument); see closures_m3 and tests/json_space.rs. JSON set only:
+    // the array-set arithmetic below is still unchanged.
     assert_eq!(
-        n, 17_406,
+        n, 17_907,
         "the array set costs 1 130 bytes on top of the JSON set's 14 594 -- 753 for the \
          type and 377 more for `JSON.parse`/`JSON.stringify` of one. That arithmetic is \
          unchanged; the total went down by 28 on 2026-08-28 because `__len`'s dead body \

@@ -830,7 +830,7 @@ fn a_program_that_never_writes_json_carries_none_of_this() {
 }
 
 #[test]
-fn a_replacer_a_space_and_a_reviver_are_refused_rather_than_ignored() {
+fn a_replacer_and_a_reviver_are_refused_rather_than_ignored() {
     let mut e = Engine::new();
     let undef = (TAG_UNDEFINED, 0i64);
     let null = (TAG_NULL, 0i64);
@@ -844,12 +844,12 @@ fn a_replacer_a_space_and_a_reviver_are_refused_rather_than_ignored() {
     let one = (TAG_STRING, i64::from(e.text("1")));
     assert!(e.wide("parse2", &[one, undef]).is_ok());
 
-    // A space that would change the answer must not be silently dropped.
-    assert!(
-        e.wide("stringify3", &[null, undef, two]).is_err(),
-        "a space argument was accepted and ignored"
-    );
-    assert_eq!(e.fault(), runtime::FAULT_UNCAUGHT_THROW);
+    // A space is honoured since 2026-08-31 (tests/json_space.rs has the
+    // shapes); until then it was refused here rather than dropped.
+    let out = e
+        .wide("stringify3", &[null, undef, two])
+        .expect("a space argument is honoured");
+    assert_eq!(out, (TAG_STRING, out.1));
     assert!(
         e.wide("stringify3", &[null, two, undef]).is_err(),
         "a replacer was accepted and ignored"
@@ -883,7 +883,7 @@ fn every_refusal_names_its_message_in_exactly_one_place() {
         (names.surrogate, "__json_pstr", 4),
         (names.cycle, "__json_ser_obj", 1),
         (names.cycle, "__json_ser_arr", 1),
-        (names.replacer, "__json_stringify", 2),
+        (names.replacer, "__json_stringify", 1),
         (names.reviver, "__json_parse", 1),
         (names.eof, "__json_pstr", 1),
         (names.syntax, "__json_pval", 4),

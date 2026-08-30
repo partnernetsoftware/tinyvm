@@ -272,7 +272,12 @@ fn a_program_with_no_capture_is_byte_identical_to_what_it_was() {
         // the safe-integer range; see arrays_m3. +119 the same day for the
         // rows that can hold an object: `__obj_find`'s cheap miss, see
         // arrays_m3; "return 1;" did not move.
-        ("return JSON.stringify({a:1});", 17_406),
+        // +501 on 2026-08-31 for JSON programs only: `JSON.stringify(v,
+        // null, space)` -- the gap and depth in the buffer header, a
+        // `__jb_nl` that writes nothing without a gap, and the entry's
+        // reading of the space argument (tests/json_space.rs). The
+        // compact answer's price did not move (tests/json_stringify_cost.rs).
+        ("return JSON.stringify({a:1});", 17_907),
     ] {
         let n = compile_qjs_m1(source).expect("compiles").len();
         assert_eq!(

@@ -950,7 +950,7 @@ fn the_whole_fleet_library_compiles_and_its_methods_are_reachable() {
     // three baselines record the same 19-byte drop and the arithmetic.
     assert_eq!(
         wasm.len(),
-        25_013, /* +23 on 2026-08-29: thrown-message record in the epilogue; see arrays_m3 ; +23 more the same day: the fleet library reads static properties, so it carries the arm that names a missing String property (`FAULT_MISSING_STRING_METHOD`); +89 on 2026-08-30: the `qjs.lines` section lists every one of its functions' source lines, see arrays_m3; +355 on 2026-08-30 (late): the JSON parse fast paths, see closures_m3; +30 the same night: a column beside every listed line in `qjs.lines`, one byte a function; +191 on 2026-08-31: `__num_to_string` covers the safe-integer range, see arrays_m3; +119 the same day: `__obj_find`'s cheap miss, see arrays_m3 */
+        25_516, /* +23 on 2026-08-29: thrown-message record in the epilogue; see arrays_m3 ; +23 more the same day: the fleet library reads static properties, so it carries the arm that names a missing String property (`FAULT_MISSING_STRING_METHOD`); +89 on 2026-08-30: the `qjs.lines` section lists every one of its functions' source lines, see arrays_m3; +355 on 2026-08-30 (late): the JSON parse fast paths, see closures_m3; +30 the same night: a column beside every listed line in `qjs.lines`, one byte a function; +191 on 2026-08-31: `__num_to_string` covers the safe-integer range, see arrays_m3; +119 the same day: `__obj_find`'s cheap miss, see arrays_m3; +503 the same day: `JSON.stringify`'s `space` argument, see closures_m3 */
         "the whole library's emitted size moved"
     );
 }
