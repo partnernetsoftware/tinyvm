@@ -1839,6 +1839,44 @@ fn to_lower_case(ctx: &Ctx) -> FnBuild {
     b.push(Ins::I32GeU);
     b.push(Ins::BrIf(1));
 
+    // ASCII first: a byte under 0x80 is its own code point, lowers by
+    // arithmetic (`+ 32` exactly when it is `A`..`Z`, as `(b - 65) <u 26`)
+    // and is one byte out. The decode / map / encode round trip below is
+    // for everything else. 393 steps a character on ASCII text before this
+    // (2026-08-30, a 729 KB corpus lowercased downstream).
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 4));
+    b.push(Ins::LocalTee(cp));
+    b.push(Ins::I32Const(0x80));
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(cp));
+    b.push(Ins::LocalGet(cp));
+    b.push(Ins::I32Const(65));
+    b.push(Ins::I32Sub);
+    b.push(Ins::I32Const(26));
+    b.push(Ins::I32LtU);
+    b.push(Ins::I32Const(5));
+    b.push(Ins::I32Shl);
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Store8(0, 4));
+    b.push(Ins::LocalGet(o));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(o));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    // `if` is 0, the loop 1
+    b.push(Ins::Br(1));
+    b.push(Ins::End);
+
     b.push(Ins::LocalGet(h));
     b.push(Ins::I32Const(4));
     b.push(Ins::I32Add);
