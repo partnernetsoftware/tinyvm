@@ -13,19 +13,22 @@ use tinyvm_qjs::{
 };
 
 fn log_host() -> Vec<HostFn> {
-    vec![HostFn {
-        name: "log".to_string(),
-        module: "sys".to_string(),
-        field: "log".to_string(),
-        params: vec![HostParam::StrPtrLen, HostParam::StrPtrLen],
-        result: HostResult::Void,
-    }, HostFn {
-        name: "at".to_string(),
-        module: "sys".to_string(),
-        field: "at".to_string(),
-        params: vec![HostParam::I32, HostParam::F64],
-        result: HostResult::Void,
-    }]
+    vec![
+        HostFn {
+            name: "log".to_string(),
+            module: "sys".to_string(),
+            field: "log".to_string(),
+            params: vec![HostParam::StrPtrLen, HostParam::StrPtrLen],
+            result: HostResult::Void,
+        },
+        HostFn {
+            name: "at".to_string(),
+            module: "sys".to_string(),
+            field: "at".to_string(),
+            params: vec![HostParam::I32, HostParam::F64],
+            result: HostResult::Void,
+        },
+    ]
 }
 
 fn compile(source: &str) -> Vec<u8> {
@@ -33,7 +36,6 @@ fn compile(source: &str) -> Vec<u8> {
         source,
         Options {
             names: Names::Declared(log_host()),
-            ..Options::default()
         },
     )
     .unwrap_or_else(|e| panic!("compiling {source:?}: {e}"))
@@ -44,8 +46,12 @@ fn run(source: &str) -> (bool, Option<GuestFault>, Option<String>) {
     let mut module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
     // A program that never calls `log` imports nothing; binding is then
     // nothing to do rather than a failure.
-    let _ = module.bind_import_typed("sys", "log", |_args: &[Val], _memory: &mut [u8]| Ok(Vec::new()));
-    let _ = module.bind_import_typed("sys", "at", |_args: &[Val], _memory: &mut [u8]| Ok(Vec::new()));
+    let _ = module.bind_import_typed("sys", "log", |_args: &[Val], _memory: &mut [u8]| {
+        Ok(Vec::new())
+    });
+    let _ = module.bind_import_typed("sys", "at", |_args: &[Val], _memory: &mut [u8]| {
+        Ok(Vec::new())
+    });
     let mut instance = module.instantiate().expect("instantiates");
     let ok = instance.invoke_by_name("main", &Value::args(&[])).is_ok();
     let memory = instance.memory().expect("guest memory");

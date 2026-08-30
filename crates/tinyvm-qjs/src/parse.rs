@@ -1017,10 +1017,7 @@ pub(crate) mod m1 {
             let outer_pos = std::mem::replace(&mut self.pos, 0);
             let outer_open = std::mem::take(&mut self.open);
             let outer_exports = std::mem::take(&mut self.exports);
-            self.has_arrow |= self
-                .tokens
-                .iter()
-                .any(|t| t.kind == TokenKind::FatArrow);
+            self.has_arrow |= self.tokens.iter().any(|t| t.kind == TokenKind::FatArrow);
             self.loading.push(specifier.clone());
             self.enter(true, self.func());
 
@@ -1514,7 +1511,10 @@ pub(crate) mod m1 {
             if args.len() != 1 {
                 return Err(unsupported(
                     Boundary::FullJs,
-                    &format!("`Object.keys` called with {} arguments; it takes one", args.len()),
+                    &format!(
+                        "`Object.keys` called with {} arguments; it takes one",
+                        args.len()
+                    ),
                     span.offset(),
                 ));
             }
@@ -2140,7 +2140,10 @@ pub(crate) mod m1 {
             match &self.kind() {
                 // `x => ...` -- ArrowParameters : BindingIdentifier.
                 TokenKind::Ident(_) => {
-                    matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::FatArrow))
+                    matches!(
+                        self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                        Some(TokenKind::FatArrow)
+                    )
                 }
                 TokenKind::LParen => self.parenthesis_opens_arrow_params(),
                 _ => false,
@@ -3006,8 +3009,12 @@ pub(crate) mod m1 {
         /// carry the parent link; distinct `func` values along that chain are
         /// the function nesting.
         fn record_captures(&mut self, resolved: &[Res]) {
-            let occurrences: Vec<(usize, Res)> =
-                self.pending.iter().map(|p| p.scope).zip(resolved.iter().cloned()).collect();
+            let occurrences: Vec<(usize, Res)> = self
+                .pending
+                .iter()
+                .map(|p| p.scope)
+                .zip(resolved.iter().cloned())
+                .collect();
             for (scope, res) in &occurrences {
                 let Res::Captured(id) = res else { continue };
                 self.bindings[id.0 as usize].captured = true;
@@ -3030,7 +3037,9 @@ pub(crate) mod m1 {
                         Res::Captured(id) | Res::Callee(id) => *id,
                         _ => continue,
                     };
-                    let BindingKind::Function(callee) = self.bindings[id.0 as usize].kind else { continue };
+                    let BindingKind::Function(callee) = self.bindings[id.0 as usize].kind else {
+                        continue;
+                    };
                     let needed = self.functions[callee.0 as usize].captures.clone();
                     for cell in needed {
                         grew |= self.forward_capture(*scope, cell);
@@ -3394,10 +3403,7 @@ pub(crate) mod m1 {
             match &mut stmt.kind {
                 // No names and no subtree, so the pass that writes
                 // resolutions back has nothing to visit.
-                StmtKind::Empty
-                | StmtKind::Func { .. }
-                | StmtKind::Break
-                | StmtKind::Continue => {}
+                StmtKind::Empty | StmtKind::Func { .. } | StmtKind::Break | StmtKind::Continue => {}
                 StmtKind::Expr(e) => fill_expr(e, res),
                 StmtKind::Decl(decls) => {
                     for decl in decls {

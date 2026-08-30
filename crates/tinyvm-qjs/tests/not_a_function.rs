@@ -23,8 +23,12 @@ fn returned_string(source: &str) -> String {
     let wasm = compile_qjs_m1(source).unwrap_or_else(|e| panic!("compiling {source:?}: {e}"));
     let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
     let mut instance = module.instantiate().expect("instantiates");
-    let vals = instance.invoke_by_name("main", &Value::args(&[])).unwrap_or_else(|e| panic!("{source}: {}", e.message()));
-    let Value::String(ptr) = Value::returned(&vals).expect("value") else { panic!("{source}: not a string") };
+    let vals = instance
+        .invoke_by_name("main", &Value::args(&[]))
+        .unwrap_or_else(|e| panic!("{source}: {}", e.message()));
+    let Value::String(ptr) = Value::returned(&vals).expect("value") else {
+        panic!("{source}: not a string")
+    };
     let view = instance.memory().expect("guest memory");
     let bytes: &[u8] = &view;
     let at = ptr as usize;
@@ -40,7 +44,10 @@ fn an_uncatchable_program_names_the_callee() {
         (r#"let a = [1]; return a.concat([2]).length;"#, "concat"),
         (r#"let n = 3; return n();"#, "n"),
         (r#"let o = { f: 7 }; return o.f();"#, "f"),
-        (r#"let g = function () { return 1; }; return g()();"#, "<expression>"),
+        (
+            r#"let g = function () { return 1; }; return g()();"#,
+            "<expression>",
+        ),
     ] {
         let (fault, callee) = run_and_read(source);
         assert_eq!(fault, Some(GuestFault::NotAFunction), "{source}");
@@ -51,15 +58,31 @@ fn an_uncatchable_program_names_the_callee() {
 #[test]
 fn a_program_that_can_catch_gets_the_type_error() {
     for (source, want) in [
-        (r#"let f = undefined; try { f(1); } catch (e) { return e; } return "ran";"#, "TypeError: f is not a function"),
-        (r#"let a = [1]; try { a.concat([2]); } catch (e) { return e; } return "ran";"#, "TypeError: concat is not a function"),
-        (r#"let o = { f: 7 }; try { o.f(); } catch (e) { return e; } return "ran";"#, "TypeError: f is not a function"),
-        (r#"function mk() { return 3; } try { mk()(); } catch (e) { return e; } return "ran";"#, "TypeError: <expression> is not a function"),
-        (r#"let f = function () { return "ok"; }; try { return f(); } catch (e) { return e; }"#, "ok"),
+        (
+            r#"let f = undefined; try { f(1); } catch (e) { return e; } return "ran";"#,
+            "TypeError: f is not a function",
+        ),
+        (
+            r#"let a = [1]; try { a.concat([2]); } catch (e) { return e; } return "ran";"#,
+            "TypeError: concat is not a function",
+        ),
+        (
+            r#"let o = { f: 7 }; try { o.f(); } catch (e) { return e; } return "ran";"#,
+            "TypeError: f is not a function",
+        ),
+        (
+            r#"function mk() { return 3; } try { mk()(); } catch (e) { return e; } return "ran";"#,
+            "TypeError: <expression> is not a function",
+        ),
+        (
+            r#"let f = function () { return "ok"; }; try { return f(); } catch (e) { return e; }"#,
+            "ok",
+        ),
     ] {
         assert_eq!(returned_string(source), want, "{source}");
     }
-    let (fault, callee) = run_and_read(r#"let f = undefined; try { f(1); } catch (e) { return e; } return "ran";"#);
+    let (fault, callee) =
+        run_and_read(r#"let f = undefined; try { f(1); } catch (e) { return e; } return "ran";"#);
     assert_eq!(fault, None, "a caught TypeError is not a fault");
     assert_eq!(callee, None);
 }

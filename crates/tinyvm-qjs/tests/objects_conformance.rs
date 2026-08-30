@@ -1369,7 +1369,10 @@ fn enumeration_is_refused() {
     // `for...in`/`for...of`, and the diagnostic names neither. Asserted
     // loosely on purpose -- the refusal is the promise, this wording is not.
     let error = refuses_somehow("const o = {}; for (const k in o) { } return 0;");
-    assert!(error.offset < source_offset_bound(), "an offset inside the source");
+    assert!(
+        error.offset < source_offset_bound(),
+        "an offset inside the source"
+    );
 
     // `for … of` left this list on 2026-08-29. It **compiles** now, and an
     // object is refused where it belongs -- at run time, by a `throw` a

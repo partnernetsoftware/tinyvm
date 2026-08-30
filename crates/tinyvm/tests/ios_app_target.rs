@@ -19,9 +19,18 @@ fn the_app_target_spec_and_source_are_in_the_repository() {
     let source = crate_dir().join("bindings/swift/app/Sources/TinyArcadeApp/TinyArcadeApp.swift");
     let spec_text = std::fs::read_to_string(&spec).expect("project.yml");
     let source_text = std::fs::read_to_string(&source).expect("TinyArcadeApp.swift");
-    assert!(spec_text.contains("type: application"), "an application target");
-    assert!(spec_text.contains("product: TinyArcadeRuntime"), "consumes the runtime product");
-    assert!(source_text.contains("import TinyArcadeRuntime"), "the app imports the module");
+    assert!(
+        spec_text.contains("type: application"),
+        "an application target"
+    );
+    assert!(
+        spec_text.contains("product: TinyArcadeRuntime"),
+        "consumes the runtime product"
+    );
+    assert!(
+        source_text.contains("import TinyArcadeRuntime"),
+        "the app imports the module"
+    );
     assert!(
         source_text.contains("TinyArcadeCartridgeDescriptorV1.inspect"),
         "the app calls through the bridge, not only links it"
@@ -30,9 +39,22 @@ fn the_app_target_spec_and_source_are_in_the_repository() {
 
 #[test]
 fn the_ios_smoke_builds_the_app_target_for_both_destinations() {
-    let smoke = std::fs::read_to_string(crate_dir().join("smoke-ios-bridge.sh")).expect("smoke script");
-    assert!(smoke.contains("xcodegen generate"), "the project is generated from the spec");
-    assert!(smoke.contains("-scheme TinyArcadeApp"), "the app scheme is built");
-    assert!(smoke.contains("generic/platform=iOS Simulator") && smoke.contains("generic/platform=iOS'"), "simulator and device");
-    assert!(smoke.contains("TinyArcadeApp.app"), "the built app is checked for");
+    let smoke =
+        std::fs::read_to_string(crate_dir().join("smoke-ios-bridge.sh")).expect("smoke script");
+    assert!(
+        smoke.contains("xcodegen generate"),
+        "the project is generated from the spec"
+    );
+    assert!(
+        smoke.contains("-scheme TinyArcadeApp"),
+        "the app scheme is built"
+    );
+    assert!(
+        smoke.contains("generic/platform=iOS Simulator") && smoke.contains("generic/platform=iOS'"),
+        "simulator and device"
+    );
+    assert!(
+        smoke.contains("TinyArcadeApp.app"),
+        "the built app is checked for"
+    );
 }

@@ -635,7 +635,6 @@ fn prop_get(ctx: &Ctx) -> FnBuild {
     b.push(Ins::Return);
     b.push(Ins::End);
 
-
     // Absent, not a fault -- for the reason `obj_get` gives.
     const_undefined(b);
     f

@@ -1465,7 +1465,9 @@ fn num_to_string(ctx: &Ctx) -> FnBuild {
             b.extend_from_slice(&[ld(n), st(k), ic(0), st(i)]);
             while_loop(
                 b,
-                |b| b.extend_from_slice(&[ld(k), ic(0), Ins::I32Ne, ld(i), Ins::I32Eqz, Ins::I32Or]),
+                |b| {
+                    b.extend_from_slice(&[ld(k), ic(0), Ins::I32Ne, ld(i), Ins::I32Eqz, Ins::I32Or])
+                },
                 |b| {
                     bump(b, i, 1);
                     b.extend_from_slice(&[ld(k), ic(10), Ins::I32DivS, st(k)]);
@@ -1485,7 +1487,13 @@ fn num_to_string(ctx: &Ctx) -> FnBuild {
                     b.extend_from_slice(&[ld(n), ic(10), Ins::I32DivS, st(n)]);
                 },
             );
-            b.extend_from_slice(&[ld(p), ld(w), Ins::I32Store(ALIGN_WORD, 0), ld(p), Ins::Return]);
+            b.extend_from_slice(&[
+                ld(p),
+                ld(w),
+                Ins::I32Store(ALIGN_WORD, 0),
+                ld(p),
+                Ins::Return,
+            ]);
         },
     );
 
@@ -3977,7 +3985,19 @@ pub(crate) mod json {
                         b.push(st(c));
                         // Leave the run at the first byte that needs an escape:
                         // `if` is depth 0, the loop 1, its block 2.
-                        b.extend_from_slice(&[ld(c), ic(0x20), Ins::I32LtU, ld(c), ic(0x22), Ins::I32Eq, Ins::I32Or, ld(c), ic(0x5c), Ins::I32Eq, Ins::I32Or]);
+                        b.extend_from_slice(&[
+                            ld(c),
+                            ic(0x20),
+                            Ins::I32LtU,
+                            ld(c),
+                            ic(0x22),
+                            Ins::I32Eq,
+                            Ins::I32Or,
+                            ld(c),
+                            ic(0x5c),
+                            Ins::I32Eq,
+                            Ins::I32Or,
+                        ]);
                         b.push(Ins::If(BlockType::Empty));
                         b.push(Ins::Br(2));
                         b.push(Ins::End);
@@ -4854,10 +4874,29 @@ pub(crate) mod json {
             // `a ^ b` is `(a | b) - (a & b)` and `~x` is `-1 - x`; "has a zero
             // byte" is the usual `(x - 0x01010101) & ~x & 0x80808080`.
             let has_zero = |b: &mut Vec<Ins>, x: u32| {
-                b.extend_from_slice(&[ld(x), ic(0x0101_0101), Ins::I32Sub, ic(-1), ld(x), Ins::I32Sub, Ins::I32And, ic(0x8080_8080u32 as i32), Ins::I32And]);
+                b.extend_from_slice(&[
+                    ld(x),
+                    ic(0x0101_0101),
+                    Ins::I32Sub,
+                    ic(-1),
+                    ld(x),
+                    Ins::I32Sub,
+                    Ins::I32And,
+                    ic(0x8080_8080u32 as i32),
+                    Ins::I32And,
+                ]);
             };
             let xor_into = |b: &mut Vec<Ins>, x: u32, k: i32, into: u32| {
-                b.extend_from_slice(&[ld(x), ic(k), Ins::I32Or, ld(x), ic(k), Ins::I32And, Ins::I32Sub, st(into)]);
+                b.extend_from_slice(&[
+                    ld(x),
+                    ic(k),
+                    Ins::I32Or,
+                    ld(x),
+                    ic(k),
+                    Ins::I32And,
+                    Ins::I32Sub,
+                    st(into),
+                ]);
             };
             b.push(Ins::Block(BlockType::Empty));
             b.push(Ins::Loop(BlockType::Empty));
@@ -4878,8 +4917,23 @@ pub(crate) mod json {
             b.push(Ins::I32Load(0, STRING_HEADER as u32));
             b.push(st(run_w));
             // bad = hasless(w, 0x20) | (w & 0x80808080) | haszero(w ^ '"'*4) | haszero(w ^ '\\'*4)
-            b.extend_from_slice(&[ld(run_w), ic(0x2020_2020), Ins::I32Sub, ic(-1), ld(run_w), Ins::I32Sub, Ins::I32And, ic(0x8080_8080u32 as i32), Ins::I32And]);
-            b.extend_from_slice(&[ld(run_w), ic(0x8080_8080u32 as i32), Ins::I32And, Ins::I32Or]);
+            b.extend_from_slice(&[
+                ld(run_w),
+                ic(0x2020_2020),
+                Ins::I32Sub,
+                ic(-1),
+                ld(run_w),
+                Ins::I32Sub,
+                Ins::I32And,
+                ic(0x8080_8080u32 as i32),
+                Ins::I32And,
+            ]);
+            b.extend_from_slice(&[
+                ld(run_w),
+                ic(0x8080_8080u32 as i32),
+                Ins::I32And,
+                Ins::I32Or,
+            ]);
             xor_into(b, run_w, 0x2222_2222, run_t);
             has_zero(b, run_t);
             b.push(Ins::I32Or);
@@ -5160,7 +5214,14 @@ pub(crate) mod json {
             |b| digit_at(ctx, b, 0, c),
             |b| {
                 b.extend_from_slice(&[ld(val), Ins::F64Const(10.0), Ins::F64Mul]);
-                b.extend_from_slice(&[ld(c), ic(0x30), Ins::I32Sub, Ins::F64ConvertI32S, Ins::F64Add, st(val)]);
+                b.extend_from_slice(&[
+                    ld(c),
+                    ic(0x30),
+                    Ins::I32Sub,
+                    Ins::F64ConvertI32S,
+                    Ins::F64Add,
+                    st(val),
+                ]);
                 bump(b, nd, 1);
                 advance(b, 0, 1);
             },
@@ -5191,7 +5252,14 @@ pub(crate) mod json {
                     |b| digit_at(ctx, b, 0, c),
                     |b| {
                         b.extend_from_slice(&[ld(val), Ins::F64Const(10.0), Ins::F64Mul]);
-                        b.extend_from_slice(&[ld(c), ic(0x30), Ins::I32Sub, Ins::F64ConvertI32S, Ins::F64Add, st(val)]);
+                        b.extend_from_slice(&[
+                            ld(c),
+                            ic(0x30),
+                            Ins::I32Sub,
+                            Ins::F64ConvertI32S,
+                            Ins::F64Add,
+                            st(val),
+                        ]);
                         bump(b, nd, 1);
                         bump(b, fd, 1);
                         advance(b, 0, 1);
@@ -5250,7 +5318,18 @@ pub(crate) mod json {
         if_then(
             b,
             |b| {
-                b.extend_from_slice(&[ld(general), Ins::I32Eqz, ld(nd), ic(15), Ins::I32LtS, ld(nd), ic(15), Ins::I32Eq, Ins::I32Or, Ins::I32And]);
+                b.extend_from_slice(&[
+                    ld(general),
+                    Ins::I32Eqz,
+                    ld(nd),
+                    ic(15),
+                    Ins::I32LtS,
+                    ld(nd),
+                    ic(15),
+                    Ins::I32Eq,
+                    Ins::I32Or,
+                    Ins::I32And,
+                ]);
             },
             |b| {
                 // scale = 10^fd, exact for fd <= 15 (< 22).
@@ -5259,12 +5338,21 @@ pub(crate) mod json {
                     b,
                     |b| b.extend_from_slice(&[ld(fd), ic(0), Ins::I32Ne]),
                     |b| {
-                        b.extend_from_slice(&[ld(scale), Ins::F64Const(10.0), Ins::F64Mul, st(scale)]);
+                        b.extend_from_slice(&[
+                            ld(scale),
+                            Ins::F64Const(10.0),
+                            Ins::F64Mul,
+                            st(scale),
+                        ]);
                         bump(b, fd, -1);
                     },
                 );
                 b.extend_from_slice(&[ld(val), ld(scale), Ins::F64Div, st(val)]);
-                if_then(b, |b| b.push(ld(neg)), |b| b.extend_from_slice(&[ld(val), Ins::F64Neg, st(val)]));
+                if_then(
+                    b,
+                    |b| b.push(ld(neg)),
+                    |b| b.extend_from_slice(&[ld(val), Ins::F64Neg, st(val)]),
+                );
                 b.push(ld(val));
                 b.push(Ins::Return);
             },

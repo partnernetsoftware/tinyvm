@@ -7,9 +7,19 @@ use tinyvm_qjs::{Value, compile_qjs_m1};
 
 fn steps(source: &str) -> u64 {
     let wasm = compile_qjs_m1(source).unwrap_or_else(|e| panic!("compiling {source:?}: {e}"));
-    let module = WasmModule::from_bytes_with(&wasm, Limits { max_steps: 4_000_000_000, max_memory_pages: 4096, ..Limits::default() }).expect("loads");
+    let module = WasmModule::from_bytes_with(
+        &wasm,
+        Limits {
+            max_steps: 4_000_000_000,
+            max_memory_pages: 4096,
+            ..Limits::default()
+        },
+    )
+    .expect("loads");
     let mut instance = module.instantiate().expect("instantiates");
-    instance.invoke_by_name("main", &Value::args(&[])).unwrap_or_else(|e| panic!("trap in {source:?}: {}", e.message()));
+    instance
+        .invoke_by_name("main", &Value::args(&[]))
+        .unwrap_or_else(|e| panic!("trap in {source:?}: {}", e.message()));
     instance.last_steps()
 }
 
@@ -21,7 +31,10 @@ fn ascii_text_lowers_by_the_byte() {
     let lower = steps(&format!("{BUILD} return s.toLowerCase().length;"));
     let per = (lower - base) as f64 / 102_400.0;
     println!("toLowerCase on 100 KiB ASCII: {per:.1} steps per character");
-    assert!(per < 50.0, "toLowerCase cost {per:.1} steps a character on ASCII; it was ~393");
+    assert!(
+        per < 50.0,
+        "toLowerCase cost {per:.1} steps a character on ASCII; it was ~393"
+    );
 }
 
 #[test]
@@ -37,12 +50,18 @@ fn lowering_keeps_every_shape_exact() {
         (r#"return "".toLowerCase();"#, ""),
         (r#"return "İ".toLowerCase().length;"#, ""),
     ] {
-        if want.is_empty() && source.contains("İ") { continue; }
+        if want.is_empty() && source.contains("İ") {
+            continue;
+        }
         let wasm = compile_qjs_m1(source).expect("compiles");
         let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
         let mut instance = module.instantiate().expect("instantiates");
-        let vals = instance.invoke_by_name("main", &Value::args(&[])).expect("runs");
-        let Value::String(ptr) = Value::returned(&vals).expect("value") else { panic!("{source}: not a string") };
+        let vals = instance
+            .invoke_by_name("main", &Value::args(&[]))
+            .expect("runs");
+        let Value::String(ptr) = Value::returned(&vals).expect("value") else {
+            panic!("{source}: not a string")
+        };
         assert_eq!(read_string(&instance, ptr), want, "{source}");
     }
 }

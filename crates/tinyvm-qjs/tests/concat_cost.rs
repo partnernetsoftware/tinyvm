@@ -31,7 +31,10 @@ fn append_cost() -> u64 {
 fn appending_to_a_long_string_copies_it_by_the_word() {
     let cost = append_cost();
     println!("s + \"x\" with s at 1 000 characters: {cost} steps");
-    assert!(cost < 3_000, "one append to a 1 000-character string cost {cost} steps; it was ~8 800");
+    assert!(
+        cost < 3_000,
+        "one append to a 1 000-character string cost {cost} steps; it was ~8 800"
+    );
 }
 
 #[test]
@@ -41,14 +44,21 @@ fn concatenation_keeps_its_bytes_and_its_tail() {
         (r#"return "" + "x";"#, "x"),
         (r#"return "12345" + "";"#, "12345"),
         (r#"return "1234" + "5678" + "9";"#, "123456789"),
-        (r#"let t = ""; for (let i = 0; i < 7; i = i + 1) { t = t + "ab" + i; } return t;"#, "ab0ab1ab2ab3ab4ab5ab6"),
+        (
+            r#"let t = ""; for (let i = 0; i < 7; i = i + 1) { t = t + "ab" + i; } return t;"#,
+            "ab0ab1ab2ab3ab4ab5ab6",
+        ),
         (r#"return "héllo" + " wörld";"#, "héllo wörld"),
     ] {
         let wasm = compile_qjs_m1(source).expect("compiles");
         let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
         let mut instance = module.instantiate().expect("instantiates");
-        let vals = instance.invoke_by_name("main", &Value::args(&[])).expect("runs");
-        let Value::String(ptr) = Value::returned(&vals).expect("value") else { panic!("{source}: not a string") };
+        let vals = instance
+            .invoke_by_name("main", &Value::args(&[]))
+            .expect("runs");
+        let Value::String(ptr) = Value::returned(&vals).expect("value") else {
+            panic!("{source}: not a string")
+        };
         assert_eq!(read_string(&instance, ptr), want, "{source}");
     }
 }

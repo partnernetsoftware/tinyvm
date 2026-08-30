@@ -20,7 +20,8 @@ fn text(source: &str) -> String {
             let view = instance.memory().expect("guest memory");
             let bytes: &[u8] = &view;
             let at = ptr as usize;
-            let len = u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]) as usize;
+            let len = u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+                as usize;
             String::from_utf8(bytes[at + 4..at + 4 + len].to_vec()).expect("utf-8")
         }
         other => panic!("{source:?}: expected a String, got {other:?}"),
@@ -31,15 +32,38 @@ fn steps(source: &str) -> u64 {
     let wasm = compile_qjs_m1(source).expect("compiles");
     let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
     let mut instance = module.instantiate().expect("instantiates");
-    instance.invoke_by_name("main", &Value::args(&[])).expect("runs");
+    instance
+        .invoke_by_name("main", &Value::args(&[]))
+        .expect("runs");
     instance.last_steps()
 }
 
 /// The same digits Rust prints, across the range and its edges.
 #[test]
 fn integers_print_as_their_digits() {
-    for n in [0i64, 1, 7, 9, 10, 42, 99, 100, 12345, 2_147_483_647, -1, -7, -10, -12345, -2_147_483_647, -2_147_483_648] {
-        assert_eq!(text(&format!("let n = {n}; return \"\" + n;")), format!("{n}"), "{n}");
+    for n in [
+        0i64,
+        1,
+        7,
+        9,
+        10,
+        42,
+        99,
+        100,
+        12345,
+        2_147_483_647,
+        -1,
+        -7,
+        -10,
+        -12345,
+        -2_147_483_647,
+        -2_147_483_648,
+    ] {
+        assert_eq!(
+            text(&format!("let n = {n}; return \"\" + n;")),
+            format!("{n}"),
+            "{n}"
+        );
     }
 }
 

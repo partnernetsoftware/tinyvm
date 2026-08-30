@@ -72,7 +72,6 @@ fn string(source: &str, want: &str) {
     assert_eq!(run(source), Out::Str(want.to_string()), "{source:?}");
 }
 
-
 #[track_caller]
 fn undefined(source: &str) {
     assert_eq!(run(source), Out::Undefined, "{source:?}");
@@ -113,16 +112,22 @@ fn trim_removes_whitespace_from_both_ends() {
     // quietly skips, and skipping them is a **wrong answer** rather than a
     // missing feature: the space stays and nothing says so.
     for space in [
-        "\u{1680}", "\u{2000}", "\u{2003}", "\u{200a}", "\u{2028}", "\u{2029}",
-        "\u{202f}", "\u{205f}", "\u{3000}",
+        "\u{1680}", "\u{2000}", "\u{2003}", "\u{200a}", "\u{2028}", "\u{2029}", "\u{202f}",
+        "\u{205f}", "\u{3000}",
     ] {
         string(&format!("return \"{space}ab{space}\".trim();"), "ab");
     }
     // And the characters that *look* like whitespace and are not: U+200B ZERO
     // WIDTH SPACE and U+2060 WORD JOINER are `Cf`, not `Zs`, so `trim` must
     // leave them exactly where they are.
-    string("return \"\u{200b}ab\u{200b}\".trim();", "\u{200b}ab\u{200b}");
-    string("return \"\u{2060}ab\u{2060}\".trim();", "\u{2060}ab\u{2060}");
+    string(
+        "return \"\u{200b}ab\u{200b}\".trim();",
+        "\u{200b}ab\u{200b}",
+    );
+    string(
+        "return \"\u{2060}ab\u{2060}\".trim();",
+        "\u{2060}ab\u{2060}",
+    );
 
     // Non-ASCII content survives, and the result is a real String: its
     // `.length` is UTF-16 code units, as `string_length_m3.rs` pins.
@@ -176,8 +181,14 @@ fn push_mutates_the_receiver_and_returns_the_new_length() {
         9.0,
     );
     // Repeated pushes, so a one-shot implementation fails.
-    number("let a = []; a.push(1); a.push(2); a.push(3); return a.length;", 3.0);
-    number("let a = []; a.push(1); a.push(2); a.push(3); return a[1];", 2.0);
+    number(
+        "let a = []; a.push(1); a.push(2); a.push(3); return a.length;",
+        3.0,
+    );
+    number(
+        "let a = []; a.push(1); a.push(2); a.push(3); return a[1];",
+        2.0,
+    );
 }
 
 /// `a.map(f)` -- Array receiver whose argument is a **function value the
@@ -187,26 +198,47 @@ fn push_mutates_the_receiver_and_returns_the_new_length() {
 /// ECMA-262 23.1.3.20: a new array, same length, `f` applied to each element.
 #[test]
 fn map_calls_back_into_a_function_value() {
-    number("let a = [1, 2, 3]; return a.map(function (x) { return x + 1; })[0];", 2.0);
-    number("let a = [1, 2, 3]; return a.map(function (x) { return x + 1; })[2];", 4.0);
-    number("let a = [1, 2, 3]; return a.map(function (x) { return x + 1; }).length;", 3.0);
+    number(
+        "let a = [1, 2, 3]; return a.map(function (x) { return x + 1; })[0];",
+        2.0,
+    );
+    number(
+        "let a = [1, 2, 3]; return a.map(function (x) { return x + 1; })[2];",
+        4.0,
+    );
+    number(
+        "let a = [1, 2, 3]; return a.map(function (x) { return x + 1; }).length;",
+        3.0,
+    );
     // An arrow, which is the way anyone will actually write it.
     number("let a = [1, 2, 3]; return a.map(x => x * 2)[1];", 4.0);
     // Empty array: the callback is never called and the result is empty.
     number("let a = []; return a.map(x => x + 1).length;", 0.0);
     // A named function value, passed rather than written inline.
-    number("function inc(x) { return x + 1; } let a = [5]; return a.map(inc)[0];", 6.0);
+    number(
+        "function inc(x) { return x + 1; } let a = [5]; return a.map(inc)[0];",
+        6.0,
+    );
     // The callback closes over an outer binding -- closures and methods have
     // to compose, and this is where a mechanism that rebuilds environments
     // would go wrong.
-    number("let k = 10; let a = [1, 2]; return a.map(x => x + k)[1];", 12.0);
+    number(
+        "let k = 10; let a = [1, 2]; return a.map(x => x + k)[1];",
+        12.0,
+    );
     // `map` does not mutate the receiver.
     number("let a = [1, 2]; a.map(x => x + 1); return a[0];", 1.0);
     // The result is a real Array: it indexes, it has `length`, and it can be
     // pushed to.
-    number("let a = [1]; let b = a.map(x => x); b.push(2); return b.length;", 2.0);
+    number(
+        "let a = [1]; let b = a.map(x => x); b.push(2); return b.length;",
+        2.0,
+    );
     // Chained, which is the shape that makes methods worth having at all.
-    number("let a = [1, 2, 3]; return a.map(x => x + 1).map(x => x * 2)[0];", 4.0);
+    number(
+        "let a = [1, 2, 3]; return a.map(x => x + 1).map(x => x * 2)[0];",
+        4.0,
+    );
 }
 
 // =========================================================================
@@ -275,5 +307,8 @@ fn a_plain_object_property_named_like_a_method_is_untouched() {
     number("const o = { push: 2 }; return o.push;", 2.0);
     number("const o = { map: 3 }; return o.map;", 3.0);
     // Including when it holds a function the script calls.
-    number("const o = { trim: function () { return 4; } }; return o.trim();", 4.0);
+    number(
+        "const o = { trim: function () { return 4; } }; return o.trim();",
+        4.0,
+    );
 }

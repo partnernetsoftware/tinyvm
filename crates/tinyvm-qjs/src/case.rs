@@ -27,6 +27,9 @@
 //! ⑤ of the decision document.
 
 /// `(start, len, delta)` -- see the module comment.
+///
+/// Kept as a dense table: one run per column group, not one per line.
+#[rustfmt::skip]
 pub(crate) const RUNS: &[(u32, u32, i32)] = &[
     (65,26,32),(192,23,32),(216,7,32),(256,1,1),(258,1,1),(260,1,1),(262,1,1),(264,1,1),
     (266,1,1),(268,1,1),(270,1,1),(272,1,1),(274,1,1),(276,1,1),(278,1,1),(280,1,1),(282,1,1),

@@ -20,13 +20,17 @@
 //! by charging every unrelated function value instead.
 
 use super::repr::{
-    self, BlockType, Ins, ValType, WIDTH, box_number, box_string, unbox_array, unbox_string, unbox_number,
+    self, BlockType, Ins, ValType, WIDTH, box_number, box_string, unbox_array, unbox_number,
+    unbox_string,
 };
 // `map`'s prefab is the one function that builds an array and calls back into
 // a function value; `box_function` is variant A's and B's property read.
-use super::repr::{box_array, const_bool, const_undefined, unbox_object};
 use super::array::{ARR_ELEMS, ARR_LEN, Ar, ELEM_BYTES, ELEM_PAYLOAD, ELEM_TAG};
-use super::runtime::{ALIGN_WORD, ENTRY_BYTES, ENTRY_KEY, FN_ELEMENT, FN_ENV, FnBuild, OBJ_ENTRIES, OBJ_LEN, Rt, RtFunc};
+use super::repr::{box_array, const_bool, const_undefined, unbox_object};
+use super::runtime::{
+    ALIGN_WORD, ENTRY_BYTES, ENTRY_KEY, FN_ELEMENT, FN_ENV, FnBuild, OBJ_ENTRIES, OBJ_LEN, Rt,
+    RtFunc,
+};
 
 /// Where this set sits, and where the unconditional runtime sits. The same
 /// shape [`super::array::Ctx`] has, for the same reason: a gated set's own
@@ -193,7 +197,6 @@ pub(crate) const SET: &[Me] = &[
     Me::MapBound,
 ];
 
-
 /// Which of [`SET`] a particular module carries, and where each one lands.
 ///
 /// Whole-set gating made a program that calls only `trim()` pay 307 bytes for
@@ -227,7 +230,6 @@ impl Plan {
         }
     }
 
-
     /// Whether this plan carries a particular member.
     ///
     /// Asked by the emitter for exactly one thing: whether to place the
@@ -250,7 +252,10 @@ impl Plan {
     /// In `SET` order, so the module's layout does not depend on the order
     /// call sites happened to appear in the source.
     fn ordered(&self) -> Vec<Me> {
-        SET.iter().copied().filter(|m| self.enabled.contains(m)).collect()
+        SET.iter()
+            .copied()
+            .filter(|m| self.enabled.contains(m))
+            .collect()
     }
 
     pub(crate) fn offset(&self, me: Me) -> u32 {
@@ -335,8 +340,6 @@ impl Me {
     pub(crate) fn needs_arrays(self) -> bool {
         matches!(self, Me::Push | Me::MapBound | Me::Split | Me::ObjKeys)
     }
-
-
 
     /// What this method's body calls, so [`Plan`] can pull them in.
     fn helpers(self) -> Vec<Me> {
@@ -730,9 +733,7 @@ fn trim(ctx: &Ctx) -> FnBuild {
     b.push(Ins::End);
     b.push(Ins::End);
 
-    let inner = vec![
-        Ins::LocalGet(out),
-    ];
+    let inner = vec![Ins::LocalGet(out)];
     let mut tail = Vec::new();
     box_string(&inner, &mut tail);
     f.body.extend(tail);
@@ -988,18 +989,13 @@ fn index_of(ctx: &Ctx) -> FnBuild {
     f
 }
 
-
-
 /// Push a Number literal as a V1 pair.
 fn number_const(b: &mut Vec<Ins>, v: i32) {
-    let inner = vec![
-        Ins::F64Const(v as f64),
-    ];
+    let inner = vec![Ins::F64Const(v as f64)];
     let mut out = Vec::new();
     box_number(&inner, &mut out);
     b.extend(out);
 }
-
 
 /// Which end of the haystack an affix test compares.
 ///
@@ -1216,7 +1212,6 @@ fn affix(which: Affix) -> FnBuild {
     const_bool(true, b);
     f
 }
-
 
 /// `substr(p, start, n) -> i32`: a freshly allocated string holding `n` bytes
 /// of the string body at `p`, from byte offset `start`.
@@ -1460,7 +1455,6 @@ fn split(ctx: &Ctx) -> FnBuild {
     f.body.extend(out);
     f
 }
-
 
 /// `decode(p) -> (cp, width)`: the code point at byte address `p`, and how
 /// many bytes it took.
@@ -2153,8 +2147,6 @@ fn slice_core(ctx: &Ctx) -> FnBuild {
     f
 }
 
-
-
 /// Whether an occurrence loop stops after the first match.
 #[derive(Clone, Copy, PartialEq)]
 enum Reach {
@@ -2589,9 +2581,7 @@ fn map_bound(ctx: &Ctx) -> FnBuild {
     b.push(Ins::End);
     b.push(Ins::End);
 
-    let inner = vec![
-        Ins::LocalGet(out),
-    ];
+    let inner = vec![Ins::LocalGet(out)];
     let mut boxed = Vec::new();
     box_array(&inner, &mut boxed);
     f.body.extend(boxed);

@@ -911,7 +911,10 @@ fn this_is_refused_wherever_it_appears() {
 fn an_arrow_function_is_a_function_expression() {
     number("const o = {}; o.m = (a) => a; return o.m(3);", 3.0);
     number("let f = a => a * 2; return f(4);", 8.0);
-    number("function apply1(g) { return g(1); } return apply1(x => x);", 1.0);
+    number(
+        "function apply1(g) { return g(1); } return apply1(x => x);",
+        1.0,
+    );
     number("const o = {}; o.m = () => 1; return o.m();", 1.0);
     // The claim that makes the paragraph above true rather than merely
     // plausible: the two spellings are one module.

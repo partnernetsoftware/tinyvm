@@ -221,10 +221,7 @@ fn a_substitution_may_hold_a_brace() {
     // apart, and this is the test that would fail if it did not.
     string("return `${ { a: 7 }.a }`;", "7");
     string("return `${ { a: { b: 8 } }.a.b }`;", "8");
-    string(
-        "return `${ (function () { return 9; })() }`;",
-        "9",
-    );
+    string("return `${ (function () { return 9; })() }`;", "9");
     // A block inside a function inside a substitution, two levels of brace.
     string(
         "return `${ (function () { if (1) { return 3; } return 4; })() }`;",
@@ -271,7 +268,6 @@ fn a_template_in_the_declared_names_mode_too() {
         "let tab = 3; return `{\"tab\":${tab}}`;",
         Options {
             names: Names::Declared(Vec::new()),
-            ..Options::default()
         },
     )
     .expect("declared names compile a template");
@@ -382,7 +378,11 @@ fn tagged_templates_are_refused_by_name() {
     // the cooked strings carrying a `raw` property. This engine has neither
     // the array methods nor the property definition to build one, so it is
     // refused rather than approximated.
-    refuses_capability("function t(s) { return s; } return t`a`;", "tagged templates", Boundary::Subset);
+    refuses_capability(
+        "function t(s) { return s; } return t`a`;",
+        "tagged templates",
+        Boundary::Subset,
+    );
     refuses_capability(
         "function t(s) { return s; } return t`a${1}b`;",
         "tagged templates",
@@ -395,7 +395,14 @@ fn the_neighbouring_constructs_are_still_refused_by_name() {
     // A template milestone is the one most likely to be mistaken for having
     // brought these; it did not. (Arrow functions were a row here and landed
     // right after templates did; `arrows_m3.rs` has them now.)
-    refuses_capability("class A {} return 1;", "the `class` keyword", Boundary::FullJs);
-    refuses_capability("return [1, , 2];", "elisions in an array literal", Boundary::FullJs);
+    refuses_capability(
+        "class A {} return 1;",
+        "the `class` keyword",
+        Boundary::FullJs,
+    );
+    refuses_capability(
+        "return [1, , 2];",
+        "elisions in an array literal",
+        Boundary::FullJs,
+    );
 }
-

@@ -11,7 +11,9 @@ fn number(source: &str) -> f64 {
     let wasm = compile_qjs_m1(source).unwrap_or_else(|e| panic!("compiling {source:?}: {e}"));
     let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
     let mut instance = module.instantiate().expect("instantiates");
-    let vals = instance.invoke_by_name("main", &Value::args(&[])).expect("runs");
+    let vals = instance
+        .invoke_by_name("main", &Value::args(&[]))
+        .expect("runs");
     match Value::returned(&vals).expect("a value") {
         Value::Number(n) => n,
         other => panic!("{source:?}: expected a Number, got {other:?}"),

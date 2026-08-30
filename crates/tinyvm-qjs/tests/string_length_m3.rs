@@ -187,7 +187,6 @@ fn length_works_under_the_declared_names_mode_too() {
         "let s = \"caf\u{e9}\"; return s.length;",
         Options {
             names: Names::Declared(Vec::new()),
-            ..Options::default()
         },
     )
     .expect("declared names compile a `.length`");
@@ -243,7 +242,9 @@ fn a_computed_key_the_text_settles_does_not_turn_the_arm_on() {
         variable > literal,
         "an unsettled computed key has to pay: {literal} -> {variable}"
     );
-    let index = compile_qjs_m1("let a = [1, 2]; return a[1];").unwrap().len();
+    let index = compile_qjs_m1("let a = [1, 2]; return a[1];")
+        .unwrap()
+        .len();
     let index_var = compile_qjs_m1("let a = [1, 2]; let i = 1; return a[i];")
         .unwrap()
         .len();
@@ -254,8 +255,12 @@ fn a_computed_key_the_text_settles_does_not_turn_the_arm_on() {
     // And the settled one really is free: writing the key out gives the same
     // module as never having written a computed key that could be `length`.
     assert_eq!(
-        compile_qjs_m1("const o = { a: 1 }; return o[\"a\"];").unwrap().len(),
-        compile_qjs_m1("const o = { a: 1 }; return o[\"a\"];").unwrap().len(),
+        compile_qjs_m1("const o = { a: 1 }; return o[\"a\"];")
+            .unwrap()
+            .len(),
+        compile_qjs_m1("const o = { a: 1 }; return o[\"a\"];")
+            .unwrap()
+            .len(),
     );
 }
 
@@ -269,7 +274,9 @@ fn the_dead_body_is_a_stub_when_the_gate_is_off() {
     //
     // Asserted through the one thing visible from out here: turning the gate
     // on costs more than the arm alone, because the body arrives with it.
-    let off = compile_qjs_m1("const o = { a: 1 }; return o.a;").unwrap().len();
+    let off = compile_qjs_m1("const o = { a: 1 }; return o.a;")
+        .unwrap()
+        .len();
     let on = compile_qjs_m1("const o = { a: 1 }; return o.a + \"x\".length;")
         .unwrap()
         .len();

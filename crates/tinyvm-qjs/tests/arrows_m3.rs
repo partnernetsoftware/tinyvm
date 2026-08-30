@@ -111,7 +111,6 @@ fn refuse(source: &str) -> String {
     }
 }
 
-
 #[track_caller]
 fn number(source: &str, want: f64) {
     assert_eq!(run(source), Out::Number(want), "{source:?}");
@@ -156,10 +155,16 @@ fn a_concise_body_is_the_return_it_means() {
 #[test]
 fn a_block_body_is_an_ordinary_function_body() {
     number("let f = (x) => { return x + 1; }; return f(9);", 10.0);
-    number("let f = (x) => { let y = x * 2; return y; }; return f(5);", 10.0);
+    number(
+        "let f = (x) => { let y = x * 2; return y; }; return f(5);",
+        10.0,
+    );
     // No `return` at all is `undefined`, exactly as in a function.
     undefined("let f = (x) => { let y = x; }; return f(1);");
-    number("let f = (x) => { if (x > 1) { return 1; } return 0; }; return f(5);", 1.0);
+    number(
+        "let f = (x) => { if (x > 1) { return 1; } return 0; }; return f(5);",
+        1.0,
+    );
 }
 
 // =========================================================================
@@ -201,7 +206,10 @@ fn an_arrow_composes_with_what_landed_before_it() {
     number("let f = (a) => a[1]; return f([1, 2, 3]);", 2.0);
     number("let f = (o) => o.a; return f({ a: 7 });", 7.0);
     string("let f = (x) => `v${x}`; return f(3);", "v3");
-    number("let f = (x) => { let g = (y) => x + y; return g(1); }; return f(2);", 3.0);
+    number(
+        "let f = (x) => { let g = (y) => x + y; return g(1); }; return f(2);",
+        3.0,
+    );
 }
 
 #[test]
@@ -210,11 +218,20 @@ fn an_arrow_appears_wherever_an_assignment_expression_may() {
     // positions that rung reaches. Each is a place where recognising the
     // arrow one rung too high or too low would show up as a wrong parse
     // rather than as a diagnostic, so each is asserted rather than assumed.
-    number("let c = 1; let f = c ? (x) => x : (x) => 0; return f(5);", 5.0);
+    number(
+        "let c = 1; let f = c ? (x) => x : (x) => 0; return f(5);",
+        5.0,
+    );
     number("const o = { m: (x) => x * 2 }; return o.m(4);", 8.0);
     number("let a = [(x) => x + 1]; return a[0](1);", 2.0);
-    number("function take(g) { return g(2); } return take((a) => a * 5);", 10.0);
-    number("let f = (x) => x, g = (y) => y * 2; return f(1) + g(2);", 5.0);
+    number(
+        "function take(g) { return g(2); } return take((a) => a * 5);",
+        10.0,
+    );
+    number(
+        "let f = (x) => x, g = (y) => y * 2; return f(1) + g(2);",
+        5.0,
+    );
     number("let o = {}; o.a = (x) => x; return o.a(1);", 1.0);
     number("return (() => 1)() + (() => 2)();", 3.0);
     // A parenthesised concise body: two `(` in a row, meaning different
@@ -226,7 +243,10 @@ fn an_arrow_appears_wherever_an_assignment_expression_may() {
 fn an_arrow_body_is_an_ordinary_body_in_every_respect() {
     // Writing through a captured binding, `try`, and the statement forms --
     // none of which an arrow does differently, which is the point.
-    number("let n = 0; let f = (x) => { n = n + x; return n; }; f(1); return f(2);", 3.0);
+    number(
+        "let n = 0; let f = (x) => { n = n + x; return n; }; f(1); return f(2);",
+        3.0,
+    );
     number(
         "let f = (x) => { try { return x; } catch (e) { return 0; } }; return f(7);",
         7.0,
@@ -243,7 +263,6 @@ fn arrows_work_under_the_declared_names_mode_too() {
         "let f = (x) => x * 2; return f(21);",
         Options {
             names: Names::Declared(Vec::new()),
-            ..Options::default()
         },
     )
     .expect("declared names compile an arrow");
@@ -252,7 +271,10 @@ fn arrows_work_under_the_declared_names_mode_too() {
     let vals = instance
         .invoke_by_name("main", &Value::args(&[]))
         .expect("run");
-    assert_eq!(Value::returned(&vals).expect("a value"), Value::Number(42.0));
+    assert_eq!(
+        Value::returned(&vals).expect("a value"),
+        Value::Number(42.0)
+    );
 }
 
 // =========================================================================
@@ -283,7 +305,10 @@ fn an_arrow_and_the_function_expression_it_means_are_one_module() {
     ] {
         let a = compile_qjs_m1(arrow).expect("the arrow compiles");
         let b = compile_qjs_m1(written_out).expect("the function expression compiles");
-        assert_eq!(a, b, "{arrow:?} and {written_out:?} must be the same module");
+        assert_eq!(
+            a, b,
+            "{arrow:?} and {written_out:?} must be the same module"
+        );
     }
 }
 
@@ -324,7 +349,10 @@ fn the_absences_the_arrow_equivalence_rests_on() {
     );
     // `arguments` is not a keyword here, it is simply an unbound name.
     let message = refuse("function f() { return arguments; } return f();");
-    assert!(message.contains("no declaration of `arguments`"), "{message}");
+    assert!(
+        message.contains("no declaration of `arguments`"),
+        "{message}"
+    );
     // Function properties: a property of a non-object traps at run time here,
     // and a function is a non-object as far as property access is concerned.
     // So a normal function has no reachable `prototype` either, and an arrow
@@ -358,7 +386,11 @@ fn parameter_syntax_beyond_a_plain_name_is_still_refused() {
 fn the_neighbouring_constructs_are_still_refused_by_name() {
     // An arrow milestone is the one most likely to be mistaken for having
     // brought these; it did not.
-    refuses_capability("class A {} return 1;", "the `class` keyword", Boundary::FullJs);
+    refuses_capability(
+        "class A {} return 1;",
+        "the `class` keyword",
+        Boundary::FullJs,
+    );
     refuses_capability(
         "async function f() {} return 1;",
         "the `async` keyword",

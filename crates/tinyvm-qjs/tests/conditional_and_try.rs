@@ -814,9 +814,8 @@ fn a_property_read_off_undefined_is_a_throw_and_a_real_trap_still_is_not() {
 
     // Calling a non-function is ECMA-262's other TypeError, and since
     // 2026-08-30 it is caught too.
-    let mut called = instantiate(
-        "let out = 0; try { const f = 1; f(); } catch (e) { out = 5; } return out;",
-    );
+    let mut called =
+        instantiate("let out = 0; try { const f = 1; f(); } catch (e) { out = 5; } return out;");
     let vals = called
         .invoke_by_name("main", &Value::args(&[]))
         .expect("the TypeError is caught and the script completes");

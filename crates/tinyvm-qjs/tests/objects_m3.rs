@@ -754,20 +754,17 @@ fn object_facilities_this_engine_refuses() {
     // the call itself is a capability the engine has, so what is missing is
     // the *binding*. There is no global scope for `Object` to be in, and the
     // sentence is about that rather than about the author.
-    for source in [
-        // `Object.keys(o)` left this list on 2026-08-29 -- it is folded to a
-        // gated method call and answers (`object_keys_m3.rs`). The bare
-        // property read stays: `Object` is not a value here, only a spelling.
-        "const o = {}; return Object.keys;",
-    ] {
-        let error = refuse(source);
-        assert!(
-            error.message.contains("finds no declaration of `Object`"),
-            "{source:?}: got {:?}",
-            error.message
-        );
-        assert_eq!(error.boundary, Boundary::Subset, "{source:?}");
-    }
+    // `Object.keys(o)` left this list on 2026-08-29 -- it is folded to a
+    // gated method call and answers (`object_keys_m3.rs`). The bare
+    // property read stays: `Object` is not a value here, only a spelling.
+    let source = "const o = {}; return Object.keys;";
+    let error = refuse(source);
+    assert!(
+        error.message.contains("finds no declaration of `Object`"),
+        "{source:?}: got {:?}",
+        error.message
+    );
+    assert_eq!(error.boundary, Boundary::Subset, "{source:?}");
     let error = refuse("const o = {}; return Object.keys;");
     assert!(
         error.message.contains("finds no declaration of `Object`"),

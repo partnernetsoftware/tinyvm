@@ -525,11 +525,16 @@ impl Lexer<'_> {
                 let digits_at = self.pos;
                 self.eat_while(|b| (b as char).is_digit(radix));
                 let digits = &self.src[digits_at..self.pos];
-                let dangling = self.peek().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_');
+                let dangling = self
+                    .peek()
+                    .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_');
                 if digits.is_empty() || dangling {
                     self.eat_while(|b| b.is_ascii_alphanumeric() || b == b'_');
                     return Err(malformed(
-                        &format!("needs {what} digits after the `0{}` at byte {start}", self.src.as_bytes()[start + 1] as char),
+                        &format!(
+                            "needs {what} digits after the `0{}` at byte {start}",
+                            self.src.as_bytes()[start + 1] as char
+                        ),
                         start,
                     ));
                 }

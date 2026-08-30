@@ -258,14 +258,13 @@ fn finding_4_leading_zero_changes_the_value() {
 #[test]
 fn guard_the_other_radix_prefixes_name_their_boundary() {
     // Hex, octal and binary lower since 2026-08-29; BigInt still names itself.
-    for source in ["return 1n;"] {
-        let error = refuse(source);
-        assert!(
-            error.message.starts_with("this engine does not support"),
-            "{source:?}: {}",
-            error.message
-        );
-    }
+    let source = "return 1n;";
+    let error = refuse(source);
+    assert!(
+        error.message.starts_with("this engine does not support"),
+        "{source:?}: {}",
+        error.message
+    );
 }
 
 // =========================================================================
@@ -566,12 +565,18 @@ fn guard_unterminated_lexemes_are_named_not_crashed() {
     // and not a capability boundary: it is named the same way an unterminated
     // string is, and points at the backtick that was never closed.
     let error = refuse("return `abc;");
-    assert!(error.message.contains("close the template"), "{}", error.message);
+    assert!(
+        error.message.contains("close the template"),
+        "{}",
+        error.message
+    );
     assert!(error.message.contains("byte 7"), "{}", error.message);
     // An unterminated *substitution* is the same story one level in.
     let error = refuse("return `a${1;");
     assert!(
-        error.message.contains("close the substitution in the template"),
+        error
+            .message
+            .contains("close the substitution in the template"),
         "{}",
         error.message
     );

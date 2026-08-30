@@ -1754,9 +1754,12 @@ const STALE_HINTS: &[(&str, &str)] = &[
     // Regression row since 2026-08-29: hex/octal/binary lower (b7e757c);
     // numeric separators are the leaf that stays open.
     ("`0x`/`0o`/`0b` number literals", "the_three_radices_answer"), // radix_literals.rs
-    ("numeric separators", "a_separator_is_dropped_from_the_digits"), // lex_m1.rs
-    ("tagged templates", "a_tag_receives_the_raw_strings_array"), // templates_m3.rs
-    ("`parseInt`", "parse_int_reads_a_prefix_in_the_given_radix"), // loops_and_replace_m3.rs
+    (
+        "numeric separators",
+        "a_separator_is_dropped_from_the_digits",
+    ), // lex_m1.rs
+    ("tagged templates", "a_tag_receives_the_raw_strings_array"),   // templates_m3.rs
+    ("`parseInt`", "parse_int_reads_a_prefix_in_the_given_radix"),  // loops_and_replace_m3.rs
     (
         "every other method",
         "every_shipped_method_has_a_row_and_a_body",
@@ -1773,7 +1776,7 @@ const STALE_HINTS: &[(&str, &str)] = &[
         "memory64 proposal",
         "a_memory64_module_addresses_past_four_gib",
     ), // standard_feature_matrix.rs
-    ("exception handling", "a_try_table_catches_a_tagged_throw"), // standard_feature_matrix.rs
+    ("exception handling", "a_try_table_catches_a_tagged_throw"),   // standard_feature_matrix.rs
     (
         "threads/shared memory",
         "an_atomic_rmw_on_shared_memory_is_ordered",

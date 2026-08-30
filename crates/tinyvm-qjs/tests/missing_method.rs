@@ -34,8 +34,7 @@ fn a_missing_string_method_names_itself() {
 /// before this the two programs failed two different ways.
 #[test]
 fn the_name_does_not_depend_on_length_appearing_elsewhere() {
-    let (fault, name) =
-        run_and_read(r#"let s = "abc"; let n = s.length; return s.substr(0, n);"#);
+    let (fault, name) = run_and_read(r#"let s = "abc"; let n = s.length; return s.substr(0, n);"#);
     assert_eq!(fault, Some(GuestFault::MissingStringMethod));
     assert_eq!(name.as_deref(), Some("substr"));
 }

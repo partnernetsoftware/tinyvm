@@ -25,7 +25,10 @@ fn a_plain_string_is_quoted_in_runs() {
     let quote = steps(&format!("{LONG} return JSON.stringify(t).length;"));
     let per_byte = (quote - build) / 1002;
     println!("JSON.stringify of a 1000-char string: {per_byte} steps per byte");
-    assert!(per_byte < 50, "a plain string byte cost {per_byte} steps to quote; it was ~117");
+    assert!(
+        per_byte < 50,
+        "a plain string byte cost {per_byte} steps to quote; it was ~117"
+    );
 }
 
 #[test]
@@ -34,8 +37,14 @@ fn small_objects_have_a_known_price() {
     let ser = steps(&format!("{OBJECTS} return JSON.stringify(a).length;"));
     let len = 50 * 40; // ~ {"name":"item12","count":12,"ok":true},
     let per_byte = (ser - build) / len;
-    println!("JSON.stringify of 50 small objects: {} steps, ~{per_byte} per output byte", ser - build);
-    assert!(per_byte < 400, "a small-object byte cost {per_byte} steps to serialize");
+    println!(
+        "JSON.stringify of 50 small objects: {} steps, ~{per_byte} per output byte",
+        ser - build
+    );
+    assert!(
+        per_byte < 400,
+        "a small-object byte cost {per_byte} steps to serialize"
+    );
 }
 
 #[test]
@@ -46,15 +55,22 @@ fn quoting_keeps_every_escape_around_the_runs() {
         (r#"return JSON.stringify("a\"b\\c\nd");"#, r#""a\"b\\c\nd""#),
         (r#"return JSON.stringify("\"");"#, r#""\"""#),
         (r#"return JSON.stringify("\u0001x\ty");"#, r#""\u0001x\ty""#),
-        (r#"return JSON.stringify("héllo wörld");"#, r#""héllo wörld""#),
+        (
+            r#"return JSON.stringify("héllo wörld");"#,
+            r#""héllo wörld""#,
+        ),
         (r#"return JSON.stringify("end\\");"#, r#""end\\""#),
         (r#"return JSON.stringify({k: "v\"q"});"#, r#"{"k":"v\"q"}"#),
     ] {
         let wasm = compile_qjs_m1(source).expect("compiles");
         let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
         let mut instance = module.instantiate().expect("instantiates");
-        let vals = instance.invoke_by_name("main", &Value::args(&[])).expect("runs");
-        let Value::String(ptr) = Value::returned(&vals).expect("value") else { panic!("{source}: not a string") };
+        let vals = instance
+            .invoke_by_name("main", &Value::args(&[]))
+            .expect("runs");
+        let Value::String(ptr) = Value::returned(&vals).expect("value") else {
+            panic!("{source}: not a string")
+        };
         assert_eq!(read_string(&instance, ptr), want, "{source}");
     }
 }
