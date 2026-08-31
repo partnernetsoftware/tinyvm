@@ -656,7 +656,23 @@ fn parse_prd_leaves(prd: &str, marker: &str) -> Vec<String> {
 // `prd/PRD.md`'s acceptance section now writes the command set down, with this
 // package in it, so the next gap is caught by the gate rather than by someone
 // deciding to look.
-const LEAF_TESTS: [(&str, &str); 275] = [
+const LEAF_TESTS: [(&str, &str); 279] = [
+    (
+        "`toUpperCase`：小写表反转 + ASCII −32               2026-08-31；ς→Σ 手补；ß/µ/四个 titlecase 原样（记录的分歧，简单映射如此）；8 984 B 只有大写者付，两表各自门控",
+        "the_inverted_table_reaches_the_same_pairs_backwards",
+    ),
+    (
+        "`padStart` / `padEnd`（+ `repeat`）                 2026-08-31；StringPad 原样：整倍 + slice_core 截前缀（代理对中间 = slice 的同一句拒绝）；缺省填充 \" \"；负 repeat 具名拒绝；1 635 / 1 633 / 669 B；100 次 pad_left 手写 2.84M → 228k 步（12×）",
+        "string_pad_fills_truncates_and_defaults",
+    ),
+    (
+        "`toString(radix)`：整数逐位除基，V8 同一走法         2026-08-31；2..36 外具名拒绝（RangeError）；非十进制下的分数具名拒绝不近似；938 B；`hex4` 可退役",
+        "to_string_answers_the_radix_digits",
+    ),
+    (
+        "`toFixed(0..100)`：精确十进制（bignum），不是 %f      2026-08-31；`(1.005).toFixed(2)`=\"1.00\" 而 `(8.005)`=\"8.01\"（都是双精度的真话）；平局远离零（规范第 6 步先取  x ）；1e21 起走 ToString；1 243 B",
+        "to_fixed_is_the_exact_decimal",
+    ),
     (
         "`parseInt`（前缀解析 + 基数）                 2026-08-31；19.2.5 整条：空白、一个符号、`0x`、逐位到第一个非位、无位 NaN、基数出 2..36 是 NaN；手写 parse_int 2.21M → 135k 步（16×）；1 073 B",
         "parse_int_reads_a_prefix_in_the_given_radix",
@@ -714,7 +730,7 @@ const LEAF_TESTS: [(&str, &str); 275] = [
         "break_leaves_the_loop",
     ),
     (
-        "split  · toLowerCase  · toUpperCase      [–] 前两个已落地，后者零使用",
+        "split  · toLowerCase  · toUpperCase   2026-08-31 三个都已落地",
         "split_cuts_at_every_separator",
     ),
     (

@@ -94,9 +94,9 @@ const ALIGN_WORD: u32 = 2;
 /// `cap` and `len` are counted in limbs; a limb holds 16 bits in the low half
 /// of an `i32` word. `len` is the number of significant limbs, so zero is
 /// `len == 0` and the top limb is never zero.
-const BN_CAP: u32 = 0;
-const BN_LEN: u32 = 4;
-const BN_LIMBS: u32 = 8;
+pub(crate) const BN_CAP: u32 = 0;
+pub(crate) const BN_LEN: u32 = 4;
+pub(crate) const BN_LIMBS: u32 = 8;
 
 /// Limbs reserved for one Dragon4 working value.
 ///
@@ -1007,7 +1007,7 @@ fn bn_sub(ctx: &Ctx) -> FnBuild {
 /// wasm's linear memory is little-endian by definition, so the byte order is a
 /// fact rather than a host property.
 #[allow(clippy::too_many_arguments)]
-fn f64_fields(
+pub(crate) fn f64_fields(
     b: &mut Vec<Ins>,
     x: u32,
     sc: u32,

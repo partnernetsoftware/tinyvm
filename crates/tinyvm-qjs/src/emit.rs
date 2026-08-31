@@ -350,6 +350,7 @@ pub(crate) mod m1 {
                 is_array(slot, out);
                 out.push(Ins::I32Or);
             }
+            method::Recv::Num => is_number(slot, out),
             method::Recv::Any => unreachable!("an any-receiver prefab has no call-site test"),
         }
     }
@@ -775,6 +776,17 @@ pub(crate) mod m1 {
         } else {
             (0, 0)
         };
+        // The inverted table, under the same gate discipline: only a
+        // program that uppercases carries it.
+        let (upper_table, upper_runs) = if scan.methods.wants(method::Me::UpperCp) {
+            let runs = crate::case::upper_runs();
+            (
+                pool.blob(&crate::case::segment_bytes_of(&runs)),
+                runs.len() as u32,
+            )
+        } else {
+            (0, 0)
+        };
         let method_set: Vec<runtime::RtFunc> = if scan.methods.is_empty() {
             Vec::new()
         } else {
@@ -787,6 +799,8 @@ pub(crate) mod m1 {
                 array_base: arr_base,
                 case_table,
                 case_runs,
+                upper_table,
+                upper_runs,
                 comma: if scan.methods.wants(method::Me::Join) {
                     pool.intern(",")
                 } else {
@@ -800,6 +814,35 @@ pub(crate) mod m1 {
                 str_cmp: convert_base + convert::Cv::StrCmp.offset(),
                 pow_exponent: if scan.methods.wants(method::Me::MathPow) {
                     pool.intern("a fractional Math.pow exponent")
+                } else {
+                    0
+                },
+                space: if scan.methods.wants(method::Me::PadStart)
+                    || scan.methods.wants(method::Me::PadEnd)
+                {
+                    pool.intern(" ")
+                } else {
+                    0
+                },
+                repeat_count: if scan.methods.wants(method::Me::Repeat) {
+                    pool.intern("a negative String.repeat count")
+                } else {
+                    0
+                },
+                num_to_string: convert_base + convert::Cv::NumToString.offset(),
+                convert_base,
+                radix_range: if scan.methods.wants(method::Me::NumToStringRadix) {
+                    pool.intern("a toString radix outside 2..36")
+                } else {
+                    0
+                },
+                fixed_range: if scan.methods.wants(method::Me::ToFixed) {
+                    pool.intern("toFixed digits outside 0..100")
+                } else {
+                    0
+                },
+                radix_fraction: if scan.methods.wants(method::Me::NumToStringRadix) {
+                    pool.intern("a fractional Number under a non-decimal radix")
                 } else {
                     0
                 },

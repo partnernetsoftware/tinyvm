@@ -138,3 +138,56 @@ pub(crate) fn segment_bytes() -> Vec<u8> {
     }
     out
 }
+
+/// The uppercase table: [`RUNS`] inverted -- each lowercase code point to
+/// the delta that reaches the uppercase form it came from -- expanded,
+/// deduplicated and re-run-length-encoded at compile time (of the script,
+/// not of this crate: the table is built once per module that wants it).
+///
+/// Where two uppercase points share one lowercase form (the titlecase
+/// pairs Ǆ/ǅ, ǅ's kin; ϴ beside Θ; the compatibility letters Ω, K, Å),
+/// the smallest uppercase wins, which is Unicode's own simple mapping in
+/// every such case. Three deliberate divergences from the *full* mapping
+/// a browser applies, each recorded in `tests/upper_m3.rs`:
+///
+/// * `ß` stays `ß` -- the full mapping is `"SS"` (one-to-two, which this
+///   engine's one-to-one table cannot spell) and the simple mapping is
+///   identity; the inverse pair `ẞ -> ß` is removed rather than invented.
+/// * `ς` (final sigma) goes to `Σ`, added by hand: no run maps down to
+///   it, and Unicode's simple mapping says `Σ`.
+/// * the four titlecase forms (`ǅ ǈ ǋ ǲ`) stay themselves: they are
+///   nobody's lowercase.
+pub(crate) fn upper_runs() -> Vec<(u32, u32, i32)> {
+    use std::collections::BTreeMap;
+    let mut map: BTreeMap<u32, i32> = BTreeMap::new();
+    for &(start, len, delta) in RUNS {
+        for k in 0..len {
+            let upper = start + k;
+            let lower = (upper as i64 + delta as i64) as u32;
+            map.entry(lower).or_insert(-delta);
+        }
+    }
+    // ß: simple mapping is identity; the ẞ pair would invent one.
+    map.remove(&0xdf);
+    // ς -> Σ.
+    map.insert(0x3c2, -31);
+    let mut out: Vec<(u32, u32, i32)> = Vec::new();
+    for (cp, d) in map {
+        match out.last_mut() {
+            Some(last) if last.2 == d && last.0 + last.1 == cp => last.1 += 1,
+            _ => out.push((cp, 1, d)),
+        }
+    }
+    out
+}
+
+/// [`segment_bytes`] for any run table.
+pub(crate) fn segment_bytes_of(runs: &[(u32, u32, i32)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(runs.len() * ENTRY_BYTES as usize);
+    for (start, len, delta) in runs {
+        out.extend_from_slice(&start.to_le_bytes());
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&delta.to_le_bytes());
+    }
+    out
+}

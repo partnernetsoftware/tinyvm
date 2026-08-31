@@ -27,6 +27,7 @@ use super::repr::{
 // a function value; `box_function` is variant A's and B's property read.
 use super::array::{ARR_ELEMS, ARR_LEN, Ar, ELEM_BYTES, ELEM_PAYLOAD, ELEM_TAG};
 use super::ast::m1 as ast;
+use super::convert::{BN_LEN, BN_LIMBS, Cv, f64_fields};
 use super::repr::{box_array, box_bool, const_bool, const_undefined, unbox_object};
 use super::runtime::{
     ALIGN_WORD, ENTRY_BYTES, ENTRY_KEY, FAULT_CAPABILITY, FAULT_NOT_A_FUNCTION, FN_ELEMENT, FN_ENV,
@@ -72,6 +73,33 @@ pub(crate) struct Ctx {
     /// reads it then.
     pub(crate) case_table: i32,
     pub(crate) case_runs: u32,
+    /// Guest address and run count of the *uppercase* run table --
+    /// [`crate::case::upper_runs`], the lowercase table inverted. Placed
+    /// only when the plan wants [`Me::UpperCp`]; zero and unread otherwise.
+    pub(crate) upper_table: i32,
+    pub(crate) upper_runs: u32,
+    /// The interned `" "` a one-argument `padStart`/`padEnd` fills with
+    /// (22.1.3.16/.17 through StringPad's default). Zero when the plan
+    /// wants neither; nothing reads it then.
+    pub(crate) space: i32,
+    /// The interned `"a negative String.repeat count"` (22.1.3.19 step 2
+    /// is a RangeError). Zero when the plan does not want [`Me::Repeat`].
+    pub(crate) repeat_count: i32,
+    /// Index of `__num_to_string` -- 6.1.6.1.20 radix ten -- which the
+    /// radix-aware `toString` answers with for 10, NaN, the infinities
+    /// and zero, and `toFixed` for NaN and anything at or past 1e21.
+    pub(crate) num_to_string: u32,
+    /// Index of the first conversion function (`Cv` offsets are laid out
+    /// from it): `toFixed` runs its exact decimal on the bignum kit.
+    pub(crate) convert_base: u32,
+    /// The interned refusal names for the two RangeErrors and the one
+    /// approximation this engine refuses: a `toString` radix outside
+    /// 2..=36, `toFixed` digits outside 0..=100, and a fractional Number
+    /// under a non-decimal radix (V8 prints those through a
+    /// delta-terminated loop; this engine does not approximate silently).
+    pub(crate) radix_range: i32,
+    pub(crate) fixed_range: i32,
+    pub(crate) radix_fraction: i32,
     /// The interned `","` that `a.join()` and `a.join(undefined)` separate
     /// with (ECMA-262 23.1.3.18 step 3). Zero when the plan does not carry
     /// [`Me::Join`]; nothing reads it then.
@@ -286,6 +314,42 @@ pub(crate) enum Me {
     IsInteger,
     /// `Number.isNaN(x)` (21.1.2.4): NaN of the Number type only.
     IsNan,
+    /// The uppercase twin of [`Me::LowerCp`]: the same binary search over
+    /// the inverted run table.
+    UpperCp,
+    /// `s.toUpperCase()` (22.1.3.31, simple mapping): the mirror of
+    /// [`Me::ToLowerCase`], with the ASCII arm subtracting 32 and the
+    /// search walking the inverted table. `ß`, the titlecase forms and
+    /// `µ` stay themselves -- the table's doc says why -- and `ς` goes to
+    /// `Σ`.
+    ToUpperCase,
+    /// `s.padStart(n[, fill])` / `s.padEnd(n[, fill])` (22.1.3.16/.17):
+    /// the filler repeated and truncated to the missing code units, on
+    /// the left or the right. The `*Space` forms are the one-argument
+    /// spellings, which fill with `" "`.
+    PadStart,
+    PadEnd,
+    PadStartSpace,
+    PadEndSpace,
+    /// `s.repeat(n)` (22.1.3.19): n copies, a negative n refused by name.
+    Repeat,
+    /// `n.toString(radix)` (6.1.6.1.20's generalisation, 21.1.3.6 step
+    /// 4): digits by repeated division on the double, V8's own loop shape,
+    /// exact where the value is exact. A fractional value under a
+    /// non-decimal radix is refused by name rather than approximated.
+    NumToStringRadix,
+    /// `n.toString()` -- radix ten, which is `__num_to_string` whole.
+    NumToStringPlain,
+    /// `n.toFixed(f)` (21.1.3.3): the exact decimal, not `%f` -- the
+    /// digits of `round_half_up(|x| * 10^f)` computed on the bignum kit,
+    /// so `(1.005).toFixed(2)` answers `"1.00"` because 1.005 *is*
+    /// 1.00499…, and `(8.005).toFixed(2)` answers `"8.01"` because that
+    /// one is 8.005000…1.
+    ToFixed,
+    /// One turn of decimal digit extraction on a bignum: `p /= 10`, the
+    /// remainder answered. A helper; the bignum kit itself has no
+    /// division because Dragon4 never needed one.
+    BnDiv10,
 }
 
 /// Every function this variant can emit, in module order. **Not** what a
@@ -348,6 +412,17 @@ pub(crate) const SET: &[Me] = &[
     Me::ParseInt,
     Me::IsInteger,
     Me::IsNan,
+    Me::UpperCp,
+    Me::ToUpperCase,
+    Me::PadStart,
+    Me::PadEnd,
+    Me::PadStartSpace,
+    Me::PadEndSpace,
+    Me::Repeat,
+    Me::NumToStringRadix,
+    Me::NumToStringPlain,
+    Me::ToFixed,
+    Me::BnDiv10,
 ];
 
 /// Which of [`SET`] a particular module carries, and where each one lands.
@@ -479,6 +554,17 @@ impl Me {
             Me::ParseInt => "__m_parse_int",
             Me::IsInteger => "__m_is_integer",
             Me::IsNan => "__m_is_nan",
+            Me::UpperCp => "__m_upper_cp",
+            Me::ToUpperCase => "__m_to_upper_case",
+            Me::PadStart => "__m_pad_start",
+            Me::PadEnd => "__m_pad_end",
+            Me::PadStartSpace => "__m_pad_start_space",
+            Me::PadEndSpace => "__m_pad_end_space",
+            Me::Repeat => "__m_repeat",
+            Me::NumToStringRadix => "__m_num_to_string_radix",
+            Me::NumToStringPlain => "__m_num_to_string_plain",
+            Me::ToFixed => "__m_to_fixed",
+            Me::BnDiv10 => "__m_bn_div10",
         }
     }
 
@@ -509,6 +595,15 @@ impl Me {
             ("endsWith", 1) => Some(Me::EndsWith),
             ("split", 1) => Some(Me::Split),
             ("toLowerCase", 0) => Some(Me::ToLowerCase),
+            ("toUpperCase", 0) => Some(Me::ToUpperCase),
+            ("padStart", 2) => Some(Me::PadStart),
+            ("padStart", 1) => Some(Me::PadStartSpace),
+            ("padEnd", 2) => Some(Me::PadEnd),
+            ("padEnd", 1) => Some(Me::PadEndSpace),
+            ("repeat", 1) => Some(Me::Repeat),
+            ("toString", 1) => Some(Me::NumToStringRadix),
+            ("toString", 0) => Some(Me::NumToStringPlain),
+            ("toFixed", 1) => Some(Me::ToFixed),
             ("slice", 2) => Some(Me::Slice),
             ("slice", 1) => Some(Me::SliceFrom),
             ("replace", 2) => Some(Me::Replace),
@@ -586,6 +681,7 @@ impl Me {
             | Me::ParseInt
             | Me::IsInteger
             | Me::IsNan => Recv::Any,
+            Me::UpperCp | Me::BnDiv10 => unreachable!("a helper is never a call site"),
             Me::Trim
             | Me::StartsWith
             | Me::EndsWith
@@ -598,7 +694,14 @@ impl Me {
             | Me::CharCodeAt
             | Me::CharAt
             | Me::Substring
-            | Me::SubstringFrom => Recv::Str,
+            | Me::SubstringFrom
+            | Me::ToUpperCase
+            | Me::PadStart
+            | Me::PadEnd
+            | Me::PadStartSpace
+            | Me::PadEndSpace
+            | Me::Repeat => Recv::Str,
+            Me::NumToStringRadix | Me::NumToStringPlain | Me::ToFixed => Recv::Num,
             Me::WsWidth
             | Me::Units
             | Me::Substr
@@ -641,6 +744,16 @@ impl Me {
             Me::Includes | Me::StartsWith | Me::EndsWith | Me::Substr => Vec::new(),
             Me::Split => vec![Me::Substr],
             Me::ToLowerCase => vec![Me::Decode, Me::Encode, Me::LowerCp],
+            Me::ToUpperCase => vec![Me::Decode, Me::Encode, Me::UpperCp],
+            Me::UpperCp => Vec::new(),
+            Me::NumToStringRadix => vec![Me::ToInt32],
+            Me::NumToStringPlain => Vec::new(),
+            Me::ToFixed => vec![Me::BnDiv10],
+            Me::BnDiv10 => Vec::new(),
+            Me::PadStart | Me::PadEnd => vec![Me::Units, Me::SliceCore, Me::Substr],
+            Me::PadStartSpace => vec![Me::PadStart, Me::Units, Me::SliceCore, Me::Substr],
+            Me::PadEndSpace => vec![Me::PadEnd, Me::Units, Me::SliceCore, Me::Substr],
+            Me::Repeat => Vec::new(),
             // Flat, like `ToLowerCase`'s: `want` pulls one level of helpers.
             Me::Slice | Me::SliceFrom => vec![Me::SliceCore, Me::Units, Me::Substr],
             Me::SliceCore => vec![Me::Units, Me::Substr],
@@ -692,6 +805,9 @@ pub(crate) enum Recv {
     StrOrArr,
     /// No test at all: the prefab is the answer for every value.
     Any,
+    /// A Number: `(255).toString(16)` is the prefab, `o.toString()` is
+    /// the ordinary property road.
+    Num,
 }
 
 pub(crate) fn build(ctx: &Ctx) -> Vec<RtFunc> {
@@ -774,6 +890,21 @@ fn one(ctx: &Ctx, me: Me) -> RtFunc {
         Me::ParseInt => (values(2), values(1), parse_int(ctx)),
         Me::IsInteger => (values(1), values(1), is_integer()),
         Me::IsNan => (values(1), values(1), is_nan()),
+        Me::UpperCp => (
+            vec![ValType::I32],
+            vec![ValType::I32],
+            case_search(ctx.upper_table, ctx.upper_runs),
+        ),
+        Me::ToUpperCase => (values(1), values(1), change_case(ctx, Case::Upper)),
+        Me::PadStart => (values(3), values(1), pad(ctx, true)),
+        Me::PadEnd => (values(3), values(1), pad(ctx, false)),
+        Me::PadStartSpace => (values(2), values(1), pad_space(ctx, Me::PadStart)),
+        Me::PadEndSpace => (values(2), values(1), pad_space(ctx, Me::PadEnd)),
+        Me::Repeat => (values(2), values(1), repeat(ctx)),
+        Me::NumToStringRadix => (values(2), values(1), num_to_string_radix(ctx)),
+        Me::NumToStringPlain => (values(1), values(1), num_to_string_plain(ctx)),
+        Me::ToFixed => (values(2), values(1), to_fixed(ctx)),
+        Me::BnDiv10 => (vec![i32_], vec![i32_], bn_div10()),
     };
     RtFunc {
         name: me.symbol(),
@@ -2081,6 +2212,13 @@ fn encode() -> FnBuild {
 /// is criterion ② of `plan/design-case-mapping-decision.md` and the reason
 /// "trap on anything non-ASCII" was rejected.
 fn lower_cp(ctx: &Ctx) -> FnBuild {
+    case_search(ctx.case_table, ctx.case_runs)
+}
+
+/// The run-table binary search both case mappings share: `(cp) -> cp'`,
+/// the mapped code point or the input unchanged. The table address and
+/// run count are baked per direction.
+fn case_search(table: i32, runs: u32) -> FnBuild {
     let mut f = FnBuild::new(1);
     let lo = f.local(ValType::I32);
     let hi = f.local(ValType::I32);
@@ -2089,7 +2227,7 @@ fn lower_cp(ctx: &Ctx) -> FnBuild {
     let start = f.local(ValType::I32);
 
     let b = &mut f.body;
-    b.push(Ins::I32Const(ctx.case_runs as i32));
+    b.push(Ins::I32Const(runs as i32));
     b.push(Ins::LocalSet(hi));
 
     b.push(Ins::Block(BlockType::Empty));
@@ -2108,7 +2246,7 @@ fn lower_cp(ctx: &Ctx) -> FnBuild {
     b.push(Ins::LocalGet(mid));
     b.push(Ins::I32Const(12));
     b.push(Ins::I32Mul);
-    b.push(Ins::I32Const(ctx.case_table));
+    b.push(Ins::I32Const(table));
     b.push(Ins::I32Add);
     b.push(Ins::LocalSet(at));
     b.push(Ins::LocalGet(at));
@@ -2175,6 +2313,21 @@ fn lower_cp(ctx: &Ctx) -> FnBuild {
 /// written at the end from what was actually produced, so the slack is heap
 /// the bump allocator never hands out again and nothing else can observe.
 fn to_lower_case(ctx: &Ctx) -> FnBuild {
+    change_case(ctx, Case::Lower)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Case {
+    Lower,
+    Upper,
+}
+
+/// One body for both directions: the ASCII arm is `+32` on `A..Z` going
+/// down and `-32` on `a..z` going up, and the slow road swaps which code
+/// point search it asks. The 3/2 output bound holds both ways: a width
+/// can grow by one byte in either direction (U+023A/U+023E down,
+/// U+0250-class up) and never more.
+fn change_case(ctx: &Ctx, which: Case) -> FnBuild {
     let mut f = FnBuild::new(WIDTH);
     let h = f.local(ValType::I32);
     let hl = f.local(ValType::I32);
@@ -2227,13 +2380,19 @@ fn to_lower_case(ctx: &Ctx) -> FnBuild {
     b.push(Ins::I32Add);
     b.push(Ins::LocalGet(cp));
     b.push(Ins::LocalGet(cp));
-    b.push(Ins::I32Const(65));
+    b.push(Ins::I32Const(match which {
+        Case::Lower => 65,
+        Case::Upper => 97,
+    }));
     b.push(Ins::I32Sub);
     b.push(Ins::I32Const(26));
     b.push(Ins::I32LtU);
     b.push(Ins::I32Const(5));
     b.push(Ins::I32Shl);
-    b.push(Ins::I32Add);
+    b.push(match which {
+        Case::Lower => Ins::I32Add,
+        Case::Upper => Ins::I32Sub,
+    });
     b.push(Ins::I32Store8(0, 4));
     b.push(Ins::LocalGet(o));
     b.push(Ins::I32Const(1));
@@ -2262,7 +2421,10 @@ fn to_lower_case(ctx: &Ctx) -> FnBuild {
     b.push(Ins::LocalGet(o));
     b.push(Ins::I32Add);
     b.push(Ins::LocalGet(cp));
-    b.push(ctx.me(Me::LowerCp));
+    b.push(ctx.me(match which {
+        Case::Lower => Me::LowerCp,
+        Case::Upper => Me::UpperCp,
+    }));
     b.push(ctx.me(Me::Encode));
     b.push(Ins::LocalGet(o));
     b.push(Ins::I32Add);
@@ -5141,6 +5303,841 @@ fn is_nan() -> FnBuild {
     b.push(Ins::End);
     let mut boxed = Vec::new();
     box_bool(&[Ins::LocalGet(r)], &mut boxed);
+    b.extend(boxed);
+    f
+}
+
+// ---- padStart / padEnd / repeat -----------------------------------------
+
+/// The one-argument spelling: the two-argument prefab with the default
+/// `" "` as its filler.
+fn pad_space(ctx: &Ctx, full: Me) -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH);
+    let b = &mut f.body;
+    load_local(0, b);
+    load_local(WIDTH, b);
+    b.push(Ins::I32Const(repr::TAG_STRING));
+    b.push(Ins::I32Const(ctx.space));
+    b.push(Ins::I64ExtendI32U);
+    b.push(ctx.me(full));
+    f
+}
+
+/// StringPad (22.1.3.16.1): the missing code units, filled by the filler
+/// repeated whole and then a truncated prefix -- through `slice_core`, so
+/// a cut inside a surrogate pair is that road's own named refusal. The
+/// receiver comes back unchanged (the same record: strings never mutate)
+/// when nothing is missing or the filler is empty, and an `undefined`
+/// filler means `" "` (step 4).
+fn pad(ctx: &Ctx, start: bool) -> FnBuild {
+    let mut f = FnBuild::new(3 * WIDTH);
+    let h = f.local(ValType::I32);
+    let hl = f.local(ValType::I32);
+    let su = f.local(ValType::I32);
+    let ni = f.local(ValType::I32);
+    let r = f.local(ValType::F64);
+    let fp = f.local(ValType::I32);
+    let fl = f.local(ValType::I32);
+    let fu = f.local(ValType::I32);
+    let need = f.local(ValType::I32);
+    let whole = f.local(ValType::I32);
+    let rem = f.local(ValType::I32);
+    let remp = f.local(ValType::I32);
+    let reml = f.local(ValType::I32);
+    let out = f.local(ValType::I32);
+    let sh = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+    let k = f.local(ValType::I32);
+
+    unbox_string(0, &mut f.body);
+    f.body.push(Ins::LocalSet(h));
+    {
+        let b = &mut f.body;
+        b.push(Ins::LocalGet(h));
+        b.push(Ins::I32Load(ALIGN_WORD, 0));
+        b.push(Ins::LocalSet(hl));
+    }
+    integer_arg(&mut f.body, WIDTH, r, ni);
+    {
+        let b = &mut f.body;
+        b.push(Ins::LocalGet(h));
+        b.push(Ins::LocalGet(hl));
+        b.push(ctx.me(Me::Units));
+        b.push(Ins::LocalSet(su));
+        // The filler: `undefined` is `" "`, anything else is a String or
+        // the standing narrowing's trap.
+        repr::is_undefined(2 * WIDTH, b);
+        b.push(Ins::If(BlockType::Empty));
+        b.push(Ins::I32Const(ctx.space));
+        b.push(Ins::LocalSet(fp));
+        b.push(Ins::End);
+        repr::is_undefined(2 * WIDTH, b);
+        b.push(Ins::I32Eqz);
+        b.push(Ins::If(BlockType::Empty));
+    }
+    unbox_string(2 * WIDTH, &mut f.body);
+    f.body.push(Ins::LocalSet(fp));
+    f.body.push(Ins::End);
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(fp));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalSet(fl));
+    b.push(Ins::LocalGet(fp));
+    b.push(Ins::LocalGet(fl));
+    b.push(ctx.me(Me::Units));
+    b.push(Ins::LocalSet(fu));
+    // Nothing missing (`ni <= su`, spelled `!(su < ni)`), or an empty
+    // filler: the receiver itself (steps 3 and 5).
+    b.push(Ins::LocalGet(su));
+    b.push(Ins::LocalGet(ni));
+    b.push(Ins::I32LtS);
+    b.push(Ins::I32Eqz);
+    b.push(Ins::LocalGet(fu));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::I32Or);
+    b.push(Ins::If(BlockType::Empty));
+    load_local(0, b);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(ni));
+    b.push(Ins::LocalGet(su));
+    b.push(Ins::I32Sub);
+    b.push(Ins::LocalSet(need));
+    b.push(Ins::LocalGet(need));
+    b.push(Ins::LocalGet(fu));
+    b.push(Ins::I32DivS);
+    b.push(Ins::LocalSet(whole));
+    b.push(Ins::LocalGet(need));
+    b.push(Ins::LocalGet(fu));
+    b.push(Ins::I32RemS);
+    b.push(Ins::LocalSet(rem));
+    b.push(Ins::LocalGet(rem));
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(fp));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalGet(rem));
+    b.push(ctx.me(Me::SliceCore));
+    b.push(Ins::LocalSet(remp));
+    b.push(Ins::LocalGet(remp));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalSet(reml));
+    b.push(Ins::End);
+    // One allocation at the final size.
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::LocalGet(whole));
+    b.push(Ins::LocalGet(fl));
+    b.push(Ins::I32Mul);
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(reml));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalTee(k)); // total body bytes, parked in k for the store
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32Add);
+    b.push(ctx.rt(Rt::Alloc));
+    b.push(Ins::LocalSet(out));
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(k));
+    b.push(Ins::I32Store(ALIGN_WORD, 0));
+    let fills = |b: &mut Vec<Ins>| {
+        b.push(Ins::I32Const(0));
+        b.push(Ins::LocalSet(k));
+        b.push(Ins::Block(BlockType::Empty));
+        b.push(Ins::Loop(BlockType::Empty));
+        b.push(Ins::LocalGet(k));
+        b.push(Ins::LocalGet(whole));
+        b.push(Ins::I32GeU);
+        b.push(Ins::BrIf(1));
+        copy_loop(b, fp, fl, out, Some(sh), i);
+        b.push(Ins::LocalGet(sh));
+        b.push(Ins::LocalGet(fl));
+        b.push(Ins::I32Add);
+        b.push(Ins::LocalSet(sh));
+        b.push(Ins::LocalGet(k));
+        b.push(Ins::I32Const(1));
+        b.push(Ins::I32Add);
+        b.push(Ins::LocalSet(k));
+        b.push(Ins::Br(0));
+        b.push(Ins::End);
+        b.push(Ins::End);
+        b.push(Ins::LocalGet(rem));
+        b.push(Ins::If(BlockType::Empty));
+        copy_loop(b, remp, reml, out, Some(sh), i);
+        b.push(Ins::LocalGet(sh));
+        b.push(Ins::LocalGet(reml));
+        b.push(Ins::I32Add);
+        b.push(Ins::LocalSet(sh));
+        b.push(Ins::End);
+    };
+    let own = |b: &mut Vec<Ins>| {
+        copy_loop(b, h, hl, out, Some(sh), i);
+        b.push(Ins::LocalGet(sh));
+        b.push(Ins::LocalGet(hl));
+        b.push(Ins::I32Add);
+        b.push(Ins::LocalSet(sh));
+    };
+    if start {
+        fills(b);
+        own(b);
+    } else {
+        own(b);
+        fills(b);
+    }
+    let mut boxed = Vec::new();
+    box_string(&[Ins::LocalGet(out)], &mut boxed);
+    b.extend(boxed);
+    f
+}
+
+/// `s.repeat(n)` -- 22.1.3.19: n whole copies in one allocation. A
+/// negative count is the spec's RangeError, here the named refusal; an
+/// infinite one is clamped by the argument narrowing and dies in the
+/// allocator's own bound, which is the budget's answer rather than a
+/// silent wrong one.
+fn repeat(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH);
+    let h = f.local(ValType::I32);
+    let hl = f.local(ValType::I32);
+    let ni = f.local(ValType::I32);
+    let r = f.local(ValType::F64);
+    let out = f.local(ValType::I32);
+    let sh = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+    let k = f.local(ValType::I32);
+
+    unbox_string(0, &mut f.body);
+    f.body.push(Ins::LocalSet(h));
+    integer_arg(&mut f.body, WIDTH, r, ni);
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(h));
+    b.push(Ins::I32Load(ALIGN_WORD, 0));
+    b.push(Ins::LocalSet(hl));
+    b.push(Ins::LocalGet(ni));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::I32LtS);
+    b.push(Ins::If(BlockType::Empty));
+    record_named_fault(ctx.repeat_count, FAULT_CAPABILITY, b);
+    b.push(Ins::Unreachable);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(ni));
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::I32Mul);
+    b.push(Ins::LocalTee(k));
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32Add);
+    b.push(ctx.rt(Rt::Alloc));
+    b.push(Ins::LocalSet(out));
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(k));
+    b.push(Ins::I32Store(ALIGN_WORD, 0));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(k));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(k));
+    b.push(Ins::LocalGet(ni));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    copy_loop(b, h, hl, out, Some(sh), i);
+    b.push(Ins::LocalGet(sh));
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(sh));
+    b.push(Ins::LocalGet(k));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(k));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    let mut boxed = Vec::new();
+    box_string(&[Ins::LocalGet(out)], &mut boxed);
+    b.extend(boxed);
+    f
+}
+
+// ---- Number formatting --------------------------------------------------
+
+/// `n.toString()` -- ToString of a value the call site already proved is
+/// a Number, which is `__num_to_string` behind one unboxing.
+fn num_to_string_plain(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(WIDTH);
+    let mut inner = Vec::new();
+    unbox_number(0, &mut inner);
+    inner.push(Ins::Call(ctx.num_to_string));
+    let mut boxed = Vec::new();
+    box_string(&inner, &mut boxed);
+    f.body.extend(boxed);
+    f
+}
+
+/// `n.toString(radix)` -- 21.1.3.6 step 4 over 6.1.6.1.20's radix-R
+/// generalisation, for the integer-valued Numbers.
+///
+/// The digits come off `d = fmod(a, R); a = (a - d) / R` -- `__rem` is
+/// the exact remainder, and the quotient step is the same double
+/// arithmetic V8's DoubleToRadixCString runs, so the answers agree where
+/// both are defined. Radix 10, NaN, the infinities and zero take the
+/// ordinary `__num_to_string` road, where the spec's own strings live. A
+/// radix outside 2..=36 is the spec's RangeError, refused by name; a
+/// *fractional* value under a non-decimal radix is the one arm V8
+/// approximates through a delta loop and this engine refuses by name
+/// instead.
+fn num_to_string_radix(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH);
+    let x = f.local(ValType::F64);
+    let radix = f.local(ValType::I32);
+    let neg = f.local(ValType::I32);
+    let a = f.local(ValType::F64);
+    let d = f.local(ValType::F64);
+    let buf = f.local(ValType::I32);
+    let n = f.local(ValType::I32);
+    let out = f.local(ValType::I32);
+    let j = f.local(ValType::I32);
+
+    unbox_number(0, &mut f.body);
+    f.body.push(Ins::LocalSet(x));
+    load_local(WIDTH, &mut f.body);
+    f.body.push(ctx.me(Me::ToInt32));
+    f.body.push(Ins::LocalSet(radix));
+    let b = &mut f.body;
+    let via_decimal = |b: &mut Vec<Ins>| {
+        let mut boxed = Vec::new();
+        box_string(
+            &[Ins::LocalGet(x), Ins::Call(ctx.num_to_string)],
+            &mut boxed,
+        );
+        b.extend(boxed);
+        b.push(Ins::Return);
+    };
+    b.push(Ins::LocalGet(radix));
+    b.push(Ins::I32Const(10));
+    b.push(Ins::I32Eq);
+    b.push(Ins::If(BlockType::Empty));
+    via_decimal(b);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(radix));
+    b.push(Ins::I32Const(2));
+    b.push(Ins::I32Sub);
+    b.push(Ins::I32Const(35));
+    b.push(Ins::I32GeU);
+    b.push(Ins::If(BlockType::Empty));
+    record_named_fault(ctx.radix_range, FAULT_CAPABILITY, b);
+    b.push(Ins::Unreachable);
+    b.push(Ins::End);
+    // NaN, the infinities and both zeros spell the same in every radix.
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Ne);
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Abs);
+    b.push(Ins::F64Const(f64::INFINITY));
+    b.push(Ins::F64Eq);
+    b.push(Ins::I32Or);
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Const(0.0));
+    b.push(Ins::F64Eq);
+    b.push(Ins::I32Or);
+    b.push(Ins::If(BlockType::Empty));
+    via_decimal(b);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Trunc);
+    b.push(Ins::F64Ne);
+    b.push(Ins::If(BlockType::Empty));
+    record_named_fault(ctx.radix_fraction, FAULT_CAPABILITY, b);
+    b.push(Ins::Unreachable);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Const(0.0));
+    b.push(Ins::F64Lt);
+    b.push(Ins::LocalSet(neg));
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Abs);
+    b.push(Ins::LocalSet(a));
+    // 2^1024 in base 2 is 1025 digits; 1104 bytes covers every radix.
+    b.push(Ins::I32Const(1104));
+    b.push(ctx.rt(Rt::Alloc));
+    b.push(Ins::LocalSet(buf));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(a));
+    b.push(Ins::F64Const(1.0));
+    b.push(Ins::F64Lt);
+    b.push(Ins::BrIf(1));
+    // d = fmod(a, R), exact; a = (a - d) / R, V8's own step.
+    let mut rem_call = Vec::new();
+    box_number(&[Ins::LocalGet(a)], &mut rem_call);
+    b.extend(rem_call);
+    let mut rem_arg = Vec::new();
+    box_number(&[Ins::LocalGet(radix), Ins::F64ConvertI32S], &mut rem_arg);
+    b.extend(rem_arg);
+    b.push(ctx.rt(Rt::Rem));
+    // The pair comes back tag-then-payload, so the payload is on top.
+    b.push(Ins::F64ReinterpretI64);
+    b.push(Ins::LocalSet(d));
+    b.push(Ins::Drop); // the tag
+    b.push(Ins::LocalGet(a));
+    b.push(Ins::LocalGet(d));
+    b.push(Ins::F64Sub);
+    b.push(Ins::LocalGet(radix));
+    b.push(Ins::F64ConvertI32S);
+    b.push(Ins::F64Div);
+    b.push(Ins::LocalSet(a));
+    // digit character
+    b.push(Ins::LocalGet(buf));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(d));
+    b.push(Ins::I32TruncF64S);
+    b.push(Ins::LocalTee(j));
+    b.push(Ins::I32Const(48));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Const(10));
+    b.push(Ins::I32GeU);
+    b.push(Ins::I32Const(39));
+    b.push(Ins::I32Mul);
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Store8(0, 0));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(n));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    // The string: sign, then the digits reversed.
+    b.push(Ins::LocalGet(neg));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32Add);
+    b.push(ctx.rt(Rt::Alloc));
+    b.push(Ins::LocalSet(out));
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(neg));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Store(ALIGN_WORD, 0));
+    b.push(Ins::LocalGet(neg));
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::I32Const(45));
+    b.push(Ins::I32Store8(0, 4));
+    b.push(Ins::End);
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(j));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(neg));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(buf));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Sub);
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Sub);
+    b.push(Ins::I32Load8U(0, 0));
+    b.push(Ins::I32Store8(0, 4));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(j));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    let mut boxed = Vec::new();
+    box_string(&[Ins::LocalGet(out)], &mut boxed);
+    b.extend(boxed);
+    f
+}
+
+/// `__m_bn_div10(p) -> remainder`: one decimal digit off a bignum, in
+/// place. 16-bit limbs, so `carry * 65536 + limb` stays far below 2^31
+/// and `i32.div_s` is the unsigned division it needs to be.
+fn bn_div10() -> FnBuild {
+    let mut f = FnBuild::new(1);
+    let n = f.local(ValType::I32);
+    let i = f.local(ValType::I32);
+    let carry = f.local(ValType::I32);
+    let cur = f.local(ValType::I32);
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::I32Load(ALIGN_WORD, BN_LEN));
+    b.push(Ins::LocalTee(n));
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Sub);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::LocalGet(carry));
+    b.push(Ins::I32Const(65536));
+    b.push(Ins::I32Mul);
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32Mul);
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load(ALIGN_WORD, BN_LIMBS));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(cur));
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32Mul);
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(cur));
+    b.push(Ins::I32Const(10));
+    b.push(Ins::I32DivS);
+    b.push(Ins::I32Store(ALIGN_WORD, BN_LIMBS));
+    b.push(Ins::LocalGet(cur));
+    b.push(Ins::I32Const(10));
+    b.push(Ins::I32RemS);
+    b.push(Ins::LocalSet(carry));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    // Drop top limbs that went to zero, so `len == 0` stays the one
+    // spelling of zero.
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Sub);
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32Mul);
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load(ALIGN_WORD, BN_LIMBS));
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Sub);
+    b.push(Ins::LocalSet(n));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(0));
+    b.push(Ins::LocalGet(n));
+    b.push(Ins::I32Store(ALIGN_WORD, BN_LEN));
+    b.push(Ins::LocalGet(carry));
+    f
+}
+
+/// `n.toFixed(f)` -- ECMA-262 21.1.3.3, the exact decimal.
+///
+/// Steps 6-9 on exact terms: the double is `m * 2^e` (from
+/// [`f64_fields`], the same extraction Dragon4 uses), the integer wanted
+/// is `round_half_up(m * 10^f * 2^e)` -- the *larger n* of step 9's tie,
+/// because step 6 has already made x non-negative -- and with `e < 0`
+/// that is `(m * 10^f + 2^(k-1)) >> k`. Every operation is on the bignum
+/// kit, so there is no rounding to be wrong about: `(1.005).toFixed(2)`
+/// is `"1.00"` because 1.005 is 1.00499…, and `(8.005).toFixed(2)` is
+/// `"8.01"` because that one sits above its half.
+///
+/// NaN prints `"NaN"` and anything at or past 1e21 prints as ToString
+/// (step 10); digits outside 0..=100 are the spec's RangeError, refused
+/// by name.
+fn to_fixed(ctx: &Ctx) -> FnBuild {
+    let mut f = FnBuild::new(2 * WIDTH);
+    let x = f.local(ValType::F64);
+    let fr = f.local(ValType::F64);
+    let fi = f.local(ValType::I32);
+    let neg = f.local(ValType::I32);
+    let sc = f.local(ValType::I32);
+    let m0 = f.local(ValType::I32);
+    let m1 = f.local(ValType::I32);
+    let m2 = f.local(ValType::I32);
+    let m3 = f.local(ValType::I32);
+    let be = f.local(ValType::I32);
+    let e = f.local(ValType::I32);
+    let boundary = f.local(ValType::I32);
+    let even = f.local(ValType::I32);
+    let nbn = f.local(ValType::I32);
+    let hbn = f.local(ValType::I32);
+    let k = f.local(ValType::I32);
+    let buf = f.local(ValType::I32);
+    let nd = f.local(ValType::I32);
+    let total = f.local(ValType::I32);
+    let il = f.local(ValType::I32);
+    let out = f.local(ValType::I32);
+    let at = f.local(ValType::I32);
+    let j = f.local(ValType::I32);
+
+    unbox_number(0, &mut f.body);
+    f.body.push(Ins::LocalSet(x));
+    integer_arg(&mut f.body, WIDTH, fr, fi);
+    let b = &mut f.body;
+    b.push(Ins::LocalGet(fi));
+    b.push(Ins::I32Const(101));
+    b.push(Ins::I32GeU);
+    b.push(Ins::If(BlockType::Empty));
+    record_named_fault(ctx.fixed_range, FAULT_CAPABILITY, b);
+    b.push(Ins::Unreachable);
+    b.push(Ins::End);
+    // NaN, and |x| >= 1e21: ToString's answer (steps 8 and 10).
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Ne);
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Abs);
+    b.push(Ins::F64Const(1e21));
+    b.push(Ins::F64Ge);
+    b.push(Ins::I32Or);
+    b.push(Ins::If(BlockType::Empty));
+    let mut boxed = Vec::new();
+    box_string(
+        &[Ins::LocalGet(x), Ins::Call(ctx.num_to_string)],
+        &mut boxed,
+    );
+    b.extend(boxed);
+    b.push(Ins::Return);
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Const(0.0));
+    b.push(Ins::F64Lt);
+    b.push(Ins::LocalSet(neg));
+    b.push(Ins::LocalGet(x));
+    b.push(Ins::F64Abs);
+    b.push(Ins::LocalSet(x));
+    // m * 2^e, exactly.
+    b.push(Ins::I32Const(8));
+    b.push(ctx.rt(Rt::Alloc));
+    b.push(Ins::LocalSet(sc));
+    f64_fields(b, x, sc, [m0, m1, m2, m3], be, e, boundary, even);
+    // N = m * 10^f, then the shift.
+    b.push(Ins::I32Const(90));
+    b.push(Ins::Call(ctx.convert_base + Cv::BnNew.offset()));
+    b.push(Ins::LocalSet(nbn));
+    b.push(Ins::LocalGet(nbn));
+    b.push(Ins::LocalGet(m0));
+    b.push(Ins::LocalGet(m1));
+    b.push(Ins::LocalGet(m2));
+    b.push(Ins::LocalGet(m3));
+    b.push(Ins::Call(ctx.convert_base + Cv::BnSet4.offset()));
+    b.push(Ins::LocalGet(nbn));
+    b.push(Ins::LocalGet(fi));
+    b.push(Ins::Call(ctx.convert_base + Cv::BnMulPow10.offset()));
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::I32LtS);
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(nbn));
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::Call(ctx.convert_base + Cv::BnShl.offset()));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::I32LtS);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalGet(e));
+    b.push(Ins::I32Sub);
+    b.push(Ins::LocalSet(k));
+    // + 2^(k-1) ...
+    b.push(Ins::I32Const(90));
+    b.push(Ins::Call(ctx.convert_base + Cv::BnNew.offset()));
+    b.push(Ins::LocalSet(hbn));
+    b.push(Ins::LocalGet(hbn));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::Call(ctx.convert_base + Cv::BnSeti.offset()));
+    b.push(Ins::LocalGet(hbn));
+    b.push(Ins::LocalGet(k));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Sub);
+    b.push(Ins::Call(ctx.convert_base + Cv::BnShl.offset()));
+    b.push(Ins::LocalGet(nbn));
+    b.push(Ins::LocalGet(hbn));
+    b.push(Ins::Call(ctx.convert_base + Cv::BnAdd.offset()));
+    // ... >> k.
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(k));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(nbn));
+    b.push(Ins::Call(ctx.convert_base + Cv::BnShr1.offset()));
+    b.push(Ins::LocalGet(k));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Sub);
+    b.push(Ins::LocalSet(k));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    b.push(Ins::End);
+    // The digits, least significant first.
+    b.push(Ins::I32Const(140));
+    b.push(ctx.rt(Rt::Alloc));
+    b.push(Ins::LocalSet(buf));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(nbn));
+    b.push(Ins::I32Load(ALIGN_WORD, BN_LEN));
+    b.push(Ins::I32Eqz);
+    b.push(Ins::LocalGet(nd));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::I32Ne);
+    b.push(Ins::I32And);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(buf));
+    b.push(Ins::LocalGet(nd));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(nbn));
+    b.push(ctx.me(Me::BnDiv10));
+    b.push(Ins::I32Const(48));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Store8(0, 0));
+    b.push(Ins::LocalGet(nd));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(nd));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    // Layout (step 9): pad to f+1 digits, the last f behind a point.
+    // total = max(nd, fi + 1), spelled with a scratch.
+    b.push(Ins::LocalGet(nd));
+    b.push(Ins::LocalGet(fi));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(total));
+    b.push(Ins::LocalSet(j));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::LocalGet(total));
+    b.push(Ins::I32LtS);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(total));
+    b.push(Ins::LocalSet(j));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::LocalSet(total));
+    b.push(Ins::LocalGet(total));
+    b.push(Ins::LocalGet(fi));
+    b.push(Ins::I32Sub);
+    b.push(Ins::LocalSet(il));
+    // out: sign + digits + a point when f > 0.
+    b.push(Ins::LocalGet(neg));
+    b.push(Ins::LocalGet(total));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(fi));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::I32Ne);
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalTee(at));
+    b.push(Ins::I32Const(4));
+    b.push(Ins::I32Add);
+    b.push(ctx.rt(Rt::Alloc));
+    b.push(Ins::LocalSet(out));
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(at));
+    b.push(Ins::I32Store(ALIGN_WORD, 0));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(at));
+    b.push(Ins::LocalGet(neg));
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::I32Const(45));
+    b.push(Ins::I32Store8(0, 4));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::LocalSet(at));
+    b.push(Ins::End);
+    b.push(Ins::I32Const(0));
+    b.push(Ins::LocalSet(j));
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::LocalGet(total));
+    b.push(Ins::I32GeU);
+    b.push(Ins::BrIf(1));
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(at));
+    b.push(Ins::I32Add);
+    // A position left of the real digits is a zero.
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::LocalGet(total));
+    b.push(Ins::LocalGet(nd));
+    b.push(Ins::I32Sub);
+    b.push(Ins::I32LtU);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(at));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Const(48));
+    b.push(Ins::I32Store8(0, 4));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::LocalGet(total));
+    b.push(Ins::LocalGet(nd));
+    b.push(Ins::I32Sub);
+    b.push(Ins::I32LtU);
+    b.push(Ins::I32Eqz);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(at));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalGet(buf));
+    b.push(Ins::LocalGet(total));
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Sub);
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Sub);
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Load8U(0, 0));
+    b.push(Ins::I32Store8(0, 4));
+    b.push(Ins::End);
+    b.push(Ins::Drop);
+    b.push(Ins::LocalGet(at));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(at));
+    // The point, after the last integer digit.
+    b.push(Ins::LocalGet(fi));
+    b.push(Ins::I32Const(0));
+    b.push(Ins::I32Ne);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::LocalGet(il));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Sub);
+    b.push(Ins::I32Eq);
+    b.push(Ins::I32And);
+    b.push(Ins::If(BlockType::Empty));
+    b.push(Ins::LocalGet(out));
+    b.push(Ins::LocalGet(at));
+    b.push(Ins::I32Add);
+    b.push(Ins::I32Const(46));
+    b.push(Ins::I32Store8(0, 4));
+    b.push(Ins::LocalGet(at));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(at));
+    b.push(Ins::End);
+    b.push(Ins::LocalGet(j));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(j));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+    let mut boxed = Vec::new();
+    box_string(&[Ins::LocalGet(out)], &mut boxed);
     b.extend(boxed);
     f
 }

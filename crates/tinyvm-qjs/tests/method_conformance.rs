@@ -601,14 +601,18 @@ fn substring_clamps_and_swaps() {
 /// experiment must not lose.
 #[test]
 fn an_unknown_member_is_still_refused_the_way_its_receiver_refuses_it() {
-    // A String: reading is already the fault.
+    // A String: reading is already the fault. (`toUpperCase` sat in this
+    // list until 2026-08-31, when it became a method, and `toFixed` with
+    // it; `trimStart` and `toPrecision` took their seats. A Number's
+    // missing member is the property-of-non-object refusal rather than the
+    // String one, which is a different sentence and the same `Err`.)
     for source in [
-        "return \"abc\".toUpperCase;",
+        "return \"abc\".trimStart;",
         "return \"abc\".normalize;",
-        "return \"abc\".toUpperCase();",
+        "return \"abc\".trimStart();",
         "return \"abc\".normalize();",
-        "return (1).toFixed;",
-        "return (1).toFixed();",
+        "return (1).toPrecision;",
+        "return (1).toPrecision();",
     ] {
         assert!(attempt(source).is_err(), "{source:?} must still trap");
     }

@@ -22,13 +22,13 @@ fn run_and_read(source: &str) -> (Option<GuestFault>, Option<String>) {
 }
 
 /// The case every migrated script hit: a method call this engine lacks
-/// (`slice` was the name then, and `substring` after it; both have since
-/// landed, `padStart` has not).
+/// (`slice` was the name then, `substring` and `padStart` after it; all
+/// three have since landed, `normalize` has not).
 #[test]
 fn a_missing_string_method_names_itself() {
-    let (fault, name) = run_and_read(r#"let s = "abc"; return s.padStart(5, " ");"#);
+    let (fault, name) = run_and_read(r#"let s = "abc"; return s.normalize("NFC");"#);
     assert_eq!(fault, Some(GuestFault::MissingStringMethod));
-    assert_eq!(name.as_deref(), Some("padStart"));
+    assert_eq!(name.as_deref(), Some("normalize"));
 }
 
 /// The same answer whether or not the program reads `.length` somewhere:
