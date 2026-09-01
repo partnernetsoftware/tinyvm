@@ -120,10 +120,10 @@ private struct TinyArcadeReviewedFlowSmoke {
             preconditionFailure("reviewed flow smoke requires Paddle Guard .wasm")
         }
         let cartridge = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))
-        let privateKey = try Curve25519.Signing.PrivateKey(
+        let signingKey = try Curve25519.Signing.PrivateKey(
             rawRepresentation: Data(repeating: 0x5a, count: 32)
         )
-        let entry = try signedEntry(cartridge: cartridge, privateKey: privateKey)
+        let entry = try signedEntry(cartridge: cartridge, signingKey: signingKey)
         ReviewedFixtureURLProtocol.cartridge = cartridge
         ReviewedFixtureURLProtocol.catalog = catalog(entry: entry, cartridge: "paddle-guard-0.1.0.wasm")
         ReviewedFixtureURLProtocol.slowCatalog = catalog(
@@ -145,7 +145,7 @@ private struct TinyArcadeReviewedFlowSmoke {
             maxWasmBytes: 64 * 1_024
         )
         let trust = try TinyArcadeTrustStoreV1()
-        try trust.addKey(id: keyID, ed25519PublicKey: privateKey.publicKey.rawRepresentation)
+        try trust.addKey(id: keyID, ed25519PublicKey: signingKey.publicKey.rawRepresentation)
         do {
             _ = try TinyArcadeReviewedLibraryV1(
                 transport: transport,
@@ -253,7 +253,7 @@ private struct TinyArcadeReviewedFlowSmoke {
 
     static func signedEntry(
         cartridge: Data,
-        privateKey: Curve25519.Signing.PrivateKey
+        signingKey: Curve25519.Signing.PrivateKey
     ) throws -> TinyArcadeReviewedCatalogEntry {
         let digest = Data(SHA256.hash(data: cartridge))
         let message = signingBytes(wasmLength: UInt64(cartridge.count), sha256: digest)
@@ -265,7 +265,7 @@ private struct TinyArcadeReviewedFlowSmoke {
             wasmLength: UInt64(cartridge.count),
             wasmSHA256: digest,
             signingKeyID: keyID,
-            signature: try privateKey.signature(for: message)
+            signature: try signingKey.signature(for: message)
         )
     }
 
