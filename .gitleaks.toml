@@ -1,0 +1,12 @@
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+    [[rules.allowlists]]
+    description = "Synthetic Curve25519 signer type in the reviewed-flow smoke test."
+    condition = "AND"
+    regexTarget = "line"
+    regexes = ['''^\s*(?:privateKey|signingKey): Curve25519\.Signing\.PrivateKey\s*$''']
+    paths = ['''^crates/tinyvm/tests/ios/TinyArcadeReviewedFlowSmoke\.swift$''']
