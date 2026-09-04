@@ -8,7 +8,7 @@ state, change the String record, or change the production engine.
 | Date | 2026-09-04 |
 | Purpose | Separate search cost from the old O(n) `.length` subtraction, then locate the real per-character owner before opening another String optimization |
 | Baseline | production `tinyvm` at `69a3e3b`; compact four-byte String record |
-| Implementation | existing `crates/tinyvm-qjs` cost fixtures plus temporary diagnostic probes; no accepted source change |
+| Implementation | existing cost fixtures plus `#[cfg(test)]` cumulative probes in `crates/tinyvm-qjs/src/method.rs`; production compiler path is unchanged |
 | Pre-reading | `plan/design-direct-string-metadata-publication-experiment.md`, `plan/design-index-of-window-skip.md` |
 | Source discipline | Same interpreter, fixture subtraction and operation counter for every row; no task- or source-pattern specialization |
 
@@ -81,10 +81,10 @@ only the named layer.
 | P0a build control | Construct the identical haystack and `return 0` | Leaves no O(n) work in the subtraction |
 | P0b historical control | Construct it and `return s.length` | Reproduces how the old court hid the length-walk slope |
 | P0 dispatch | Fixed search method dispatch; no character loop | Fits the intercept independently of length |
-| P1 loop | The production loop bounds and index update, but no body read | Adds loop-control slope |
-| P2 read | P1 plus the production code-unit/byte load path; value is consumed | Adds read/decode slope without comparison |
-| P3 compare | P2 plus the same equality/prefix test, forced to miss | Adds comparison slope |
-| P4 miss | P3 plus production miss completion and result formation | Adds miss-return cost; expected to affect intercept, not slope |
+| P1 loop | Production outer bound plus four-byte position advance, but no body read | Adds loop-control slope at the same window width |
+| P2 read | P1 plus the production `i32.load` into the existing scratch local | Adds the four-byte read slope without comparison |
+| P3 compare | P2 plus the production has-zero-byte calculation and clear-window branch | Adds the comparison/branch slope on the primary absent-byte court |
+| P4 exact + miss | P3 plus the production tail/exact verifier and false result | Adds exact verification and miss completion; expected to have zero primary slope when every full window is clear |
 | P5 full | Existing `includes` and `indexOf` miss fixtures | Cross-checks that the decomposition represents the real methods |
 
 Series:
@@ -132,10 +132,11 @@ C0 semantics green and C1 historical calibration reproduced?
 ```
 
 - A dominant owner in loop control opens a loop/branch-dispatch experiment.
-- A dominant owner in code-unit read opens a bounded read/decode experiment.
-- A dominant owner in comparison opens a comparison/prefix experiment.
-- A slope attributed to miss return means the decomposition is wrong, because
-  miss completion is once per search; verdict is inconclusive.
+- A dominant owner in the four-byte read opens a bounded load experiment.
+- A dominant owner in the has-zero comparison/branch opens an instruction or
+  branch-lowering experiment.
+- A slope attributed to exact verification + miss means the absent-byte court
+  is reaching work it should avoid; verdict is inconclusive.
 - Fixed dispatch may justify a separate intercept experiment, but cannot be
   offered as the answer to the 0.5 steps/character question.
 

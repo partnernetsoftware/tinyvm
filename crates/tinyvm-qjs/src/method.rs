@@ -34,6 +34,27 @@ use super::runtime::{
     FnBuild, OBJ_ENTRIES, OBJ_LEN, RefusalNames, Rt, RtFunc, copy_loop, record_named_fault,
 };
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchAttributionProbe {
+    Full,
+    Dispatch,
+    Loop,
+    Read,
+    Compare,
+}
+
+#[cfg(test)]
+thread_local! {
+    static SEARCH_ATTRIBUTION_PROBE: std::cell::Cell<SearchAttributionProbe> =
+        const { std::cell::Cell::new(SearchAttributionProbe::Full) };
+}
+
+#[cfg(test)]
+fn search_attribution_probe() -> SearchAttributionProbe {
+    SEARCH_ATTRIBUTION_PROBE.get()
+}
+
 /// Where this set sits, and where the unconditional runtime sits. The same
 /// shape [`super::array::Ctx`] has, for the same reason: a gated set's own
 /// index base is not the module's.
@@ -1565,6 +1586,26 @@ fn includes(ctx: &Ctx) -> FnBuild {
     b.push(Ins::End);
 
     first_byte_pattern(b, nd, p);
+
+    // The ignored attribution court compiles cumulative, test-only cuts of
+    // this exact body. Ordinary and production builds always take the full
+    // path; no diagnostic mode is exposed through the compiler API.
+    #[cfg(test)]
+    match search_attribution_probe() {
+        SearchAttributionProbe::Dispatch => {
+            const_bool(false, b);
+            return f;
+        }
+        probe @ (SearchAttributionProbe::Loop
+        | SearchAttributionProbe::Read
+        | SearchAttributionProbe::Compare) => {
+            attribution_search_prefix(b, h, i, hl, nl, p, w, probe);
+            const_bool(false, b);
+            return f;
+        }
+        SearchAttributionProbe::Full => {}
+    }
+
     b.push(Ins::Block(BlockType::Empty));
     b.push(Ins::Loop(BlockType::Empty));
     b.push(Ins::LocalGet(hl));
@@ -1625,6 +1666,177 @@ fn includes(ctx: &Ctx) -> FnBuild {
 
     const_bool(false, b);
     f
+}
+
+#[cfg(test)]
+fn attribution_search_prefix(
+    b: &mut Vec<Ins>,
+    h: u32,
+    i: u32,
+    hl: u32,
+    nl: u32,
+    p: u32,
+    w: u32,
+    probe: SearchAttributionProbe,
+) {
+    b.push(Ins::Block(BlockType::Empty));
+    b.push(Ins::Loop(BlockType::Empty));
+    b.push(Ins::LocalGet(hl));
+    b.push(Ins::LocalGet(nl));
+    b.push(Ins::I32Sub);
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32LtU);
+    b.push(Ins::BrIf(1));
+
+    if probe == SearchAttributionProbe::Compare {
+        // This is the production four-byte load, has-zero-byte comparison and
+        // clear-window branch. The court's absent first byte takes that branch
+        // for every complete window.
+        skip_clear_window(b, h, i, hl, p, w);
+    } else {
+        if probe == SearchAttributionProbe::Read {
+            b.push(Ins::LocalGet(h));
+            b.push(Ins::LocalGet(i));
+            b.push(Ins::I32Add);
+            b.push(Ins::I32Load(0, 4));
+            b.push(Ins::LocalSet(w));
+        }
+        b.push(Ins::LocalGet(i));
+        b.push(Ins::I32Const(4));
+        b.push(Ins::I32Add);
+        b.push(Ins::LocalSet(i));
+        b.push(Ins::Br(0));
+    }
+
+    // Fewer than four bytes remain only at the tail. P1-P3 intentionally do
+    // not add the exact byte verifier owned by P4; advance one byte so the
+    // diagnostic terminates while retaining the production bound check.
+    b.push(Ins::LocalGet(i));
+    b.push(Ins::I32Const(1));
+    b.push(Ins::I32Add);
+    b.push(Ins::LocalSet(i));
+    b.push(Ins::Br(0));
+    b.push(Ins::End);
+    b.push(Ins::End);
+}
+
+#[cfg(test)]
+mod string_search_attribution {
+    use super::{SEARCH_ATTRIBUTION_PROBE, SearchAttributionProbe};
+    use crate::{Value, compile_qjs_m1};
+    use tinyvm::{Limits, WasmModule};
+
+    const LENGTHS: &[u32] = &[7, 9, 11, 13];
+
+    fn steps(probe: SearchAttributionProbe, source: &str) -> u64 {
+        SEARCH_ATTRIBUTION_PROBE.set(probe);
+        let compiled = compile_qjs_m1(source);
+        SEARCH_ATTRIBUTION_PROBE.set(SearchAttributionProbe::Full);
+        let wasm = compiled.unwrap_or_else(|error| panic!("compile {source:?}: {error}"));
+        let module = WasmModule::from_bytes_with(
+            &wasm,
+            Limits {
+                max_steps: 4_000_000_000,
+                ..Limits::default()
+            },
+        )
+        .expect("load diagnostic module");
+        let mut instance = module.instantiate().expect("instantiate diagnostic module");
+        instance
+            .invoke_by_name("main", &Value::args(&[]))
+            .unwrap_or_else(|error| panic!("run {source:?}: {}", error.message()));
+        instance.last_steps()
+    }
+
+    fn build(seed: &str, doublings: u32) -> String {
+        format!("let s = {seed:?}; for (let i = 0; i < {doublings}; i = i + 1) {{ s = s + s; }}")
+    }
+
+    fn fit(points: &[(u64, u64)]) -> (f64, f64, f64) {
+        let count = points.len() as f64;
+        let mean_x = points.iter().map(|(x, _)| *x as f64).sum::<f64>() / count;
+        let mean_y = points.iter().map(|(_, y)| *y as f64).sum::<f64>() / count;
+        let numerator = points
+            .iter()
+            .map(|(x, y)| (*x as f64 - mean_x) * (*y as f64 - mean_y))
+            .sum::<f64>();
+        let denominator = points
+            .iter()
+            .map(|(x, _)| (*x as f64 - mean_x).powi(2))
+            .sum::<f64>();
+        let slope = numerator / denominator;
+        let intercept = mean_y - slope * mean_x;
+        let max_residual_percent = points
+            .iter()
+            .map(|(x, y)| {
+                let predicted = intercept + slope * *x as f64;
+                (predicted - *y as f64).abs() / (*y as f64).max(1.0) * 100.0
+            })
+            .fold(0.0, f64::max);
+        (slope, intercept, max_residual_percent)
+    }
+
+    #[test]
+    #[ignore = "research court: cumulative search-body probes; run explicitly"]
+    fn cumulative_search_layers_are_attributed() {
+        for (series, seed, needle, bytes_per_seed, code_points_per_seed, code_units_per_seed) in [
+            ("ascii", "0123456789abcdef", "z", 16_u64, 16_u64, 16_u64),
+            ("unicode", "é😀甲", "z", 9_u64, 3_u64, 4_u64),
+        ] {
+            let mut probe_points: Vec<(SearchAttributionProbe, Vec<(u64, u64)>)> = [
+                SearchAttributionProbe::Dispatch,
+                SearchAttributionProbe::Loop,
+                SearchAttributionProbe::Read,
+                SearchAttributionProbe::Compare,
+                SearchAttributionProbe::Full,
+            ]
+            .into_iter()
+            .map(|probe| (probe, Vec::new()))
+            .collect();
+
+            println!("series,bytes,code_points,code_units,build,dispatch,loop,read,compare,full");
+            for &doublings in LENGTHS {
+                let multiplier = 1_u64 << doublings;
+                let bytes = bytes_per_seed * multiplier;
+                let code_points = code_points_per_seed * multiplier;
+                let code_units = code_units_per_seed * multiplier;
+                let prefix = build(seed, doublings);
+                let build_steps =
+                    steps(SearchAttributionProbe::Full, &format!("{prefix} return 0;"));
+                let mut totals = Vec::new();
+                for (probe, points) in &mut probe_points {
+                    let total = steps(*probe, &format!("{prefix} return s.includes({needle:?});"));
+                    points.push((bytes, total - build_steps));
+                    totals.push(total);
+                }
+                println!(
+                    "{series},{bytes},{code_points},{code_units},{build_steps},{},{},{},{},{}",
+                    totals[0], totals[1], totals[2], totals[3], totals[4]
+                );
+            }
+
+            let fits: Vec<_> = probe_points
+                .iter()
+                .map(|(probe, points)| (*probe, fit(points)))
+                .collect();
+            for (probe, (slope, intercept, residual)) in &fits {
+                println!(
+                    "fit series={series} probe={probe:?} denominator=byte slope={slope:.6} intercept={intercept:.3} max_residual_percent={residual:.6}"
+                );
+                assert!(
+                    *residual <= 2.0,
+                    "{series} {probe:?} residual {residual:.3}% exceeds 2%"
+                );
+            }
+            println!(
+                "deltas series={series} denominator=byte loop={:.6} read={:.6} compare={:.6} exact_verify_and_miss={:.6}",
+                fits[1].1.0 - fits[0].1.0,
+                fits[2].1.0 - fits[1].1.0,
+                fits[3].1.0 - fits[2].1.0,
+                fits[4].1.0 - fits[3].1.0,
+            );
+        }
+    }
 }
 
 /// `s.startsWith(t)` and `s.endsWith(t)` -- ECMA-262 22.1.3.23 and 22.1.3.7.
