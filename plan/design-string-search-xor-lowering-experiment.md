@@ -105,5 +105,11 @@ research/string-search-xor-lowering/
 
 ## 7. Result
 
-Pending. Criteria and decision tree were frozen before changing the XOR
-spelling.
+**ACCEPT direct `i32.xor`.** On exact measurement SHA `17db24d`, both
+`includes` and `indexOf`, on ASCII and valid UTF-8, moved from 10.5000 to
+9.5000 steps/byte: a 1.0000 improvement with identical intercepts. The emitted
+module shrank by 6 bytes. Thus X0 → X1/X2/X3 → X4 all pass; X5 is recorded in
+`research/string-search-xor-lowering/RESULTS.md`.
+
+The result removes a stale lowering left from before `I32Xor` existed. It does
+not claim that 9.5 is a terminal optimum or open any other search axis.

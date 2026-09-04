@@ -18,7 +18,7 @@ fn a_program_that_writes_no_bitwise_operator_pays_nothing() {
         ("return 1;", 10_198),
         ("return 6 + 3;", 10_214),
         ("let a = [1, 2]; return a.length;", 11_503),
-        ("return \"ab\".includes(\"a\");", 11_020),
+        ("return \"ab\".includes(\"a\");", 11_014),
         // `&&` and `||` are not bitwise, and `!` is not `~`.
         ("return !(1 && 0 || 1);", 10_271),
     ];

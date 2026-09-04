@@ -25,7 +25,7 @@ fn a_program_that_never_names_them_pays_nothing() {
         ("let a = [1]; a.push(2); return a.pop();", 11_833),
         // The String `includes`, which now carries the Array arm: +221 on
         // 2026-08-31 (10 799 -> 11 020). See the module comment.
-        ("return \"ab\".includes(\"a\");", 11_020),
+        ("return \"ab\".includes(\"a\");", 11_014),
     ];
     let got: Vec<usize> = rows.iter().map(|(source, _)| bytes(source)).collect();
     for ((source, _), n) in rows.iter().zip(&got) {
@@ -41,8 +41,8 @@ fn each_method_has_a_published_price() {
     let base = bytes("let a = [1, 2]; return a.length;");
     let rows = [
         ("let a = [1, 2]; return Array.isArray(a);", 59),
-        ("let a = [1, 2]; return a.indexOf(2);", 702),
-        ("let a = [1, 2]; return a.includes(2);", 623),
+        ("let a = [1, 2]; return a.indexOf(2);", 696),
+        ("let a = [1, 2]; return a.includes(2);", 617),
         ("let a = [1, 2]; return a.concat(3).length;", 569),
         ("let a = [1, 2]; return a.concat(3, 4).length;", 639),
         ("let a = [1, 2]; return a.join(\"-\").length;", 871),
