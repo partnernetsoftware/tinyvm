@@ -554,7 +554,12 @@ pub fn compile_qjs_m1_with_modules(
 /// This is an opt-in diagnostics surface for allocation-lifetime experiments,
 /// not a script capability and not part of ordinary compilation. The returned
 /// module additionally exports `__tinyvm_qjs_heap_ptr() -> i32`; invoking it
-/// reports the next bump-allocation address without mutating guest state.
+/// reports the next bump-allocation address without mutating guest state. It
+/// also exports operation-family counters and
+/// `__tinyvm_qjs_immediate_stringify_host_argument_bytes() -> i32`, the gross
+/// bytes allocated from immediately before an eligible
+/// `JSON.stringify(binding)` argument until its synchronous raw host consumer
+/// returns. The latter is attribution only: it does not rewind or free memory.
 /// Modules produced by [`compile_qjs_m1`], [`compile_qjs_m1_with`], and
 /// [`compile_qjs_m1_with_modules`] remain byte-for-byte unaffected.
 pub fn compile_qjs_m1_with_allocation_probe(
@@ -563,8 +568,7 @@ pub fn compile_qjs_m1_with_allocation_probe(
 ) -> Result<Vec<u8>, CompileError> {
     let tokens = lex::tokenize(source)?;
     let program = parse::m1::parse(tokens, options.clone())?;
-    let mut module = emit::m1::lower(&program, &options)?;
-    emit::m1::add_allocation_probe(&mut module);
+    let module = emit::m1::lower_with_allocation_probe(&program, &options)?;
     Ok(ir::m1::assemble(&module))
 }
 
@@ -578,8 +582,7 @@ pub fn compile_qjs_m1_with_modules_and_allocation_probe(
 ) -> Result<Vec<u8>, CompileError> {
     let tokens = lex::tokenize(source)?;
     let program = parse::m1::parse_with_modules(tokens, options.clone(), Some(resolve))?;
-    let mut module = emit::m1::lower(&program, &options)?;
-    emit::m1::add_allocation_probe(&mut module);
+    let module = emit::m1::lower_with_allocation_probe(&program, &options)?;
     Ok(ir::m1::assemble(&module))
 }
 

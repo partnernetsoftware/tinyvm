@@ -3,13 +3,14 @@
 
 use tinyvm::{Limits, Val, WasmModule};
 use tinyvm_qjs::{
-    Options, Value, compile_qjs_m1, compile_qjs_m1_with_allocation_probe,
-    compile_qjs_m1_with_modules_and_allocation_probe,
+    HostFn, HostParam, HostResult, Names, Options, Value, compile_qjs_m1,
+    compile_qjs_m1_with_allocation_probe, compile_qjs_m1_with_modules_and_allocation_probe,
 };
 
 const PROBE: &str = "__tinyvm_qjs_heap_ptr";
 const PARSE_BYTES: &str = "__tinyvm_qjs_json_parse_bytes";
 const STRINGIFY_BYTES: &str = "__tinyvm_qjs_json_stringify_bytes";
+const IMMEDIATE_HOST_ARGUMENT_BYTES: &str = "__tinyvm_qjs_immediate_stringify_host_argument_bytes";
 
 fn i32_result(values: Vec<Val>) -> i32 {
     match values.as_slice() {
@@ -30,6 +31,11 @@ fn ordinary_compilation_does_not_publish_the_probe() {
     assert!(instance.invoke_by_name(PROBE, &[]).is_err());
     assert!(instance.invoke_by_name(PARSE_BYTES, &[]).is_err());
     assert!(instance.invoke_by_name(STRINGIFY_BYTES, &[]).is_err());
+    assert!(
+        instance
+            .invoke_by_name(IMMEDIATE_HOST_ARGUMENT_BYTES, &[])
+            .is_err()
+    );
 }
 
 #[test]
@@ -143,4 +149,171 @@ fn json_operation_counters_partition_their_own_allocations() {
         parse + stringify <= allocated,
         "operation counters cannot exceed whole-call allocation"
     );
+}
+
+fn declared_sink(params: Vec<HostParam>, result: HostResult) -> Options {
+    Options {
+        names: Names::Declared(vec![HostFn {
+            name: "sink".to_owned(),
+            module: "probe".to_owned(),
+            field: "sink".to_owned(),
+            params,
+            result,
+        }]),
+    }
+}
+
+#[track_caller]
+fn immediate_host_argument_bytes(source: &str, options: Options) -> i32 {
+    let result = match &options.names {
+        Names::Declared(hosts) => hosts[0].result.clone(),
+        _ => panic!("probe helper requires one declared host"),
+    };
+    let wasm = compile_qjs_m1_with_allocation_probe(source, options).expect("compiles");
+    let mut module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
+    for import in module.imports().to_vec() {
+        let answer = if import.field == "sink" {
+            result.clone()
+        } else {
+            HostResult::I32
+        };
+        module
+            .bind_import_typed(&import.module, &import.field, move |_args, _memory| {
+                Ok(match answer {
+                    HostResult::Void => Vec::new(),
+                    HostResult::I32 | HostResult::Bytes { .. } => vec![Val::I32(0)],
+                    HostResult::F64 => vec![Val::F64(0.0)],
+                })
+            })
+            .expect("binds probe host");
+    }
+    let mut instance = module.instantiate().expect("instantiates");
+    instance
+        .invoke_by_name("main", &Value::args(&[]))
+        .expect("main runs");
+    read(&mut instance, IMMEDIATE_HOST_ARGUMENT_BYTES)
+}
+
+#[test]
+fn immediate_stringify_host_argument_attributes_gross_allocated_bytes() {
+    for (name, source) in [
+        (
+            "script local",
+            r#"let payload={text:"visible"}; sink(JSON.stringify(payload)); return 0;"#,
+        ),
+        (
+            "function parameter",
+            r#"function f(payload){sink(JSON.stringify(payload));} f({text:"visible"}); return 0;"#,
+        ),
+        (
+            "script global read",
+            r#"let payload={text:"visible"}; function f(){sink(JSON.stringify(payload));} f(); return 0;"#,
+        ),
+        (
+            "captured read",
+            r#"function outer(payload){function inner(){sink(JSON.stringify(payload));} inner();} outer({text:"visible"}); return 0;"#,
+        ),
+    ] {
+        let bytes = immediate_host_argument_bytes(
+            source,
+            declared_sink(vec![HostParam::StrPtrLen], HostResult::Void),
+        );
+        assert!(bytes > 0, "{name} producer-consumer region must allocate");
+    }
+
+    let i32_bytes = immediate_host_argument_bytes(
+        r#"let payload={text:"visible"}; return sink(JSON.stringify(payload));"#,
+        declared_sink(vec![HostParam::StrPtrLen], HostResult::I32),
+    );
+    assert!(i32_bytes > 0, "an I32 host result remains eligible");
+    let f64_bytes = immediate_host_argument_bytes(
+        r#"let payload={text:"visible"}; return sink(JSON.stringify(payload));"#,
+        declared_sink(vec![HostParam::StrPtrLen], HostResult::F64),
+    );
+    assert!(f64_bytes > 0, "an F64 host result remains eligible");
+}
+
+#[test]
+fn diagnostic_compile_cannot_perturb_ordinary_module_bytes() {
+    let source = "let o={a:1}; sink(JSON.stringify(o)); return 0;";
+    let options = declared_sink(vec![HostParam::StrPtrLen], HostResult::Void);
+    let before = tinyvm_qjs::compile_qjs_m1_with(source, options.clone()).expect("ordinary A");
+    let diagnostic =
+        compile_qjs_m1_with_allocation_probe(source, options.clone()).expect("diagnostic compile");
+    let after = tinyvm_qjs::compile_qjs_m1_with(source, options).expect("ordinary B");
+    assert_eq!(
+        before, after,
+        "diagnostic lowering has no shared compiler state"
+    );
+    assert_ne!(
+        before, diagnostic,
+        "the opt-in diagnostic module must carry its exports"
+    );
+}
+
+#[test]
+fn immediate_stringify_host_argument_probe_is_fail_closed_on_negative_shapes() {
+    let one_string = || declared_sink(vec![HostParam::StrPtrLen], HostResult::Void);
+    let cases = [
+        (
+            "stored alias",
+            "let o={a:1}; let s=JSON.stringify(o); sink(s); return 0;",
+            one_string(),
+        ),
+        (
+            "stringify alias",
+            "let o={a:1}; const f=JSON.stringify; sink(f(o)); return 0;",
+            one_string(),
+        ),
+        (
+            "multiple host arguments",
+            "let o={a:1}; sink(JSON.stringify(o), \"tail\"); return 0;",
+            declared_sink(
+                vec![HostParam::StrPtrLen, HostParam::StrPtrLen],
+                HostResult::Void,
+            ),
+        ),
+        (
+            "bytes host result",
+            "let o={a:1}; return sink(JSON.stringify(o)).length;",
+            declared_sink(
+                vec![HostParam::StrPtrLen],
+                HostResult::Bytes {
+                    length: "sink_len".to_owned(),
+                },
+            ),
+        ),
+        (
+            "lexical try",
+            "let o={a:1}; try { sink(JSON.stringify(o)); } catch (e) {} return 0;",
+            one_string(),
+        ),
+        (
+            "lexical catch",
+            "let o={a:1}; try { throw 1; } catch (e) { sink(JSON.stringify(o)); } return 0;",
+            one_string(),
+        ),
+        (
+            "lexical finally",
+            "let o={a:1}; try {} finally { sink(JSON.stringify(o)); } return 0;",
+            one_string(),
+        ),
+        (
+            "stringify spacing argument",
+            "let o={a:1}; sink(JSON.stringify(o, null, 2)); return 0;",
+            one_string(),
+        ),
+        (
+            "non-binding stringify input",
+            "sink(JSON.stringify({a:1})); return 0;",
+            one_string(),
+        ),
+    ];
+    for (name, source, options) in cases {
+        assert_eq!(
+            immediate_host_argument_bytes(source, options),
+            0,
+            "negative shape {name:?} must not be attributed"
+        );
+    }
 }

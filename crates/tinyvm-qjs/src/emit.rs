@@ -361,6 +361,8 @@ pub(crate) mod m1 {
     pub(crate) const ALLOCATION_PROBE: &str = "__tinyvm_qjs_heap_ptr";
     pub(crate) const JSON_PARSE_ALLOCATION_PROBE: &str = "__tinyvm_qjs_json_parse_bytes";
     pub(crate) const JSON_STRINGIFY_ALLOCATION_PROBE: &str = "__tinyvm_qjs_json_stringify_bytes";
+    pub(crate) const IMMEDIATE_HOST_ARGUMENT_ALLOCATION_PROBE: &str =
+        "__tinyvm_qjs_immediate_stringify_host_argument_bytes";
 
     /// Linear memory's page size, and wasm's own ceiling on how many pages a
     /// module may declare.
@@ -599,6 +601,26 @@ pub(crate) mod m1 {
         program: &ast::Program,
         options: &Options,
     ) -> Result<ir::Module, CompileError> {
+        lower_inner(program, options, false)
+    }
+
+    /// Diagnostic lowering for allocation attribution. Ordinary lowering
+    /// never enters this path, so its module bytes cannot acquire a probe
+    /// global, local or instruction by accident.
+    pub(crate) fn lower_with_allocation_probe(
+        program: &ast::Program,
+        options: &Options,
+    ) -> Result<ir::Module, CompileError> {
+        let mut module = lower_inner(program, options, true)?;
+        add_allocation_probe(&mut module);
+        Ok(module)
+    }
+
+    fn lower_inner(
+        program: &ast::Program,
+        options: &Options,
+        allocation_probe: bool,
+    ) -> Result<ir::Module, CompileError> {
         let scan = scan(program)?;
         let table = match &options.names {
             Names::Declared(decls) => Table::Raw(bind(decls, &scan)?),
@@ -649,6 +671,11 @@ pub(crate) mod m1 {
         // the JSON set is handed the indices and is built before them.
         let binding_globals = BINDING_GLOBALS + program.script().bindings.len() as u32 * WIDTH;
         let unwind = scan.throws.then(|| Unwind::at(binding_globals));
+        let immediate_host_argument_total = allocation_probe.then(|| {
+            binding_globals
+                + unwind.map_or(0, |_| Unwind::WORDS)
+                + u32::from(scan.json) * Json::WORDS
+        });
 
         let ctx = Ctx {
             object_names: (scan.objects || scan.arrays || scan.json || scan.function_values)
@@ -924,6 +951,7 @@ pub(crate) mod m1 {
                 user_base,
                 scan.captures,
                 id,
+                immediate_host_argument_total,
             )
             .function()?;
             let arity = if id == ast::Program::SCRIPT {
@@ -1134,6 +1162,14 @@ pub(crate) mod m1 {
             });
             debug_assert_eq!(globals.len() as u32, json.tag + Json::WORDS);
         }
+        if let Some(total) = immediate_host_argument_total {
+            debug_assert_eq!(globals.len() as u32, total);
+            globals.push(ir::Global {
+                ty: ir::ValType::I32,
+                mutable: true,
+                init: ir::Const::I32(0),
+            });
+        }
 
         let data = if pool.is_empty() {
             Vec::new()
@@ -1170,7 +1206,13 @@ pub(crate) mod m1 {
     /// index moves. Production compilation never calls it: the named export
     /// exists only in modules built through the explicit diagnostic entry
     /// points in `lib.rs`.
-    pub(crate) fn add_allocation_probe(module: &mut ir::Module) {
+    fn add_allocation_probe(module: &mut ir::Module) {
+        let immediate_host_argument_total = module
+            .globals
+            .len()
+            .checked_sub(1)
+            .expect("diagnostic lowering always adds its attribution global")
+            as u32;
         let mut counters = Vec::new();
         for (function_name, export_name) in [
             ("__json_parse", JSON_PARSE_ALLOCATION_PROBE),
@@ -1201,6 +1243,11 @@ pub(crate) mod m1 {
         }
 
         add_i32_global_getter(module, ALLOCATION_PROBE, HEAP_GLOBAL);
+        add_i32_global_getter(
+            module,
+            IMMEDIATE_HOST_ARGUMENT_ALLOCATION_PROBE,
+            immediate_host_argument_total,
+        );
         for (name, global) in counters {
             add_i32_global_getter(module, name, global);
         }
@@ -2246,6 +2293,9 @@ pub(crate) mod m1 {
         /// Where the `JSON` namespace object lives, or `None` for a program
         /// that never names it -- which emits nothing of it at all.
         json: Option<Json>,
+        /// Diagnostic-only gross allocation counter for the exact immediate
+        /// `JSON.stringify(binding)` -> raw host argument region.
+        immediate_host_argument_total: Option<u32>,
         user_base: u32,
         id: ast::FuncId,
         f: FnBuild,
@@ -2267,6 +2317,9 @@ pub(crate) mod m1 {
         /// The enclosing `finally` blocks a `return` has to run on its way
         /// out, innermost last.
         finalizers: Vec<Finalizer>,
+        /// Lexical `try` / `catch` / `finally` nesting. The first diagnostic
+        /// experiment deliberately attributes no site under any of the three.
+        try_depth: u32,
         /// The enclosing loops a `break` or `continue` may reach, innermost
         /// last.
         ///
@@ -2307,6 +2360,7 @@ pub(crate) mod m1 {
             user_base: u32,
             captures: bool,
             id: ast::FuncId,
+            immediate_host_argument_total: Option<u32>,
         ) -> Self {
             let function = program.func(id);
             let arity = if id == ast::Program::SCRIPT {
@@ -2359,6 +2413,7 @@ pub(crate) mod m1 {
                 str_index,
                 unwind,
                 json,
+                immediate_host_argument_total,
                 user_base,
                 captures,
                 id,
@@ -2367,6 +2422,7 @@ pub(crate) mod m1 {
                 depth: 0,
                 handlers: Vec::new(),
                 finalizers: Vec::new(),
+                try_depth: 0,
                 loops: Vec::new(),
                 completion,
                 free: Vec::new(),
@@ -3229,13 +3285,16 @@ pub(crate) mod m1 {
             finalizer: Option<&[ast::Stmt]>,
         ) -> Result<(), CompileError> {
             self.reset_completion();
-            match finalizer {
+            self.try_depth += 1;
+            let result = match finalizer {
                 None => self.try_catch(
                     block,
                     handler.expect("the parser refuses a `try` with neither clause"),
                 ),
                 Some(fin) => self.try_finally(block, handler, fin),
-            }
+            };
+            self.try_depth -= 1;
+            result
         }
 
         /// `try { A } catch (e) { B }`, which is the two-block form this
@@ -4254,6 +4313,19 @@ pub(crate) mod m1 {
                 }
             }
 
+            // D0 is attribution only. The mark is a function-local raw word,
+            // and the exported global is cumulative gross allocation. There
+            // is intentionally no write to HEAP_GLOBAL here: no rewind,
+            // restore, free or reuse is implemented by this diagnostic.
+            let allocation_mark = self
+                .eligible_immediate_stringify_host_argument(b, args)
+                .then(|| {
+                    let mark = self.take_raw();
+                    self.push(Ins::GlobalGet(HEAP_GLOBAL));
+                    self.push(Ins::LocalSet(mark));
+                    mark
+                });
+
             let mut slots = Vec::with_capacity(args.len());
             for arg in args {
                 let slot = self.take();
@@ -4291,10 +4363,78 @@ pub(crate) mod m1 {
                 HostResult::Bytes { .. } => self.two_pass_string(b, &slots, &literal),
             }
 
+            if let (Some(mark), Some(total)) = (allocation_mark, self.immediate_host_argument_total)
+            {
+                self.push(Ins::GlobalGet(total));
+                self.push(Ins::GlobalGet(HEAP_GLOBAL));
+                self.push(Ins::LocalGet(mark));
+                self.push(Ins::I32Sub);
+                self.push(Ins::I32Add);
+                self.push(Ins::GlobalSet(total));
+                self.give_raw(mark);
+            }
+
             for slot in slots.into_iter().rev() {
                 self.give(slot);
             }
             Ok(())
+        }
+
+        /// The exact first-stage experiment shape. This is deliberately a
+        /// syntactic recogniser rather than escape analysis: widening any row
+        /// requires a new experiment, while every unrecognised spelling stays
+        /// at a diagnostic count of zero.
+        fn eligible_immediate_stringify_host_argument(
+            &self,
+            b: &Bound,
+            args: &[ast::Expr],
+        ) -> bool {
+            if self.immediate_host_argument_total.is_none()
+                || self.try_depth != 0
+                || b.decl.params.as_slice() != [HostParam::StrPtrLen]
+                || !matches!(
+                    b.decl.result,
+                    HostResult::Void | HostResult::I32 | HostResult::F64
+                )
+            {
+                return false;
+            }
+            let [argument] = args else {
+                return false;
+            };
+            let ast::ExprKind::Call {
+                callee,
+                args: stringify_args,
+            } = &argument.kind
+            else {
+                return false;
+            };
+            let [input] = stringify_args.as_slice() else {
+                return false;
+            };
+            let ast::ExprKind::Member {
+                object,
+                key: ast::MemberKey::Static(member),
+            } = &callee.kind
+            else {
+                return false;
+            };
+            let direct_json = matches!(
+                &object.kind,
+                ast::ExprKind::Name(ast::Name {
+                    res: ast::Res::Json,
+                    ..
+                })
+            );
+            let existing_binding = matches!(
+                &input.kind,
+                ast::ExprKind::Arg(_)
+                    | ast::ExprKind::Name(ast::Name {
+                        res: ast::Res::Local(_) | ast::Res::Global(_) | ast::Res::Captured(_),
+                        ..
+                    })
+            );
+            direct_json && member == "stringify" && existing_binding
         }
 
         /// Push the raw parameters the declaration names, reading each JS
