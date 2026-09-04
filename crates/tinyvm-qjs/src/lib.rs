@@ -549,6 +549,40 @@ pub fn compile_qjs_m1_with_modules(
     Ok(ir::m1::assemble(&module))
 }
 
+/// Compile M1 source with a read-only allocator-waterline probe.
+///
+/// This is an opt-in diagnostics surface for allocation-lifetime experiments,
+/// not a script capability and not part of ordinary compilation. The returned
+/// module additionally exports `__tinyvm_qjs_heap_ptr() -> i32`; invoking it
+/// reports the next bump-allocation address without mutating guest state.
+/// Modules produced by [`compile_qjs_m1`], [`compile_qjs_m1_with`], and
+/// [`compile_qjs_m1_with_modules`] remain byte-for-byte unaffected.
+pub fn compile_qjs_m1_with_allocation_probe(
+    source: &str,
+    options: Options,
+) -> Result<Vec<u8>, CompileError> {
+    let tokens = lex::tokenize(source)?;
+    let program = parse::m1::parse(tokens, options.clone())?;
+    let mut module = emit::m1::lower(&program, &options)?;
+    emit::m1::add_allocation_probe(&mut module);
+    Ok(ir::m1::assemble(&module))
+}
+
+/// [`compile_qjs_m1_with_allocation_probe`] with compile-time module
+/// resolution. The resolver has the same meaning as in
+/// [`compile_qjs_m1_with_modules`].
+pub fn compile_qjs_m1_with_modules_and_allocation_probe(
+    source: &str,
+    options: Options,
+    resolve: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<u8>, CompileError> {
+    let tokens = lex::tokenize(source)?;
+    let program = parse::m1::parse_with_modules(tokens, options.clone(), Some(resolve))?;
+    let mut module = emit::m1::lower(&program, &options)?;
+    emit::m1::add_allocation_probe(&mut module);
+    Ok(ir::m1::assemble(&module))
+}
+
 pub fn compile_qjs_m1_with(source: &str, options: Options) -> Result<Vec<u8>, CompileError> {
     let tokens = lex::tokenize(source)?;
     let program = parse::m1::parse(tokens, options.clone())?;

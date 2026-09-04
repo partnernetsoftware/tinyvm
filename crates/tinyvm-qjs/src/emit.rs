@@ -358,6 +358,7 @@ pub(crate) mod m1 {
     /// The name every compiled script exports, as at M0.
     pub(crate) const ENTRY: &str = super::ENTRY;
     pub(crate) const HOST_MODULE: &str = super::HOST_MODULE;
+    pub(crate) const ALLOCATION_PROBE: &str = "__tinyvm_qjs_heap_ptr";
 
     /// Linear memory's page size, and wasm's own ceiling on how many pages a
     /// module may declare.
@@ -1159,6 +1160,28 @@ pub(crate) mod m1 {
                 index: user_base + ast::Program::SCRIPT.0,
             }],
         })
+    }
+
+    /// Append a read-only diagnostic function for the allocator waterline.
+    ///
+    /// This happens after ordinary lowering so no existing function/global
+    /// index moves. Production compilation never calls it: the named export
+    /// exists only in modules built through the explicit diagnostic entry
+    /// points in `lib.rs`.
+    pub(crate) fn add_allocation_probe(module: &mut ir::Module) {
+        let type_index = intern(&mut module.types, Vec::new(), vec![ValType::I32]);
+        let index = module.imports.len() as u32 + module.funcs.len() as u32;
+        module.funcs.push(func(
+            ALLOCATION_PROBE.to_owned(),
+            None,
+            type_index,
+            Vec::new(),
+            vec![Ins::GlobalGet(HEAP_GLOBAL)],
+        ));
+        module.exports.push(ir::Export {
+            name: ALLOCATION_PROBE.to_owned(),
+            index,
+        });
     }
 
     /// What a function is called in the `name` custom section. The script is
