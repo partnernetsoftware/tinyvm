@@ -6,7 +6,7 @@ state, change the String record, or change the production engine.
 | Field | Value |
 |---|---|
 | Date | 2026-09-04 |
-| Purpose | Locate the remaining per-character cost in `includes` / `indexOf` before opening another String optimization |
+| Purpose | Separate search cost from the old O(n) `.length` subtraction, then locate the real per-character owner before opening another String optimization |
 | Baseline | production `tinyvm` at `69a3e3b`; compact four-byte String record |
 | Implementation | existing `crates/tinyvm-qjs` cost fixtures plus temporary diagnostic probes; no accepted source change |
 | Pre-reading | `plan/design-direct-string-metadata-publication-experiment.md`, `plan/design-index-of-window-skip.md` |
@@ -14,10 +14,18 @@ state, change the String record, or change the production engine.
 
 ## 0. Question and settled facts
 
-The direct-producer metadata experiment was correctly rejected: its search
-courts measured 10.5 steps per character against a frozen strict gate `<10`.
-The next question is not whether 10.5 is “close enough”. It is which layer
-owns that slope: fixed dispatch, loop control, code-unit read, comparison, or
+The direct-producer metadata experiment was correctly rejected: its inherited
+search courts measured 10.5 steps per character against a frozen strict gate
+`<10`. Post-verdict audit found that 7.2 -> 10.5 was not a slower search loop.
+The court subtracted `return s.length` from the search call. Production
+`.length` walks UTF-8 at about 3.3 steps per character, while the rejected
+metadata candidate made it O(1); the subtraction therefore hid 3.3 steps per
+character only in the old baseline. The search body retained the same
+four-byte-window loop (apart from its body offset).
+
+The next question is not whether 10.5 is “close enough”. It is first whether a
+build-only control reproduces the search body's absolute slope, then which
+layer owns that slope: fixed dispatch, loop control, byte read, comparison, or
 miss return.
 
 Already settled:
@@ -28,6 +36,9 @@ Already settled:
    rejected axes and do not reopen here.
 4. This experiment produces an attribution table and the next experiment's
    owner. It does not produce an optimized engine.
+5. The earlier D verdict remains REJECT: its precommitted court failed. Finding
+   a weakness in that court after the verdict is evidence for the next ruler,
+   not permission to rewrite the historical result.
 
 ## 1. Hard constraints
 
@@ -40,6 +51,9 @@ Already settled:
   stay fixed within one series.
 - Report raw totals, matched control totals, incremental totals, fitted slope
   and intercept. A single point is invalid evidence.
+- Measure both controls at every length: build-only `return 0` and historical
+  `return s.length`. The former owns absolute search cost; the latter exists
+  only to reproduce and explain the old 7.2 result.
 - Each probe adds exactly one layer to the preceding probe. The difference
   between adjacent probes is the attributed cost; independently written
   “equivalent” loops are not comparable.
@@ -48,7 +62,8 @@ Already settled:
   check that production needs.
 - No String-layout, ABI, allocator, instruction-set, budget or public API
   change is allowed.
-- The sum of attributed slopes must reproduce the full-search slope within
+- The sum of attributed slopes must reproduce the build-only-subtracted
+  full-search slope within
   0.25 steps/character or 5%, whichever is larger. Otherwise the experiment
   is inconclusive.
 - **Disease detector:** any urge to change the record, weaken `<10`, add a
@@ -63,7 +78,9 @@ only the named layer.
 
 | Probe | Added work | Why this isolates the layer |
 |---|---|---|
-| P0 control | Call/return and fixed method dispatch; no character loop | Fits the intercept independently of length |
+| P0a build control | Construct the identical haystack and `return 0` | Leaves no O(n) work in the subtraction |
+| P0b historical control | Construct it and `return s.length` | Reproduces how the old court hid the length-walk slope |
+| P0 dispatch | Fixed search method dispatch; no character loop | Fits the intercept independently of length |
 | P1 loop | The production loop bounds and index update, but no body read | Adds loop-control slope |
 | P2 read | P1 plus the production code-unit/byte load path; value is consumed | Adds read/decode slope without comparison |
 | P3 compare | P2 plus the same equality/prefix test, forced to miss | Adds comparison slope |
@@ -76,9 +93,11 @@ Series:
 - Non-ASCII valid UTF-8 haystack with an absent one-code-unit needle:
   attribution boundary check, reported separately and never averaged into the
   ASCII result.
-- Existing four-byte skip-window fixture: independent calibration. Its current
-  result must reproduce within the fixture's existing exact tolerance before
-  any new number is accepted.
+- Existing four-byte skip-window fixture: independent historical calibration.
+  Its current length-subtracted result must reproduce within the fixture's
+  existing exact tolerance. The new build-only subtraction must report the
+  absolute slope beside it; the difference between the two must equal the
+  independently measured `.length` slope within the closure tolerance.
 
 No new Wasm instruction, profiler, String representation or public benchmark
 command is part of the minimum.
@@ -88,25 +107,26 @@ command is part of the minimum.
 | ID | Property | Kind | Frozen criterion |
 |---|---|---|---|
 | C0 | Semantic/control validity | Boolean | Existing search semantic tests and full `cargo test -p tinyvm-qjs` remain green |
-| C1 | Calibration | Boolean | Existing search cost fixture reproduces its checked-in reference under the recorded toolchain |
+| C1 | Calibration | Boolean | Existing length-subtracted search fixture reproduces its checked-in reference under the recorded toolchain |
 | C2 | Linearity | Slope | Each P1-P5 ASCII series has fit residual at most 0.25 steps/character and no point differs from its fit by more than 2% |
-| C3 | Attribution closure | Safety | Sum of P1-P4 adjacent slope deltas is within max(0.25 steps/character, 5%) of P5's slope |
-| C4 | Dominant owner | Slope | One layer owns at least 0.50 steps/character and at least 40% of the excess above the inherited `<10` gate |
-| C5 | Fixed overhead | Intercept | P0 and P4 report dispatch and miss-return intercepts separately; neither may be described as per-character cost |
-| C6 | Unicode boundary | Checklist | Non-ASCII results name byte/code-unit/code-point denominators separately; no cross-denominator ratio is published |
-| C7 | Reproducibility | Boolean | `RESULTS.md` includes exact SHA, compiler identity, commands, raw totals, subtraction inputs and an independent reference hash |
+| C3 | Ruler closure | Safety | `absolute search slope - historical slope` equals the independently measured `.length` slope within max(0.25 steps/character, 5%) |
+| C4 | Attribution closure | Safety | Sum of P1-P4 adjacent slope deltas is within max(0.25 steps/character, 5%) of P5's absolute slope |
+| C5 | Actionable owner | Slope | One layer owns at least 0.50 steps/character; only that layer may receive the next frozen optimization experiment |
+| C6 | Fixed overhead | Intercept | P0-dispatch and P4 report dispatch and miss-return intercepts separately; neither may be described as per-character cost |
+| C7 | Unicode boundary | Checklist | Non-ASCII results name byte/code-unit/code-point denominators separately; no cross-denominator ratio is published |
+| C8 | Reproducibility | Boolean | `RESULTS.md` includes exact SHA, compiler identity, commands, raw totals, subtraction inputs and an independent reference hash |
 
-Priority is C0-C3 validity, then the C4 slope decision, then C5-C7 explanatory
+Priority is C0-C4 validity, then the C5 slope decision, then C6-C8 explanatory
 evidence. Intercepts cannot overrule a slope result.
 
 ## 4. Decision tree, kill criteria and time box
 
 ```text
-C0 semantics green and C1 calibration reproduced?
+C0 semantics green and C1 historical calibration reproduced?
 ├─ no  -> INVALID; repair the measuring court, publish no attribution
-└─ yes -> C2 linearity and C3 attribution closure pass?
+└─ yes -> C2 linearity, C3 ruler closure and C4 attribution closure pass?
           ├─ no  -> INCONCLUSIVE; keep production pin and redesign probes
-          └─ yes -> C4 identifies one dominant owner?
+          └─ yes -> C5 identifies one actionable owner?
                     ├─ yes -> freeze one orthogonal experiment for that owner
                     └─ no  -> STOP; cost is distributed, keep current engine
 ```
@@ -123,11 +143,11 @@ Kill immediately if a probe needs a new runtime primitive, changes String
 layout, changes the operation counter, weakens an existing court, or cannot
 retain the production loop's checks.
 
-The time box ends when C0-C4 have numbers and the tree reaches an exit. Do not
+The time box ends when C0-C5 have numbers and the tree reaches an exit. Do not
 implement the selected optimization inside this experiment.
 
-Every criterion is accounted for: C0-C1 open the court; C2-C3 validate the
-measurement; C4 selects or rejects a next structural experiment; C5-C7 are
+Every criterion is accounted for: C0-C1 open the court; C2-C4 validate the
+measurement; C5 selects or rejects a next structural experiment; C6-C8 are
 mandatory result fields but cannot change the branch.
 
 ## 5. Evidence layout
@@ -137,7 +157,7 @@ research/string-search-cost-attribution/
 ├── README.md          # probe construction and fixture map
 ├── measure.sh         # bounded reproducible runner
 ├── raw/               # ignored raw measurements
-└── RESULTS.md         # C0-C7 table and decision trace
+└── RESULTS.md         # C0-C8 table and decision trace
 ```
 
 Existing semantic and cost fixtures remain the source of truth. Temporary
@@ -168,6 +188,6 @@ numbers are checked into `RESULTS.md`.
 
 ## 8. Results and verdict
 
-Not run. This section must be filled with the C0-C7 table, exact decision-tree
+Not run. This section must be filled with the C0-C8 table, exact decision-tree
 trace, deviations, an explicit statement that the measures were not changed to
 improve the verdict, and every result that contradicted the initial hypothesis.
