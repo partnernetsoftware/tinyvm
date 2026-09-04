@@ -1,6 +1,6 @@
 # Direct per-producer String metadata publication: decisive experiment
 
-Status: **specified; implementation and verdict pending**
+Status: **completed; Variant D rejected and engine rolled back**
 
 Date: 2026-09-04  
 Baseline: `a6ba2f9`; production engine source remains the compact four-byte
@@ -241,6 +241,73 @@ static-property prefabs, type flow or iterator lowering are worthwhile.
 
 ## 8. Results and verdict
 
-Pending. Do not edit §§1-5 after implementation starts. Record specification
-defects, deviations, all raw measurements and the exact decision trace here;
-never repair an observed miss by changing a frozen gate.
+### Verdict
+
+**REJECT D.** The first time box reached an inherited D4 hard failure before
+the JSON court: `includes` and `indexOf` each measured **10.5
+steps/character**, while the frozen gate is strictly **<10**. Per §5, all
+engine and test changes were rolled back immediately; D5 and D6-D12 were not
+run. The production engine therefore remains the compact four-byte String
+record at baseline `d6e0264`.
+
+Decision trace:
+
+```text
+D1 prototype producer closure and D3 source audit
+  -> focused compile/correctness launch
+  -> D4 join 212.0 < 260 and split 34.5 < 35
+  -> D4 includes 10.5 !< 10 and indexOf 10.5 !< 10
+  -> REJECT D; rollback; do not enter D5 or D6-D12
+```
+
+### Measurement record
+
+Environment: `rustc 1.97.0 (2d8144b78 2026-07-07)`, LLVM 22.1.6,
+`aarch64-apple-darwin`; dedicated repo-local target lane
+`target/direct-string-metadata/`. Interpreter counts are from the unchanged
+public courts and their existing subtraction formulas.
+
+| Gate | Exact observation | Result |
+|---|---:|---|
+| D1 producer closure | prototype covered pool, concat, TypeError assembly, conversion/method/JSON producers and a boundary-local Host `Bytes` pass; the executable inventory test was not completed before D4 killed the variant | not promoted to pass |
+| D2 focused safety launch | candidate compiled; `conversions` completed 21 passed / 1 ignored; the combined command stopped at D4 before the remaining requested test binaries and therefore is not a full-suite claim | incomplete by kill |
+| D3 hidden rescan | source audit found no general `seal`, `finish`, `repair` or callable metadata walker; the only byte walk was inlined inside Host `Bytes`; emitted-code proof was not completed before kill | provisional only |
+| D4 String join | **212.0 steps/element** for ten-byte Strings | pass (`<260`) |
+| D4 String join, Numbers (diagnostic) | **481.9 steps/element** | reported; no frozen threshold |
+| D4 `includes` miss | **10.5 steps/character** on 128 KiB | **fail** (`<10`) |
+| D4 `indexOf` miss | **10.5 steps/character** on 128 KiB | **fail** (`<10`) |
+| D4 `split`, absent separator | **34.5 steps/character** on 128 KiB | pass (`<35`) |
+| D5 JSON | not run after D4 kill | not reached |
+
+Reproduction command used for the decisive court (from repository root):
+
+```bash
+CARGO_TARGET_DIR=target/direct-string-metadata cargo test -p tinyvm-qjs \
+  --test repr_v1 --test conversions --test json --test unwind_attack \
+  --test length_cost --test array_methods_cost --test index_of_cost \
+  --test json_stringify_cost -- --nocapture
+```
+
+Cargo scheduled `array_methods_cost`, `conversions`, then `index_of_cost`; the
+last target produced the frozen miss and stopped the command. The implementation
+was then removed with reverse `apply_patch`; no experimental engine byte remains
+in the tree.
+
+### Deviations and honesty
+
+- The implementation time box produced D4 evidence before D1's executable
+  inventory test and the complete D2/D3 proof had finished. This is an order
+  deviation, not a favorable reinterpretation: D4 is independently a hard
+  kill, so completing earlier proof cannot change the verdict.
+- D5 was deliberately not run after the first inherited-court miss. Reporting
+  it as unknown follows the stop rule rather than treating an unmeasured court
+  as passing.
+- No limit, subtraction, workload, threshold or frozen §1-§5 text was changed
+  after seeing the result. The near misses (10.5 versus 10; 34.5 versus 35) were
+  not rounded into passes.
+- The useful falsification is narrow: direct publication removed the severe
+  eager-finalizer regressions and restored join/split close to their budgets,
+  but the retained metadata reader path still misses the already-established
+  search court. That is enough to reject this whole-record design under the
+  precommitted contract; it is not evidence that producer-local accounting is
+  intrinsically unsound.
