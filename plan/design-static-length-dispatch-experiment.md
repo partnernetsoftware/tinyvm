@@ -1,6 +1,6 @@
 # Static `length` dispatch: decisive experiment
 
-Status: **specified; implementation and verdict pending**
+Status: **completed; Variant C rejected and implementation rolled back**
 
 Date: 2026-09-04  
 Baseline: `0a43271`; active engine source remains `028a914`  
@@ -138,5 +138,66 @@ and memory, and C10 is downstream transfer. Every branch has one verdict.
 
 ## 8. Results and verdict
 
-Pending. Do not edit §§1-4 after Variant C measurements begin; record any
-specification defect here rather than silently repairing the decision tree.
+Variant C was reconstructed from the prior Variant B evidence, with the same
+gated eight-byte record and one internal `__static_length` prefab. The prefab
+received the dynamic value pair, answered String from the cached metadata, and
+delegated every non-String receiver to the pre-existing Object/Array property
+helper. No public tag, host helper, receiver typing, second allocation or
+budget change was introduced.
+
+Measurement environment: pinned repository `rust-toolchain.toml`, `rustc
+1.97.0 (2d8144b78 2026-07-07)`, Darwin arm64 host. VM steps are exact
+interpreter counts; all executions used the existing default limits unless a
+pre-existing test supplied its own stricter or larger bound.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| C1 semantics | **pass** | Static and computed `length` agreed for String, Array, `{length: 7}`, missing Object property, Number, `null` and `undefined`; existing UTF-16 and producer cases passed. |
+| C2 safety/full suite | **fail** | Host/heap/unwind/JSON and focused representation semantics passed, but `cargo test -p tinyvm-qjs --no-fail-fast` ended with 21 failing targets. Several were stale four-byte test readers, but existing performance courts also failed materially. |
+| C3 intercept | pass, non-promoting | 64 ASCII = **160 steps/call**; 6,000 ASCII = **160 steps/call**. |
+| C4 slope | pass, non-promoting | Absolute difference = **0 steps/call**. |
+| C5-C10 | not reached | C2 failure closes the decision tree before transferred-work, size, memory and downstream gates. |
+
+Representative C2 regressions that cannot honestly be classified as test-side
+record readers:
+
+- Array `join` over ten-byte Strings measured **573.9 steps/element**, missing
+  the existing `<260` court.
+- `JSON.stringify` of a 1,000-byte plain String measured **73 steps/byte**,
+  missing the existing `<50` court.
+- A journal-record stringify measured **68,490 steps**, missing `<60,000`.
+- A 30-property flat Object measured **1,536 steps/property**, missing
+  `<1,500`.
+- The long `includes`/`indexOf` and `split` courts also crossed their existing
+  limits (10.5 and 63.5 steps/character respectively). These are baseline
+  subtraction effects and construction scans introduced by the opted-in
+  representation, not evidence that the old limits should be raised.
+
+The C3/C4 probe was run after C1 and while the complete C2 inventory was being
+classified. That ordering deviated from §4's strict stop-at-C2 rule, but did
+not alter the verdict: the 160/160 result is recorded as diagnostic only and
+was not allowed to rescue C2. No criterion or existing performance limit was
+changed after seeing the measurements.
+
+Reproduction commands used before rollback:
+
+```sh
+cargo test -p tinyvm-qjs --test string_length_m3 -- --nocapture
+cargo test -p tinyvm-qjs --test length_cost \
+  static_length_dispatch_meets_the_frozen_intercept_and_slope -- --nocapture
+cargo test -p tinyvm-qjs --no-fail-fast
+```
+
+### Verdict trace
+
+`C1 pass → C2 fail → reject C`; C3/C4 happened to pass at the exact intercept
+ceiling but are not a later override branch. **Variant C is rejected.** The
+production four-byte record remains the winner. All engine and test changes
+were rolled back; this section is the only retained experiment artifact.
+
+The useful finding is narrower than “metadata is bad”: a static-key prefab can
+remove the last six steps and flatten `.length`, but eager publication through
+general post-construction scans makes existing multi-string workloads regress.
+A future experiment would have to pre-register direct per-producer metadata
+publication and its own compatibility courts; it may not reopen this verdict
+or silently relax the existing cost gates.
