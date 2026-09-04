@@ -359,6 +359,8 @@ pub(crate) mod m1 {
     pub(crate) const ENTRY: &str = super::ENTRY;
     pub(crate) const HOST_MODULE: &str = super::HOST_MODULE;
     pub(crate) const ALLOCATION_PROBE: &str = "__tinyvm_qjs_heap_ptr";
+    pub(crate) const JSON_PARSE_ALLOCATION_PROBE: &str = "__tinyvm_qjs_json_parse_bytes";
+    pub(crate) const JSON_STRINGIFY_ALLOCATION_PROBE: &str = "__tinyvm_qjs_json_stringify_bytes";
 
     /// Linear memory's page size, and wasm's own ceiling on how many pages a
     /// module may declare.
@@ -1169,19 +1171,79 @@ pub(crate) mod m1 {
     /// exists only in modules built through the explicit diagnostic entry
     /// points in `lib.rs`.
     pub(crate) fn add_allocation_probe(module: &mut ir::Module) {
+        let mut counters = Vec::new();
+        for (function_name, export_name) in [
+            ("__json_parse", JSON_PARSE_ALLOCATION_PROBE),
+            ("__json_stringify", JSON_STRINGIFY_ALLOCATION_PROBE),
+        ] {
+            let mark = module.globals.len() as u32;
+            let total = mark + 1;
+            module.globals.extend([
+                ir::Global {
+                    ty: ir::ValType::I32,
+                    mutable: true,
+                    init: ir::Const::I32(0),
+                },
+                ir::Global {
+                    ty: ir::ValType::I32,
+                    mutable: true,
+                    init: ir::Const::I32(0),
+                },
+            ]);
+            if let Some(target) = module
+                .funcs
+                .iter_mut()
+                .find(|function| function.name.as_deref() == Some(function_name))
+            {
+                instrument_allocations(&mut target.body, mark, total);
+            }
+            counters.push((export_name, total));
+        }
+
+        add_i32_global_getter(module, ALLOCATION_PROBE, HEAP_GLOBAL);
+        for (name, global) in counters {
+            add_i32_global_getter(module, name, global);
+        }
+    }
+
+    fn add_i32_global_getter(module: &mut ir::Module, name: &str, global: u32) {
         let type_index = intern(&mut module.types, Vec::new(), vec![ValType::I32]);
         let index = module.imports.len() as u32 + module.funcs.len() as u32;
         module.funcs.push(func(
-            ALLOCATION_PROBE.to_owned(),
+            name.to_owned(),
             None,
             type_index,
             Vec::new(),
-            vec![Ins::GlobalGet(HEAP_GLOBAL)],
+            vec![Ins::GlobalGet(global)],
         ));
         module.exports.push(ir::Export {
-            name: ALLOCATION_PROBE.to_owned(),
+            name: name.to_owned(),
             index,
         });
+    }
+
+    fn instrument_allocations(body: &mut Vec<ir::Ins>, mark: u32, total: u32) {
+        fn record(mark: u32, total: u32) -> [ir::Ins; 6] {
+            [
+                ir::Ins::GlobalGet(total),
+                ir::Ins::GlobalGet(HEAP_GLOBAL),
+                ir::Ins::GlobalGet(mark),
+                ir::Ins::I32Sub,
+                ir::Ins::I32Add,
+                ir::Ins::GlobalSet(total),
+            ]
+        }
+
+        let mut instrumented = Vec::with_capacity(body.len() + 16);
+        instrumented.extend([ir::Ins::GlobalGet(HEAP_GLOBAL), ir::Ins::GlobalSet(mark)]);
+        for instruction in body.drain(..) {
+            if instruction == ir::Ins::Return {
+                instrumented.extend(record(mark, total));
+            }
+            instrumented.push(instruction);
+        }
+        instrumented.extend(record(mark, total));
+        *body = instrumented;
     }
 
     /// What a function is called in the `name` custom section. The script is

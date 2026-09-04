@@ -8,12 +8,18 @@ use tinyvm_qjs::{
 };
 
 const PROBE: &str = "__tinyvm_qjs_heap_ptr";
+const PARSE_BYTES: &str = "__tinyvm_qjs_json_parse_bytes";
+const STRINGIFY_BYTES: &str = "__tinyvm_qjs_json_stringify_bytes";
 
-fn heap_ptr(values: Vec<Val>) -> i32 {
+fn i32_result(values: Vec<Val>) -> i32 {
     match values.as_slice() {
         [Val::I32(value)] => *value,
         other => panic!("unexpected allocation probe result: {other:?}"),
     }
+}
+
+fn read(instance: &mut tinyvm::WasmInstance, name: &str) -> i32 {
+    i32_result(instance.invoke_by_name(name, &[]).expect("probe runs"))
 }
 
 #[test]
@@ -22,6 +28,8 @@ fn ordinary_compilation_does_not_publish_the_probe() {
     let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
     let mut instance = module.instantiate().expect("instantiates");
     assert!(instance.invoke_by_name(PROBE, &[]).is_err());
+    assert!(instance.invoke_by_name(PARSE_BYTES, &[]).is_err());
+    assert!(instance.invoke_by_name(STRINGIFY_BYTES, &[]).is_err());
 }
 
 #[test]
@@ -34,9 +42,9 @@ fn probe_reads_the_waterline_without_moving_it() {
     let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
     let mut instance = module.instantiate().expect("instantiates");
 
-    let initial = heap_ptr(instance.invoke_by_name(PROBE, &[]).expect("probe runs"));
+    let initial = read(&mut instance, PROBE);
     assert_eq!(
-        heap_ptr(instance.invoke_by_name(PROBE, &[]).expect("probe runs")),
+        read(&mut instance, PROBE),
         initial,
         "the probe is read-only"
     );
@@ -44,10 +52,10 @@ fn probe_reads_the_waterline_without_moving_it() {
         .invoke_by_name("main", &Value::args(&[]))
         .expect("main runs");
     assert_eq!(Value::returned(&out), Ok(Value::Number(3.0)));
-    let after = heap_ptr(instance.invoke_by_name(PROBE, &[]).expect("probe runs"));
+    let after = read(&mut instance, PROBE);
     assert!(after > initial, "JSON.parse must move the bump waterline");
     assert_eq!(
-        heap_ptr(instance.invoke_by_name(PROBE, &[]).expect("probe runs")),
+        read(&mut instance, PROBE),
         after,
         "reading still allocates nothing"
     );
@@ -66,17 +74,13 @@ fn primitive_json_result_exposes_a_repeatable_dead_allocation_slope() {
     .expect("compiles");
     let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
     let mut instance = module.instantiate().expect("instantiates");
-    let mut waterlines = vec![heap_ptr(
-        instance.invoke_by_name(PROBE, &[]).expect("probe runs"),
-    )];
+    let mut waterlines = vec![read(&mut instance, PROBE)];
     for _ in 0..3 {
         let out = instance
             .invoke_by_name("main", &Value::args(&[]))
             .expect("main runs");
         assert_eq!(Value::returned(&out), Ok(Value::Number(2.0)));
-        waterlines.push(heap_ptr(
-            instance.invoke_by_name(PROBE, &[]).expect("probe runs"),
-        ));
+        waterlines.push(read(&mut instance, PROBE));
     }
     let deltas: Vec<i32> = waterlines
         .windows(2)
@@ -108,9 +112,35 @@ fn module_resolving_diagnostic_compile_has_the_same_probe() {
     .expect("compiles");
     let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
     let mut instance = module.instantiate().expect("instantiates");
-    let initial = heap_ptr(instance.invoke_by_name(PROBE, &[]).expect("probe runs"));
+    let initial = read(&mut instance, PROBE);
     instance
         .invoke_by_name("main", &Value::args(&[]))
         .expect("main runs");
-    assert!(heap_ptr(instance.invoke_by_name(PROBE, &[]).expect("probe runs")) > initial);
+    assert!(read(&mut instance, PROBE) > initial);
+}
+
+#[test]
+fn json_operation_counters_partition_their_own_allocations() {
+    let wasm = compile_qjs_m1_with_allocation_probe(
+        "return JSON.stringify(JSON.parse(\"[{\\\"name\\\":\\\"alpha\\\"}]\")).length;",
+        Options::default(),
+    )
+    .expect("compiles");
+    let module = WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads");
+    let mut instance = module.instantiate().expect("instantiates");
+    let start = read(&mut instance, PROBE);
+    assert_eq!(read(&mut instance, PARSE_BYTES), 0);
+    assert_eq!(read(&mut instance, STRINGIFY_BYTES), 0);
+    instance
+        .invoke_by_name("main", &Value::args(&[]))
+        .expect("main runs");
+    let parse = read(&mut instance, PARSE_BYTES);
+    let stringify = read(&mut instance, STRINGIFY_BYTES);
+    let allocated = read(&mut instance, PROBE) - start;
+    assert!(parse > 0, "parse allocation must be attributed");
+    assert!(stringify > 0, "stringify allocation must be attributed");
+    assert!(
+        parse + stringify <= allocated,
+        "operation counters cannot exceed whole-call allocation"
+    );
 }
