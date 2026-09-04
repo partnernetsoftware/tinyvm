@@ -45,14 +45,43 @@ enum SearchAttributionProbe {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchXorLowering {
+    Direct,
+    Arithmetic,
+}
+
+#[cfg(test)]
 thread_local! {
     static SEARCH_ATTRIBUTION_PROBE: std::cell::Cell<SearchAttributionProbe> =
         const { std::cell::Cell::new(SearchAttributionProbe::Full) };
+    static SEARCH_XOR_LOWERING: std::cell::Cell<SearchXorLowering> =
+        const { std::cell::Cell::new(SearchXorLowering::Direct) };
 }
 
 #[cfg(test)]
 fn search_attribution_probe() -> SearchAttributionProbe {
     SEARCH_ATTRIBUTION_PROBE.get()
+}
+
+fn window_xor(b: &mut Vec<Ins>, w: u32, p: u32) {
+    #[cfg(test)]
+    if SEARCH_XOR_LOWERING.get() == SearchXorLowering::Arithmetic {
+        b.push(Ins::LocalGet(w));
+        b.push(Ins::LocalGet(p));
+        b.push(Ins::I32Or);
+        b.push(Ins::LocalGet(w));
+        b.push(Ins::LocalGet(p));
+        b.push(Ins::I32And);
+        b.push(Ins::I32Sub);
+        b.push(Ins::LocalSet(w));
+        return;
+    }
+
+    b.push(Ins::LocalGet(w));
+    b.push(Ins::LocalGet(p));
+    b.push(Ins::I32Xor);
+    b.push(Ins::LocalSet(w));
 }
 
 /// Where this set sits, and where the unconditional runtime sits. The same
@@ -1325,9 +1354,8 @@ fn units() -> FnBuild {
 /// Skip the four haystack bytes at `i` when none of them is the needle's
 /// first byte, which is what most windows of a long haystack are: one
 /// `i32.load` and the has-zero-byte trick against `first * 0x01010101`
-/// -- `(x - 0x01010101) & ~x & 0x80808080` with `x` the xor -- spelled with
-/// `(a|b)-(a&b)` for the xor and `-1 - x` for the not, since the instruction
-/// set has neither. Emitted at the top of the position loop, after the
+/// -- `(x - 0x01010101) & ~x & 0x80808080` with `x` the xor. Emitted at the
+/// top of the position loop, after the
 /// bound check: when the window is clear the loop continues at `i + 4`
 /// (the bound check catches an overshoot); when it is not, the caller's
 /// byte verify runs at `i` as before. A 128 KiB miss went from ~36 to under
@@ -1351,15 +1379,10 @@ fn skip_clear_window(b: &mut Vec<Ins>, h: u32, i: u32, hl: u32, p: u32, w: u32) 
     b.push(Ins::I32Add);
     b.push(Ins::I32Load(0, 4));
     b.push(Ins::LocalSet(w));
-    // x = (w | p) - (w & p)   -- the xor
-    b.push(Ins::LocalGet(w));
-    b.push(Ins::LocalGet(p));
-    b.push(Ins::I32Or);
-    b.push(Ins::LocalGet(w));
-    b.push(Ins::LocalGet(p));
-    b.push(Ins::I32And);
-    b.push(Ins::I32Sub);
-    b.push(Ins::LocalSet(w));
+    // This used to predate the emitter's `i32.xor` and spell it as
+    // `(w | p) - (w & p)`. Direct XOR is the same identity with four fewer
+    // interpreted instructions per window.
+    window_xor(b, w, p);
     // z = (x - 0x01010101) & (-1 - x) & 0x80808080
     b.push(Ins::LocalGet(w));
     b.push(Ins::I32Const(0x0101_0101));
@@ -1722,17 +1745,30 @@ fn attribution_search_prefix(
 
 #[cfg(test)]
 mod string_search_attribution {
-    use super::{SEARCH_ATTRIBUTION_PROBE, SearchAttributionProbe};
+    use super::{
+        SEARCH_ATTRIBUTION_PROBE, SEARCH_XOR_LOWERING, SearchAttributionProbe, SearchXorLowering,
+    };
     use crate::{Value, compile_qjs_m1};
     use tinyvm::{Limits, WasmModule};
 
     const LENGTHS: &[u32] = &[7, 9, 11, 13];
 
     fn steps(probe: SearchAttributionProbe, source: &str) -> u64 {
+        measure(probe, SearchXorLowering::Direct, source).0
+    }
+
+    fn measure(
+        probe: SearchAttributionProbe,
+        xor: SearchXorLowering,
+        source: &str,
+    ) -> (u64, usize) {
         SEARCH_ATTRIBUTION_PROBE.set(probe);
+        SEARCH_XOR_LOWERING.set(xor);
         let compiled = compile_qjs_m1(source);
         SEARCH_ATTRIBUTION_PROBE.set(SearchAttributionProbe::Full);
+        SEARCH_XOR_LOWERING.set(SearchXorLowering::Direct);
         let wasm = compiled.unwrap_or_else(|error| panic!("compile {source:?}: {error}"));
+        let wasm_bytes = wasm.len();
         let module = WasmModule::from_bytes_with(
             &wasm,
             Limits {
@@ -1745,7 +1781,7 @@ mod string_search_attribution {
         instance
             .invoke_by_name("main", &Value::args(&[]))
             .unwrap_or_else(|error| panic!("run {source:?}: {}", error.message()));
-        instance.last_steps()
+        (instance.last_steps(), wasm_bytes)
     }
 
     fn build(seed: &str, doublings: u32) -> String {
@@ -1835,6 +1871,62 @@ mod string_search_attribution {
                 fits[3].1.0 - fits[2].1.0,
                 fits[4].1.0 - fits[3].1.0,
             );
+        }
+    }
+
+    #[test]
+    #[ignore = "research court: arithmetic versus direct XOR; run explicitly"]
+    fn direct_xor_is_measured_against_the_arithmetic_baseline() {
+        for (series, seed, needle, bytes_per_seed) in [
+            ("ascii", "0123456789abcdef", "z", 16_u64),
+            ("unicode", "é😀甲", "z", 9_u64),
+        ] {
+            for method in ["includes", "indexOf"] {
+                let mut arithmetic = Vec::new();
+                let mut direct = Vec::new();
+                println!("series,method,bytes,build,arithmetic,direct,arithmetic_wasm,direct_wasm");
+                for &doublings in LENGTHS {
+                    let bytes = bytes_per_seed * (1_u64 << doublings);
+                    let prefix = build(seed, doublings);
+                    let build_steps =
+                        steps(SearchAttributionProbe::Full, &format!("{prefix} return 0;"));
+                    let source = format!("{prefix} return s.{method}({needle:?});");
+                    let (arithmetic_steps, arithmetic_wasm) = measure(
+                        SearchAttributionProbe::Full,
+                        SearchXorLowering::Arithmetic,
+                        &source,
+                    );
+                    let (direct_steps, direct_wasm) = measure(
+                        SearchAttributionProbe::Full,
+                        SearchXorLowering::Direct,
+                        &source,
+                    );
+                    arithmetic.push((bytes, arithmetic_steps - build_steps));
+                    direct.push((bytes, direct_steps - build_steps));
+                    println!(
+                        "{series},{method},{bytes},{build_steps},{arithmetic_steps},{direct_steps},{arithmetic_wasm},{direct_wasm}"
+                    );
+                    assert!(
+                        direct_wasm <= arithmetic_wasm,
+                        "direct XOR grew {series} {method} module: {direct_wasm} > {arithmetic_wasm}"
+                    );
+                }
+                let arithmetic_fit = fit(&arithmetic);
+                let direct_fit = fit(&direct);
+                println!(
+                    "xor-fit series={series} method={method} denominator=byte arithmetic_slope={:.6} direct_slope={:.6} improvement={:.6} arithmetic_intercept={:.3} direct_intercept={:.3}",
+                    arithmetic_fit.0,
+                    direct_fit.0,
+                    arithmetic_fit.0 - direct_fit.0,
+                    arithmetic_fit.1,
+                    direct_fit.1,
+                );
+                assert!(direct_fit.0 < 10.0, "direct XOR slope did not clear <10");
+                assert!(
+                    arithmetic_fit.0 - direct_fit.0 >= 0.75,
+                    "direct XOR improvement was below 0.75 steps/byte"
+                );
+            }
         }
     }
 }

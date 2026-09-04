@@ -14,3 +14,6 @@ cargo test -p tinyvm-qjs \
 cargo test -p tinyvm-qjs \
   --lib string_search_attribution::cumulative_search_layers_are_attributed \
   -- --ignored --nocapture
+cargo test -p tinyvm-qjs \
+  --lib string_search_attribution::direct_xor_is_measured_against_the_arithmetic_baseline \
+  -- --ignored --nocapture
