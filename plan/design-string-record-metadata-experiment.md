@@ -1,6 +1,6 @@
 # String record metadata: decisive experiment
 
-Status: **specified; implementation and verdict pending**
+Status: **completed; Variant B rejected and implementation rolled back**
 
 Baseline: `f31dfcc` repository state; qjswasm engine code is unchanged from
 `028a914`.
@@ -223,4 +223,66 @@ cargo test -p tinyvm-qjs --test length_cost --test char_access_cost -- --nocaptu
 
 ## Variant B results and verdict
 
-Pending. Do not edit the criteria above when filling this section.
+Measured on the same host and pinned toolchain from clean source states. The
+Variant B measurements below were taken from the complete experimental diff
+before that diff was rolled back. VM steps, rather than wall time, are the
+decision authority; wall time was recorded for the `only_chars` rows as a
+diagnostic but varied with host scheduling.
+
+| Probe | Variant A | Variant B | Frozen gate |
+|---|---:|---:|---|
+| repeated `.length`, 64 ASCII | 538/call | 166/call | B long ≤160; short/long Δ≤16 |
+| repeated `.length`, 6,000 ASCII | 19,830/call | **166/call** | **fail: 166 > 160** |
+| `charCodeAt(3)` | 356 | 82 | slope evidence |
+| `charCodeAt(63)` | 880 | 82 | slope evidence |
+| `charCodeAt(999)` | 5,560 | 82 | pass: ≤320 |
+| `charCodeAt(5,999)` | 30,560 | 82 | slope evidence |
+| `s[3]` | 421 | 164 | slope evidence |
+| `s[63]` | 945 | 164 | slope evidence |
+| `s[999]` | 5,625 | 164 | pass: ≤320 |
+| `s[5,999]` | 30,587 | 164 | slope evidence |
+| all 1,000 positions, `charCodeAt` | 3,009,139 | 228,053 | pass: ≤600,000 |
+| `only_chars`, 10 bytes | 24,712 | 6,957 (3.55×) | diagnostic |
+| `only_chars`, 40 bytes | 103,221 | 27,507 (3.75×) | diagnostic |
+| `only_chars`, 160 bytes | 522,471 | 109,707 (4.76×) | pass: ≥3× |
+| `only_chars`, 640 bytes | 3,855,471 | 438,507 (8.79×) | pass: ≥3× |
+| B `only_chars` 640/160 per-byte ratio | — | 1.00 | pass: ≤1.35 |
+
+The B court also established these Boolean facts before the failing gate ended
+the experiment:
+
+- empty, ASCII, 2/3/4-byte UTF-8, mixed text and the two sides of a surrogate
+  pair remained correct;
+- literals, concatenation, trim, slice/substring, case conversion, decimal
+  number conversion, JSON parse and JSON stringify produced correct metadata;
+- the external `StrPtrLen` door still received the body pointer and UTF-8 byte
+  length rather than the widened header;
+- the chosen module carried one explicit record layout and a module marker;
+  public fault-detail decoding did not infer a layout from arbitrary record
+  bytes;
+- the non-participating program `let x = 40; return x + 2;` was exactly 10,232
+  wasm bytes under both A and B source states.
+
+The complete-suite rehearsal was intentionally not converted into new frozen
+price pins after the quantitative failure. It reached 33 failing integration
+test targets: the semantic failures observed were old test-side four-byte
+record readers, while the remainder were exact-size or historical lower-bound
+cost assertions invalidated by the experimental representation. Updating all
+of those witnesses, measuring opted-in wasm growth/string count and measuring
+representative peak pages cannot rescue the already-failed 160-step gate, so
+the decision tree stops before those promotion-only measurements. They are
+therefore recorded as **not reached**, not as passes.
+
+### Verdict
+
+**Reject Variant B and keep Variant A.** The widened record flattened every
+target slope and passed the positional and `only_chars` thresholds, but its
+best general `.length` lowering cost 166 VM steps per call. The precommitted
+limit is 160 and is not movable after measurement. Per the decision tree, that
+single quantitative miss is decisive. All compiler/runtime/test changes for B
+were rolled back; this result section is the only retained experiment change.
+
+A later experiment may attack the generic member-access/lowering overhead or
+introduce a loop/iterator optimization, but it must be specified separately.
+It must not relabel 166 as passing this experiment and must retain Variant A's
+four-byte String record until another precommitted court selects a replacement.
