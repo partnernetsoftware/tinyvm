@@ -188,6 +188,14 @@ numbers are checked into `RESULTS.md`.
 
 ## 8. Results and verdict
 
-Not run. This section must be filled with the C0-C8 table, exact decision-tree
-trace, deviations, an explicit statement that the measures were not changed to
-improve the verdict, and every result that contradicted the initial hypothesis.
+**Partial, no engine verdict yet.** The dual-control court at `82b6491` closes
+the ruler exactly: independent `.length` slope 3.2500, absolute search slope
+10.5000, historical slope 7.2500 steps/character for both `includes` and
+`indexOf`. Thus 10.5000 − 7.2500 = 3.2500. C0, C1 and C3 pass; C8 passes for
+this phase. P0-dispatch through P4-miss and the Unicode series have not run, so
+C2 and C4-C7 remain pending and the tree cannot select an owner.
+
+Full raw totals, exact identity, commands and the explicit preservation of the
+historical REJECT are in
+`research/string-search-cost-attribution/RESULTS.md`. No threshold, String
+layout, counter or engine byte changed after observing the measurements.
