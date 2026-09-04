@@ -189,14 +189,20 @@ numbers are checked into `RESULTS.md`.
 
 ## 8. Results and verdict
 
-**Partial, no engine verdict yet.** The dual-control court at `82b6491` closes
-the ruler exactly: independent `.length` slope 3.2500, absolute search slope
-10.5000, historical slope 7.2500 steps/character for both `includes` and
-`indexOf`. Thus 10.5000 − 7.2500 = 3.2500. C0, C1 and C3 pass; C8 passes for
-this phase. P0-dispatch through P4-miss and the Unicode series have not run, so
-C2 and C4-C7 remain pending and the tree cannot select an owner.
+**Decided: the has-zero-byte comparison and clear-window branch own the next
+experiment.** At exact court SHA `e7c9097`, the absolute miss slope decomposes
+as 2.7500 loop + 1.2500 load + **6.5000 compare/branch** + 0.0000 exact/miss =
+10.5000 steps per byte. All four-point fits have zero measured residual. The
+same per-byte slopes repeat on valid UTF-8; code-point and UTF-16-unit views are
+reported separately rather than compared across denominators.
 
-Full raw totals, exact identity, commands and the explicit preservation of the
-historical REJECT are in
-`research/string-search-cost-attribution/RESULTS.md`. No threshold, String
-layout, counter or engine byte changed after observing the measurements.
+Decision trace: C0/C1 pass → C2/C3/C4 pass → C5 selects compare/branch because
+6.5000 exceeds the frozen 0.50 threshold → freeze one orthogonal
+instruction/branch-lowering experiment. C6 records a 76-step fixed dispatch
+intercept and no additional P4 slope; C7/C8 pass. The historical direct
+metadata verdict remains REJECT, and production code, String layout, operation
+counter and `<10` gate are unchanged.
+
+Full raw totals, exact identity, commands, source hashes, denominator
+translations and deviations are in
+`research/string-search-cost-attribution/RESULTS.md`.
