@@ -83,6 +83,22 @@ fn declared(hosts: Vec<HostFn>) -> Options {
     }
 }
 
+#[test]
+fn a_declared_host_name_in_value_position_is_a_named_compile_failure() {
+    for source in ["return typeof reply;", "let f = reply; return f;"] {
+        let error = compile(source, declared(table())).expect_err("bare host value must fail");
+        assert_eq!(error.boundary, Boundary::ThirdBinding);
+        assert!(
+            error
+                .message
+                .contains("cannot use host function `reply` as a value"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("call it with parentheses"));
+    }
+}
+
 // =========================================================================
 // Harness
 // =========================================================================

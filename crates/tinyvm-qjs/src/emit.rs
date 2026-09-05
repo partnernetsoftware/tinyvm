@@ -621,7 +621,7 @@ pub(crate) mod m1 {
         options: &Options,
         allocation_probe: bool,
     ) -> Result<ir::Module, CompileError> {
-        let scan = scan(program)?;
+        let scan = scan(program, matches!(options.names, Names::Declared(_)))?;
         let table = match &options.names {
             Names::Declared(decls) => Table::Raw(bind(decls, &scan)?),
             _ => Table::Pairs(scan.hosts()),
@@ -1601,6 +1601,10 @@ pub(crate) mod m1 {
     /// disagree with the first about which expressions those are.
     #[derive(Debug, Default)]
     struct Scan {
+        /// A declared embedder door must only be invoked at an explicit call
+        /// site. The legacy generic import mode retains its M0 bare-name call
+        /// for compatibility.
+        reject_bare_host_values: bool,
         /// Every host name the program calls, sorted and deduplicated.
         ///
         /// A wasm import has one signature, so a name used at two arities has
@@ -1790,8 +1794,11 @@ pub(crate) mod m1 {
         }
     }
 
-    fn scan(program: &ast::Program) -> Result<Scan, CompileError> {
-        let mut out = Scan::default();
+    fn scan(program: &ast::Program, reject_bare_host_values: bool) -> Result<Scan, CompileError> {
+        let mut out = Scan {
+            reject_bare_host_values,
+            ..Scan::default()
+        };
         for function in &program.functions {
             for stmt in &function.body {
                 host_stmt(program, stmt, &mut out)?;
@@ -1954,8 +1961,17 @@ pub(crate) mod m1 {
                 scan.function_values = true;
                 Ok(())
             }
-            // A bare host name is a zero-argument call, as it is at M0.
+            // The legacy HostImport mode keeps M0's bare-name zero-argument
+            // call. A declared embedder door has real function signatures,
+            // so silently calling it from a value position would invent an
+            // effect the script never wrote. Fail at the source occurrence.
             ast::ExprKind::Name(name) => match &name.res {
+                ast::Res::Host(text) if scan.reject_bare_host_values => Err(host_table(
+                    &format!(
+                        "cannot use host function `{text}` as a value; call it with parentheses"
+                    ),
+                    expr.span.offset(),
+                )),
                 ast::Res::Host(text) => note_host(scan, text, 0, expr.span),
                 // A name bound to a known function, read and not called. The
                 // read is the constant function value.
