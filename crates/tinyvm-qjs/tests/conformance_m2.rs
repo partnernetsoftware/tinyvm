@@ -1474,7 +1474,6 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     ("2 ** 3", "exponentiation"),
     // The seven bitwise and shift forms left this table on 2026-08-31;
     // `tests/bitwise_conformance.rs` is where their answers are asserted.
-    ("null ?? 1", "the nullish coalescing operator"),
     ("let x = 1; x ||= 2; return x;", "logical assignment"),
     ("let x = 1; x &&= 2; return x;", "logical assignment"),
     ("let x = 1; x **= 2; return x;", "assignment"),

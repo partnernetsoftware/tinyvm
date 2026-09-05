@@ -4791,8 +4791,8 @@ pub(crate) mod m1 {
             Ok(())
         }
 
-        /// `&&` and `||`, which yield an *operand* and evaluate the right one
-        /// only if the left says so (ECMA-262 13.13).
+        /// `&&`, `||`, and `??`, which yield an *operand* and evaluate the
+        /// right one only if the left says so (ECMA-262 13.13).
         ///
         /// The result goes through a scratch local rather than a typed block,
         /// because `repr`'s `BlockType` has only `Empty`: a block that yields
@@ -4807,13 +4807,22 @@ pub(crate) mod m1 {
             let slot = self.take();
             self.expr(lhs)?;
             store_local(slot, &mut self.f.body);
-            load_local(slot, &mut self.f.body);
-            let truthy = self.ctx.call(Rt::Truthy);
-            self.push(truthy);
-            // `&&` takes the right operand when the left is truthy; `||` when
-            // it is not.
-            if op == ast::LogicalOp::Or {
-                self.push(Ins::I32Eqz);
+            match op {
+                // `&&` takes the right operand when the left is truthy; `||`
+                // when it is not. Both use the same ToBoolean implementation
+                // as conditions everywhere else.
+                ast::LogicalOp::And | ast::LogicalOp::Or => {
+                    load_local(slot, &mut self.f.body);
+                    let truthy = self.ctx.call(Rt::Truthy);
+                    self.push(truthy);
+                    if op == ast::LogicalOp::Or {
+                        self.push(Ins::I32Eqz);
+                    }
+                }
+                // CoalesceExpression evaluates the right operand only for the
+                // two nullish tags; false, zero and the empty string are
+                // values, not absence.
+                ast::LogicalOp::Nullish => is_nullish(slot, &mut self.f.body),
             }
             self.push(Ins::If(BlockType::Empty));
             self.expr(rhs)?;

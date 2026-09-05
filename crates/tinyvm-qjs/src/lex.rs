@@ -141,6 +141,10 @@ pub(crate) enum TokenKind {
     /// a lone `?` spells. `??` and `?.` are their own lexemes, read before
     /// this one.
     Question,
+    /// `??` -- nullish coalescing. Kept separate from `?` so the parser can
+    /// place it on the short-circuit ladder and refuse ambiguous mixing with
+    /// `&&` / `||` instead of tokenising it as two conditionals.
+    Nullish,
     /// `?.` -- the first optional-chain slice. Kept distinct from `?` + `.`
     /// so the parser can preserve its single-evaluation and short-circuit
     /// semantics instead of approximating it as a conditional expression.
@@ -245,6 +249,7 @@ impl TokenKind {
             Self::Dot => "a `.`",
             Self::Colon => "a `:`",
             Self::Question => "a `?`",
+            Self::Nullish => "a `??`",
             Self::OptionalChain => "a `?.`",
             Self::Semi => "a `;`",
             Self::Comma => "a `,`",
@@ -369,6 +374,9 @@ impl TokenKind {
             // pipeline, which is a live caller of this table -- so the phrase
             // stays, and `parse::Parser::program` is where M0 spends it.
             Self::Question => (Boundary::Subset, "conditional expressions"),
+            // M1 lowers the operator; M0 still reaches this table and keeps
+            // the same named boundary as before the token graduated.
+            Self::Nullish => (Boundary::Subset, "the nullish coalescing operator"),
             // The M1 front end lowers the exact terminal property-access
             // slice; M0 and every unsupported position retain the same named
             // boundary this token had before it graduated.
@@ -1121,7 +1129,7 @@ impl Lexer<'_> {
             [b'>', b'=', ..] => (2, TokenKind::GtEq),
             [b'&', b'&', ..] => (2, TokenKind::AmpAmp),
             [b'|', b'|', ..] => (2, TokenKind::PipePipe),
-            [b'?', b'?', ..] => (2, subset("the nullish coalescing operator")),
+            [b'?', b'?', ..] => (2, TokenKind::Nullish),
             [b'?', b'.', ..] => (2, TokenKind::OptionalChain),
             [b'+', b'=', ..] => (2, TokenKind::PlusEq),
             [b'-', b'=', ..] => (2, TokenKind::MinusEq),

@@ -1472,7 +1472,6 @@ fn a_capability_phrase_is_right_where_the_capability_really_is_missing() {
             "switch (1) { }",
             "does not support the `switch` keyword yet",
         ),
-        ("return \"a\" ?? \"b\";", "nullish coalescing"),
         ("return 1 ** 2;", "exponentiation"),
         ("return 1 ** 2 ** 3;", "exponentiation"),
         ("lbl: { }", "labelled statements"),

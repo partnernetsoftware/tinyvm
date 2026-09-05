@@ -643,5 +643,9 @@ pub(crate) mod m1 {
     pub(crate) enum LogicalOp {
         And,
         Or,
+        /// `??`: chooses the right operand only when the left is Null or
+        /// Undefined. It shares the one-operand-result shape with `&&`/`||`,
+        /// but not their ToBoolean decision.
+        Nullish,
     }
 }

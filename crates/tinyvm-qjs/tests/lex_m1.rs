@@ -119,6 +119,10 @@ fn punctuation_is_real_tokens() {
             RBracket
         ]
     );
+    assert_eq!(
+        kinds("x ?? y"),
+        vec![Ident("x".into()), Nullish, Ident("y".into())]
+    );
 }
 
 #[test]

@@ -161,6 +161,7 @@ fn sexpr(e: &Expr) -> String {
             let op = match op {
                 LogicalOp::And => "&&",
                 LogicalOp::Or => "||",
+                LogicalOp::Nullish => "??",
             };
             format!("({op} {} {})", sexpr(l), sexpr(r))
         }
@@ -487,6 +488,32 @@ fn optional_property_access_has_its_own_tree_shape() {
         assert_eq!(
             err(source).message,
             "this engine does not support optional-chain continuations after the first property access yet"
+        );
+    }
+}
+
+#[test]
+fn nullish_coalescing_has_the_short_circuit_precedence() {
+    assert_eq!(shape("null ?? 1 + 2"), "(?? null (+ 1 2))");
+    assert_eq!(shape("null ?? 1 === 1"), "(?? null (=== 1 1))");
+    assert_eq!(shape("null ?? 1 ? 2 : 3"), "(?: (?? null 1) 2 3)");
+    assert_eq!(
+        shape("null ?? undefined ?? 3"),
+        "(?? (?? null undefined) 3)"
+    );
+}
+
+#[test]
+fn mixing_nullish_and_boolean_short_circuit_is_named_not_misparsed() {
+    for source in [
+        "return true || null ?? 1;",
+        "return null ?? false || true;",
+        "return true && null ?? 1;",
+        "return null ?? (false && true);",
+    ] {
+        assert_eq!(
+            err(source).message,
+            "this engine does not support combining `??` with `&&` or `||` in this subset yet"
         );
     }
 }
@@ -821,8 +848,6 @@ fn what_the_front_end_cannot_read_yet_names_the_construct() {
         ("a: 1;", "labelled statements"),
         ("2 ** 3;", "exponentiation"),
         // `1 & 2;` left this table when the bitwise operators landed
-        // (2026-08-31); `??` is the operator still ahead of the engine.
-        ("1 ?? 2;", "nullish"),
     ] {
         let message = refuse(source);
         assert!(

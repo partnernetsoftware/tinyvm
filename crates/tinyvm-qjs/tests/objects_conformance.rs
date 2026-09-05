@@ -1423,11 +1423,7 @@ fn spread_and_destructuring_are_refused() {
 fn the_neighbouring_syntax_is_refused_by_name() {
     number("const o = { a: 7 }; return o?.a;", 7.0);
     number("const o = { a: 7 }; return o?.[\"a\"];", 7.0);
-    refuses_capability(
-        "const o = {}; return o.a ?? 1;",
-        "the nullish coalescing operator",
-        Boundary::Subset,
-    );
+    number("const o = {}; return o.a ?? 1;", 1.0);
     // A template literal used to be an entry here. It landed, and what it
     // reaches for at this boundary -- a property read inside a substitution,
     // then `ToString` of the number it found -- now works end to end.

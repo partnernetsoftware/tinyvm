@@ -78,12 +78,15 @@ instance's linear memory, not text, and resolving it needs the instance.
   prototype (so `f.call`, `f.bind` and `f.length` are a trap and not a
   method).
 - **Operators**: every rung the ladder has — assignment and its compound forms,
-  the conditional `? :`, `||`, `&&`, `==`/`!=`/`===`/`!==`, `<` `<=` `>` `>=`,
+  the conditional `? :`, `??`, `||`, `&&`, `==`/`!=`/`===`/`!==`, `<` `<=` `>` `>=`,
   `+` `-`, `*` `/` `%`, prefix and postfix `++`/`--`, unary `+ - !`, and
   grouping. `?:` is right-associative and only the taken branch evaluates
   (13.14), which is checked by an observable side effect rather than by reading
-  the emitted code. `&&` and `||`
-  short-circuit; `+` concatenates when **either** side is a String, running
+  the emitted code. `??` evaluates its right operand only when the left is
+  `null` or `undefined`; `false`, `0`, and the empty string are retained. This
+  first slice refuses every combination of `??` with `&&` or `||` by name,
+  including parenthesized combinations, and does not include `??=`. `&&` and
+  `||` short-circuit; `+` concatenates when **either** side is a String, running
   ToString on both — ECMA-262 13.15.3 step 1.d, and see "The three
   conversions" below. `%` is
   ECMA-262's remainder, with the sign of the dividend and exact for operands a

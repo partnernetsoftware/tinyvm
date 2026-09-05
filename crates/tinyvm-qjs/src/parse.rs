@@ -318,7 +318,9 @@ pub(crate) mod m1 {
     ///
     /// The rungs JavaScript defines between these are absent because their
     /// tokens are still [`TokenKind::Unsupported`] -- the comma operator, the
-    /// bitwise and shift levels, `??`, `**`. Each arrives as one row.
+    /// bitwise and shift levels and `**`. Each arrives as one row. `??` now
+    /// shares the short-circuit rung with `||`, while direct mixing of the two
+    /// logical grammars is a named refusal below.
     ///
     /// `?:` is the exception: it has a rung here and no row in [`infix`],
     /// because its middle operand sits *between* two tokens and the table has
@@ -330,6 +332,7 @@ pub(crate) mod m1 {
     /// : AssignmentExpression`. Landing it is what pushed every rung above it
     /// up by two; the numbers themselves mean nothing but their order.
     const BP_CONDITIONAL: u8 = 4;
+    const BP_NULLISH: u8 = 6;
     const BP_OR: u8 = 6;
     const BP_AND: u8 = 8;
     /// ECMA-262 13.12: `|`, then `^`, then `&`, each binding tighter than
@@ -2675,7 +2678,24 @@ pub(crate) mod m1 {
                 let span = lhs.span;
                 let kind = match what {
                     Infix::Binary(op) => ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)),
-                    Infix::Logical(op) => ExprKind::Logical(op, Box::new(lhs), Box::new(rhs)),
+                    Infix::Logical(op) => {
+                        let mixes = match op {
+                            LogicalOp::Nullish => {
+                                is_boolean_logical(&lhs) || is_boolean_logical(&rhs)
+                            }
+                            LogicalOp::And | LogicalOp::Or => {
+                                is_nullish_logical(&lhs) || is_nullish_logical(&rhs)
+                            }
+                        };
+                        if mixes {
+                            return Err(unsupported(
+                                Boundary::Subset,
+                                "combining `??` with `&&` or `||` in this subset",
+                                at,
+                            ));
+                        }
+                        ExprKind::Logical(op, Box::new(lhs), Box::new(rhs))
+                    }
                     Infix::Assign(op) => {
                         if !self.assignable(&lhs) {
                             return Err(malformed(
@@ -3825,6 +3845,17 @@ pub(crate) mod m1 {
         Assign(Option<BinaryOp>),
     }
 
+    fn is_boolean_logical(expr: &Expr) -> bool {
+        matches!(
+            expr.kind,
+            ExprKind::Logical(LogicalOp::And | LogicalOp::Or, ..)
+        )
+    }
+
+    fn is_nullish_logical(expr: &Expr) -> bool {
+        matches!(expr.kind, ExprKind::Logical(LogicalOp::Nullish, ..))
+    }
+
     /// The binding-power table: `(what it builds, left power, right power)`.
     ///
     /// `right = left + 1` is what makes a level left associative -- the loop
@@ -3849,6 +3880,7 @@ pub(crate) mod m1 {
             T::UShrEq => (Infix::Assign(Some(BinaryOp::UShr)), BP_ASSIGN),
             T::PipePipe => (Infix::Logical(LogicalOp::Or), BP_OR),
             T::AmpAmp => (Infix::Logical(LogicalOp::And), BP_AND),
+            T::Nullish => (Infix::Logical(LogicalOp::Nullish), BP_NULLISH),
             T::Pipe => (Infix::Binary(BinaryOp::BitOr), BP_BITOR),
             T::Caret => (Infix::Binary(BinaryOp::BitXor), BP_BITXOR),
             T::Amp => (Infix::Binary(BinaryOp::BitAnd), BP_BITAND),
