@@ -415,9 +415,9 @@ library's ~130 member accesses.
 
 ## What it does not compile, and how it says so
 
-Arrays, closures that capture, `this`, arrow functions, `class`, `for…of`,
-`break`/`continue`, `switch`, template literals, the bitwise and shift levels,
-the comma operator, `**`, `??`, BigInt, and the numeric literal forms above.
+`this`, `class`, `for…in`, `switch`, tagged templates, the comma operator,
+`**`, `??`, BigInt, numeric separators, and array elisions remain outside the
+subset.
 
 `?:`, `throw`/`try` and `JSON` came off that list, and one consequence is
 worth stating because it changes what a diagnostic says: `Object.keys(o)` stops

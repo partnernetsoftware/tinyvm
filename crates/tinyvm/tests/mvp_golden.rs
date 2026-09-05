@@ -656,7 +656,7 @@ fn parse_prd_leaves(prd: &str, marker: &str) -> Vec<String> {
 // `prd/PRD.md`'s acceptance section now writes the command set down, with this
 // package in it, so the next gap is caught by the gate rather than by someone
 // deciding to look.
-const LEAF_TESTS: [(&str, &str); 279] = [
+const LEAF_TESTS: [(&str, &str); 280] = [
     (
         "`toUpperCase`：小写表反转 + ASCII −32               2026-08-31；ς→Σ 手补；ß/µ/四个 titlecase 原样（记录的分歧，简单映射如此）；8 984 B 只有大写者付，两表各自门控",
         "the_inverted_table_reaches_the_same_pairs_backwards",
@@ -736,6 +736,10 @@ const LEAF_TESTS: [(&str, &str); 279] = [
     (
         "`for … of` over an array (13.7.5)              折成索引循环，无新节点",
         "it_visits_every_element_in_order",
+    ),
+    (
+        "无声明形式 `for (x of y)`                    普通/成员目标；先取迭代值再求目标；`for_of_m3`",
+        "an_assignment_target_can_be_the_loop_variable",
     ),
     (
         "元素每轮是新绑定                             白拿：声明在循环体里",
@@ -1817,7 +1821,7 @@ const STALE_HINTS: &[(&str, &str)] = &[
         "push_mutates_the_receiver_and_returns_the_new_length",
     ), // method_conformance.rs
     ("push / pop / map", "map_calls_back_into_a_function_value"), // method_conformance.rs
-    // Open leaves, test names chosen now so the row exists before the work.
+    // Regression rows whose tests were named before the work started.
     (
         "无声明形式 `for (x of y)`",
         "an_assignment_target_can_be_the_loop_variable",

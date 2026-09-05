@@ -1537,10 +1537,8 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     ("void 0;", "the `void` keyword"),
     ("1 instanceof Object;", "the `instanceof` keyword"),
     ("for (let k in o) { }", "the `in` keyword"),
-    // `for (let k of …)` compiles since 2026-08-29 and is no longer a
-    // capability boundary. The declarationless form still is: its target can
-    // be any assignment target, which is a different lowering.
-    ("for (k of o) { }", "the `of` keyword"),
+    // Both declaration and assignment-target `for … of` forms compile; the
+    // separate `for … in` property-enumeration construct remains a boundary.
     ("async function f() { }", "the `async` keyword"),
     ("await 1;", "the `await` keyword"),
     ("yield 1;", "the `yield` keyword"),

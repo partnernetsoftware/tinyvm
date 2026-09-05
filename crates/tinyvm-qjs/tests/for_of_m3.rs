@@ -179,9 +179,9 @@ fn nested_loops_do_not_collide() {
 /// ECMA-262 makes `of` a *contextual* keyword -- `let of = 7` is legal
 /// JavaScript. This engine's lexer keeps it in the contextual-keyword list
 /// that turns an unlowerable phrase into a sentence naming it, and this change
-/// deliberately leaves that list alone: `for (x of y)` with no declaration is
-/// still unsupported and still needs that sentence, so removing `of` from the
-/// list would trade one honest refusal for a worse one.
+/// deliberately leaves that list alone. The parser recognizes `of` only as
+/// the delimiter in a `for` header, so removing it from the list would also
+/// admit an identifier whose binding semantics have not been implemented.
 ///
 /// The divergence is small and real. It is written down here so that removing
 /// it is a decision someone makes on purpose.
@@ -193,21 +193,62 @@ fn of_is_not_yet_usable_as_a_variable_name() {
     );
 }
 
-/// `for (x of y)` without a declaration keeps its old refusal.
-///
-/// Only the declaration form is folded. Assigning each element to an existing
-/// binding is a different lowering -- the target can be any assignment target,
-/// including a member expression -- and pretending otherwise would be the
-/// silent-wrong-answer shape this whole feature is guarded against.
+/// `for (x of y)` assigns each element to the existing binding. It declares
+/// nothing: the value after the final pass remains visible outside the loop.
 #[test]
-fn the_declarationless_form_is_still_refused_by_name() {
-    let error = compile_qjs_m1("const y = [1]; for (x of y) { }  return 1;")
-        .expect_err("no declaration keyword, so this is not the folded form");
-    let message = format!("{error}");
-    assert!(
-        message.contains("of"),
-        "the refusal must name what it cannot lower, got {message}"
+fn an_assignment_target_can_be_the_loop_variable() {
+    assert_eq!(text("let x = 0; for (x of [1,2,3]) { } return x;"), "3");
+}
+
+/// The target is an AssignmentTarget, not just a name. Both static and
+/// computed member forms are evaluated afresh on every pass.
+#[test]
+fn the_declarationless_form_writes_member_targets() {
+    assert_eq!(
+        text("let o = {slot:0}; for (o.slot of [2,4]) { } return o.slot;"),
+        "4"
     );
+    assert_eq!(
+        text(
+            "let out = [0,0]; let i = 0;
+             for (out[i++] of [7,8]) { }
+             return \"\" + out[0] + out[1] + i;"
+        ),
+        "782"
+    );
+    assert_eq!(
+        text("let o = {of:0}; for (o.of of [1,2]) { } return o.of;"),
+        "2"
+    );
+}
+
+/// 13.7.5.13 obtains the iterator value before evaluating an assignment
+/// target. Ordinary assignment evaluates its target first, so the fold keeps
+/// the element in a hidden per-iteration binding before calling `holder`.
+#[test]
+fn the_element_is_read_before_a_member_target_is_evaluated() {
+    let source = "let source = [10]; let out = {slot:0};
+        function holder() { source[0] = 99; return out; }
+        for (holder().slot of source) { }
+        return out.slot;";
+    assert_eq!(text(source), "10");
+}
+
+/// The assignment form must not bypass the same write rules as `x = value`:
+/// a const, function/host name, unresolved name or non-target remains a
+/// compile-time refusal.
+#[test]
+fn the_declarationless_form_keeps_assignment_target_refusals() {
+    for source in [
+        "const x = 0; for (x of [1]) { } return x;",
+        "for (missing of [1]) { } return 1;",
+        "let x = 0; for (x + 1 of [1]) { } return x;",
+    ] {
+        assert!(
+            compile_qjs_m1(source).is_err(),
+            "{source:?} must retain the ordinary assignment refusal"
+        );
+    }
 }
 
 /// A string is refused, loudly, rather than iterated by index.

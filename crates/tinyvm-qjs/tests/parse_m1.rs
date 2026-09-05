@@ -794,7 +794,6 @@ fn what_the_front_end_cannot_read_yet_names_the_construct() {
         // `1 & 2;` left this table when the bitwise operators landed
         // (2026-08-31); `??` is the operator still ahead of the engine.
         ("1 ?? 2;", "nullish"),
-        ("for (x of y) { 1; }", "of"),
     ] {
         let message = refuse(source);
         assert!(

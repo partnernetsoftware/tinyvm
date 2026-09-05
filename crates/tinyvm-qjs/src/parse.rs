@@ -523,6 +523,10 @@ pub(crate) mod m1 {
         Call,
     }
 
+    fn contextual_of(kind: &TokenKind) -> bool {
+        matches!(kind, TokenKind::Unsupported(word) if word.phrase.contains("`of`"))
+    }
+
     impl Parser<'_> {
         // -- cursor ----------------------------------------------------------
 
@@ -1754,37 +1758,66 @@ pub(crate) mod m1 {
             false
         }
 
-        /// Whether the header reads `let`/`const`/`var` NAME `of`.
+        /// Whether the header is one of the two `for … of` heads this subset
+        /// lowers: `let`/`const`/`var` NAME `of`, or AssignmentTarget `of`.
         ///
         /// Three tokens of lookahead rather than a token test, because the
         /// declaration keyword alone does not distinguish `for (let i = 0;`
         /// from `for (let x of`.
         ///
         /// `of` reaches here as [`TokenKind::Unsupported`] and not as an
-        /// identifier. That is the lexer's contextual-keyword list, which
-        /// exists to turn an unlowerable phrase into a sentence naming it, and
-        /// it is **left alone** by this change even though this form is
-        /// lowerable now. Two reasons: `for (x of y)` with no declaration is
-        /// still not supported and still needs that sentence, and `of` is a
-        /// legal identifier in ECMA-262 that this engine refuses -- a
-        /// divergence worth removing on its own terms rather than as a side
-        /// effect here.
+        /// identifier. That is still useful: this lookahead can distinguish
+        /// the contextual delimiter from a semicolon without teaching the
+        /// lexer a context it does not own. A property named `of` is not the
+        /// delimiter (`target.of of values`), so a dot immediately before the
+        /// word excludes that occurrence. Nested brackets/parentheses are
+        /// skipped; their contents belong to the assignment target.
+        ///
+        /// The lexer still refuses `of` as an ordinary variable name. That is
+        /// a separate recorded divergence; accepting both `for` forms must
+        /// not silently turn a context-sensitive lexical decision into a
+        /// global one.
         fn at_for_of_head(&self) -> bool {
-            if !matches!(
+            if matches!(
                 self.kind(),
                 TokenKind::Let | TokenKind::Const | TokenKind::Var
             ) {
-                return false;
+                let name = matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                    Some(TokenKind::Ident(_))
+                );
+                let of = self
+                    .tokens
+                    .get(self.pos + 2)
+                    .is_some_and(|token| contextual_of(&token.kind));
+                return name && of;
             }
-            let name = matches!(
-                self.tokens.get(self.pos + 1).map(|t| &t.kind),
-                Some(TokenKind::Ident(_))
-            );
-            let of = matches!(
-                self.tokens.get(self.pos + 2).map(|t| &t.kind),
-                Some(TokenKind::Unsupported(word)) if word.phrase.contains("`of`")
-            );
-            name && of
+
+            let mut parens = 0u32;
+            let mut brackets = 0u32;
+            for (offset, token) in self.tokens[self.pos..].iter().enumerate() {
+                match &token.kind {
+                    TokenKind::LParen => parens += 1,
+                    TokenKind::RParen if parens > 0 => parens -= 1,
+                    TokenKind::LBracket => brackets += 1,
+                    TokenKind::RBracket if brackets > 0 => brackets -= 1,
+                    TokenKind::Semi | TokenKind::RParen if parens == 0 && brackets == 0 => {
+                        return false;
+                    }
+                    _ if parens == 0
+                        && brackets == 0
+                        && contextual_of(&token.kind)
+                        && offset
+                            .checked_sub(1)
+                            .and_then(|previous| self.tokens.get(self.pos + previous))
+                            .is_none_or(|previous| previous.kind != TokenKind::Dot) =>
+                    {
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+            false
         }
 
         /// `for (LHS x of SEQ) BODY`, folded into statements this engine
@@ -1836,21 +1869,57 @@ pub(crate) mod m1 {
         fn for_of_parts(&mut self) -> Result<StmtKind, CompileError> {
             const SEQ: &str = " seq";
             const IDX: &str = " i";
+            const VALUE: &str = " value";
+
+            enum Item {
+                Declaration {
+                    kind: BindingKind,
+                    name: String,
+                    span: Span,
+                },
+                Assignment(Expr),
+            }
 
             let at = self.peek().offset;
             let span = Span(at);
-            let kind = match self.kind() {
-                TokenKind::Let => BindingKind::Let,
-                TokenKind::Const => BindingKind::Const,
-                _ => BindingKind::Var,
+            let item = if matches!(
+                self.kind(),
+                TokenKind::Let | TokenKind::Const | TokenKind::Var
+            ) {
+                let kind = match self.kind() {
+                    TokenKind::Let => BindingKind::Let,
+                    TokenKind::Const => BindingKind::Const,
+                    _ => BindingKind::Var,
+                };
+                self.advance();
+                let TokenKind::Ident(name) = self.peek().kind.clone() else {
+                    unreachable!("`at_for_of_head` checked this token is a name");
+                };
+                let name_span = Span(self.peek().offset);
+                self.advance();
+                self.advance(); // the contextual `of`
+                Item::Declaration {
+                    kind,
+                    name,
+                    span: name_span,
+                }
+            } else {
+                let target = self.expression(0)?;
+                if !self.assignable(&target) {
+                    return Err(malformed(
+                        "needs a name or a property before `of`; this engine has nothing else to assign each element to",
+                        target.span.offset(),
+                    ));
+                }
+                if !contextual_of(self.kind()) {
+                    return Err(malformed(
+                        "needs `of` after the assignment target in a `for … of` header",
+                        self.peek().offset,
+                    ));
+                }
+                self.advance();
+                Item::Assignment(target)
             };
-            self.advance();
-            let TokenKind::Ident(name) = self.peek().kind.clone() else {
-                unreachable!("`at_for_of_head` checked this token is a name");
-            };
-            let name_span = Span(self.peek().offset);
-            self.advance();
-            self.advance(); // the contextual `of`
 
             let seq = self.expression(0)?;
             self.expect(&TokenKind::RParen, "needs a `)` to close the `for` header")?;
@@ -1863,10 +1932,31 @@ pub(crate) mod m1 {
             self.bindings[seq_id.0 as usize].initialised = Some(at);
             let idx_id = self.declare(IDX, BindingKind::Let, span)?;
             self.bindings[idx_id.0 as usize].initialised = Some(at);
-            // Declared before the body is parsed, so a reference to `x` inside
-            // it resolves outward to this binding.
-            let item_id = self.declare(&name, kind, name_span)?;
-            self.bindings[item_id.0 as usize].initialised = Some(at);
+            // A declaration is installed before the body is parsed, so a
+            // reference to its name resolves outward to this binding. The
+            // assignment form already recorded and relabelled its target in
+            // the surrounding scope; it declares no user binding.
+            let item_id = match &item {
+                Item::Declaration { kind, name, span } => {
+                    let id = self.declare(name, *kind, *span)?;
+                    self.bindings[id.0 as usize].initialised = Some(at);
+                    Some(id)
+                }
+                Item::Assignment(_) => None,
+            };
+            // The assignment form must read S[I] before evaluating a member
+            // target such as `holder().slot`; ECMA-262 obtains the iterator
+            // value before it evaluates the assignment target. A hidden
+            // per-iteration binding makes that ordering explicit instead of
+            // relying on ordinary assignment's target-before-value order.
+            let value_id = match &item {
+                Item::Assignment(_) => {
+                    let id = self.declare(VALUE, BindingKind::Const, span)?;
+                    self.bindings[id.0 as usize].initialised = Some(at);
+                    Some(id)
+                }
+                Item::Declaration { .. } => None,
+            };
 
             let body = self.body_statement("a `for`")?;
 
@@ -2046,26 +2136,61 @@ pub(crate) mod m1 {
                 },
                 span,
             };
-            let item = Stmt {
-                kind: StmtKind::Decl(vec![Declarator {
-                    binding: item_id,
-                    init: Some(Expr {
-                        kind: ExprKind::Member {
-                            object: Box::new(Expr {
-                                kind: ExprKind::Name(self.occurrence(SEQ, at, Role::Read)),
-                                span,
-                            }),
-                            key: MemberKey::Computed(Box::new(Expr {
-                                kind: ExprKind::Name(self.occurrence(IDX, at, Role::Read)),
-                                span,
-                            })),
-                        },
+            let element = Expr {
+                kind: ExprKind::Member {
+                    object: Box::new(Expr {
+                        kind: ExprKind::Name(self.occurrence(SEQ, at, Role::Read)),
                         span,
                     }),
-                    span,
-                }]),
+                    key: MemberKey::Computed(Box::new(Expr {
+                        kind: ExprKind::Name(self.occurrence(IDX, at, Role::Read)),
+                        span,
+                    })),
+                },
                 span,
             };
+            let mut iteration = match &item {
+                Item::Declaration { .. } => vec![Stmt {
+                    kind: StmtKind::Decl(vec![Declarator {
+                        binding: item_id.expect("the declaration form has an item binding"),
+                        init: Some(element),
+                        span,
+                    }]),
+                    span,
+                }],
+                Item::Assignment(target) => {
+                    let value_id = value_id.expect("the assignment form has a value binding");
+                    vec![
+                        Stmt {
+                            kind: StmtKind::Decl(vec![Declarator {
+                                binding: value_id,
+                                init: Some(element),
+                                span,
+                            }]),
+                            span,
+                        },
+                        Stmt {
+                            kind: StmtKind::Expr(Expr {
+                                kind: ExprKind::Assign {
+                                    op: None,
+                                    target: Box::new(target.clone()),
+                                    value: Box::new(Expr {
+                                        kind: ExprKind::Name(self.occurrence(
+                                            VALUE,
+                                            at,
+                                            Role::Read,
+                                        )),
+                                        span,
+                                    }),
+                                },
+                                span,
+                            }),
+                            span,
+                        },
+                    ]
+                }
+            };
+            iteration.push(body);
 
             let loop_stmt = Stmt {
                 kind: StmtKind::For {
@@ -2073,7 +2198,7 @@ pub(crate) mod m1 {
                     test: Some(test),
                     update: Some(update),
                     body: Box::new(Stmt {
-                        kind: StmtKind::Block(vec![item, body]),
+                        kind: StmtKind::Block(iteration),
                         span,
                     }),
                 },
