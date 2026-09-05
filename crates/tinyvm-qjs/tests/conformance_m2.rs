@@ -1493,7 +1493,6 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     // with them is the elision -- `[1, , 3]` is still refused, because a hole
     // is not an `undefined` and this engine has no way to tell them apart.
     ("[1, , 3];", "elisions in an array literal"),
-    ("let x = 1; x?.y;", "optional chaining"),
     (
         "function f(a) { return a; } return f(...1);",
         "the spread and rest syntax",

@@ -327,7 +327,7 @@ pub(crate) mod m1 {
     use crate::repr::{
         self, BlockType, Ins, ValType, WIDTH, box_array, box_bool, box_function, box_number,
         box_object, box_string, const_bool, const_null, const_number, const_string,
-        const_undefined, drop_value, is_number, load_local, store_local,
+        const_undefined, drop_value, is_nullish, is_number, load_local, store_local,
     };
     use crate::repr::{is_array, is_object, is_string};
     use crate::runtime::{
@@ -2040,7 +2040,7 @@ pub(crate) mod m1 {
                 scan.arrays = true;
                 elements.iter().try_for_each(|el| host_expr(el, scan))
             }
-            ast::ExprKind::Member { object, key } => {
+            ast::ExprKind::Member { object, key, .. } => {
                 host_expr(object, scan)?;
                 match key {
                     ast::MemberKey::Static(name) => {
@@ -3733,30 +3733,14 @@ pub(crate) mod m1 {
                 ast::ExprKind::Object(properties) => self.object_literal(properties),
                 ast::ExprKind::Array(elements) => self.array_literal(elements),
                 // 13.3.2.1 and 13.3.3.1 both evaluate the object first and the
-                // key second, which is exactly the order the operands have to
-                // reach the accessor in -- so a member read needs no scratch
-                // local at all, under either spelling.
-                ast::ExprKind::Member { object, key } => {
-                    self.expr(object)?;
-                    match self.accessor(key) {
-                        Accessor::Obj => {
-                            self.key(key)?;
-                            let call = self.ctx.call(Rt::ObjGet);
-                            self.push(call);
-                            self.throw_check();
-                        }
-                        Accessor::Prop(base) => {
-                            self.key_pair(key)?;
-                            self.push(Ins::Call(base + Ar::PropGet.offset()));
-                        }
-                        Accessor::Str(index) => {
-                            self.key_pair(key)?;
-                            self.push(Ins::Call(index));
-                            self.throw_check();
-                        }
-                    }
-                    Ok(())
-                }
+                // key second. The ordinary spelling can therefore stream both
+                // straight to the accessor; the optional spelling holds its
+                // receiver while it decides whether the key may run.
+                ast::ExprKind::Member {
+                    object,
+                    key,
+                    optional,
+                } => self.member(object, key, *optional),
                 // A function expression reached here rather than as a
                 // callee, so ECMA-262 15.2.5 runs and its answer is a new
                 // object every time this expression is evaluated.
@@ -3811,6 +3795,70 @@ pub(crate) mod m1 {
             }
             load_local(slot, &mut self.f.body);
             self.give(slot);
+            Ok(())
+        }
+
+        /// Read one property, optionally short-circuiting a nullish receiver.
+        ///
+        /// The optional form holds the receiver in one value local. This is
+        /// semantic rather than an optimisation: the receiver is evaluated
+        /// once, and a computed key is not evaluated at all on the nullish
+        /// branch. The result local starts as `undefined`; only the
+        /// non-nullish branch overwrites it with the ordinary member read, so
+        /// missing properties keep exactly the existing accessor semantics.
+        fn member(
+            &mut self,
+            object: &ast::Expr,
+            key: &ast::MemberKey,
+            optional: bool,
+        ) -> Result<(), CompileError> {
+            if !optional {
+                self.expr(object)?;
+                return self.member_from_stack(key);
+            }
+
+            let recv = self.take();
+            let result = self.take();
+            self.expr(object)?;
+            store_local(recv, &mut self.f.body);
+            const_undefined(&mut self.f.body);
+            store_local(result, &mut self.f.body);
+
+            is_nullish(recv, &mut self.f.body);
+            self.push(Ins::I32Eqz);
+            self.push(Ins::If(BlockType::Empty));
+            load_local(recv, &mut self.f.body);
+            self.member_from_stack(key)?;
+            store_local(result, &mut self.f.body);
+            self.push(Ins::End);
+
+            load_local(result, &mut self.f.body);
+            self.give(result);
+            self.give(recv);
+            Ok(())
+        }
+
+        /// Complete an ordinary member read whose receiver is already on the
+        /// stack. Shared by the old spelling and the non-nullish optional arm
+        /// so optional chaining cannot drift from missing-property behavior.
+        fn member_from_stack(&mut self, key: &ast::MemberKey) -> Result<(), CompileError> {
+            match self.accessor(key) {
+                Accessor::Obj => {
+                    self.key(key)?;
+                    let call = self.ctx.call(Rt::ObjGet);
+                    self.push(call);
+                    self.throw_check();
+                }
+                Accessor::Prop(base) => {
+                    self.key_pair(key)?;
+                    self.push(Ins::Call(base + Ar::PropGet.offset()));
+                }
+                Accessor::Str(index) => {
+                    self.key_pair(key)?;
+                    self.push(Ins::Call(index));
+                    self.throw_check();
+                }
+            }
             Ok(())
         }
 
@@ -4062,6 +4110,7 @@ pub(crate) mod m1 {
             if let ast::ExprKind::Member {
                 object,
                 key: ast::MemberKey::Static(name),
+                ..
             } = &callee.kind
                 && let Some(me) = method::Me::at_call_site(name, args.len())
             {
@@ -4431,6 +4480,7 @@ pub(crate) mod m1 {
             let ast::ExprKind::Member {
                 object,
                 key: ast::MemberKey::Static(member),
+                ..
             } = &callee.kind
             else {
                 return false;
@@ -4866,7 +4916,7 @@ pub(crate) mod m1 {
                     res: ast::Res::Local(id) | ast::Res::Global(id) | ast::Res::Captured(id),
                     ..
                 }) => Ok(Target::Binding(self.place(*id))),
-                ast::ExprKind::Member { object, key } => {
+                ast::ExprKind::Member { object, key, .. } => {
                     let slot = self.take();
                     self.expr(object)?;
                     store_local(slot, &mut self.f.body);

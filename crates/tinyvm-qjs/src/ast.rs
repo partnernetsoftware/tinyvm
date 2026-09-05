@@ -498,6 +498,11 @@ pub(crate) mod m1 {
         Member {
             object: Box<Expr>,
             key: MemberKey,
+            /// `true` for the exact first optional-chain slice `o?.p` or
+            /// `o?.[k]`. The parser currently requires this slice to end the
+            /// postfix chain, so this flag cannot silently claim the broader
+            /// `o?.p.q()` semantics.
+            optional: bool,
         },
         Call {
             callee: Box<Expr>,

@@ -308,6 +308,9 @@ tinyvm (35)                                      [~]
 │   │   │   └── 具名导入 / 默认导出 / 再导出 / 动态 import   [ ] 具名拒绝，需求为零
 │   │   ├── `break` / `continue`                          [x] 见下方方法段的同名行
 │   │   ├── object literals, property access, assignment [x]
+│   │   │   └── optional chaining `base?.prop` / `base?.[key]` [x] first slice; `optional_chaining`
+│   │   │       ├── base once; nullish skips computed key; ordinary missing-property path shared [x]
+│   │   │       └── no VM opcode; static core exactly 101 256 B; ordinary member golden byte-identical [x]
 │   │   ├── functions as values, stored/passed/called     [x]
 │   │   ├── Number<->String conversion, per ECMA-262      [x]
 │   │   ├── conditional expressions, try/catch/finally    [x]

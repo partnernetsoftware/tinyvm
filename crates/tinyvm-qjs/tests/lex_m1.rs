@@ -105,6 +105,20 @@ fn punctuation_is_real_tokens() {
         vec![LParen, Ident("a".into()), Comma, Ident("b".into()), RParen]
     );
     assert_eq!(kinds("x = 1;"), vec![Ident("x".into()), Eq, Int(1), Semi]);
+    assert_eq!(
+        kinds("x?.field"),
+        vec![Ident("x".into()), OptionalChain, Ident("field".into())]
+    );
+    assert_eq!(
+        kinds("x?.[key]"),
+        vec![
+            Ident("x".into()),
+            OptionalChain,
+            LBracket,
+            Ident("key".into()),
+            RBracket
+        ]
+    );
 }
 
 #[test]

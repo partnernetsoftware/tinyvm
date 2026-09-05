@@ -113,9 +113,19 @@ fn sexpr(e: &Expr) -> String {
         // The two spellings print differently on purpose: they are two
         // ECMA-262 productions (13.3.2 and 13.3.3), and a shape test that
         // could not tell them apart could not state that.
-        ExprKind::Member { object, key } => match key {
-            MemberKey::Static(name) => format!("(. {} {name})", sexpr(object)),
-            MemberKey::Computed(key) => format!("(index {} {})", sexpr(object), sexpr(key)),
+        ExprKind::Member {
+            object,
+            key,
+            optional,
+        } => match (key, optional) {
+            (MemberKey::Static(name), false) => format!("(. {} {name})", sexpr(object)),
+            (MemberKey::Computed(key), false) => {
+                format!("(index {} {})", sexpr(object), sexpr(key))
+            }
+            (MemberKey::Static(name), true) => format!("(?. {} {name})", sexpr(object)),
+            (MemberKey::Computed(key), true) => {
+                format!("(?index {} {})", sexpr(object), sexpr(key))
+            }
         },
         ExprKind::Call { callee, args } => {
             let mut out = format!("(call {}", sexpr(callee));
@@ -460,6 +470,25 @@ fn a_call_carries_real_arguments() {
     );
     // A trailing comma in an argument list is ES2017 and costs nothing here.
     assert_eq!(sexpr(only_expr(&hosted("g(1,)"))), "(call g 1)");
+}
+
+#[test]
+fn optional_property_access_has_its_own_tree_shape() {
+    assert_eq!(shape_after("const o = {};", "o?.answer"), "(?. o answer)");
+    assert_eq!(
+        shape_after("const o = {}; const key = \"answer\";", "o?.[key]"),
+        "(?index o key)"
+    );
+    for source in [
+        "const o = {}; return o?.answer.more;",
+        "const o = {}; return o?.answer();",
+        "const o = {}; return o?.answer?.more;",
+    ] {
+        assert_eq!(
+            err(source).message,
+            "this engine does not support optional-chain continuations after the first property access yet"
+        );
+    }
 }
 
 #[test]

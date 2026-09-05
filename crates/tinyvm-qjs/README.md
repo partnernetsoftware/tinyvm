@@ -95,10 +95,15 @@ instance's linear memory, not text, and resolving it needs the instance.
   sees it, because there is no global scope for it to be absent from.
 - **Objects**: literals (`{}`, `{ a: 1 }`, shorthand `{ a }`, a trailing comma,
   and string- or number-literal keys), property reads by dot and by computed
-  key, and property assignment including the compound and update forms —
+  key, the first optional-chain slice (`base?.prop` / `base?.[key]`), and
+  property assignment including the compound and update forms —
   `o.a += 2`, `o.a++`. Keys are Strings, so `o[1]` and `o["1"]` are one slot
   and `o[0.5]` is the property `"0.5"`;
   a property that is not there reads `undefined` rather than trapping;
+  optional access evaluates its base once and does not evaluate a computed key
+  when that base is `null` or `undefined`. Optional calls and continuation
+  chains such as `o?.a.b` remain named capability boundaries rather than being
+  approximated with the wrong short-circuit extent;
   property order is insertion order; and `===` on two Objects is reference
   identity. Reading a property *of* a primitive (`"abc".length`, `(1).a`)
   traps: there is no prototype here, and answering `undefined` would be a right

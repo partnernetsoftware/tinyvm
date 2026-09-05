@@ -141,6 +141,10 @@ pub(crate) enum TokenKind {
     /// a lone `?` spells. `??` and `?.` are their own lexemes, read before
     /// this one.
     Question,
+    /// `?.` -- the first optional-chain slice. Kept distinct from `?` + `.`
+    /// so the parser can preserve its single-evaluation and short-circuit
+    /// semantics instead of approximating it as a conditional expression.
+    OptionalChain,
 
     // Operators.
     Plus,
@@ -241,6 +245,7 @@ impl TokenKind {
             Self::Dot => "a `.`",
             Self::Colon => "a `:`",
             Self::Question => "a `?`",
+            Self::OptionalChain => "a `?.`",
             Self::Semi => "a `;`",
             Self::Comma => "a `,`",
             Self::Plus => "a `+`",
@@ -364,6 +369,10 @@ impl TokenKind {
             // pipeline, which is a live caller of this table -- so the phrase
             // stays, and `parse::Parser::program` is where M0 spends it.
             Self::Question => (Boundary::Subset, "conditional expressions"),
+            // The M1 front end lowers the exact terminal property-access
+            // slice; M0 and every unsupported position retain the same named
+            // boundary this token had before it graduated.
+            Self::OptionalChain => (Boundary::Subset, "optional chaining"),
             Self::Bang => (Boundary::Subset, "the logical `!` operator"),
             Self::Comma => (Boundary::Subset, "the comma operator"),
             Self::Str(_) => (Boundary::Subset, "string literals"),
@@ -1113,7 +1122,7 @@ impl Lexer<'_> {
             [b'&', b'&', ..] => (2, TokenKind::AmpAmp),
             [b'|', b'|', ..] => (2, TokenKind::PipePipe),
             [b'?', b'?', ..] => (2, subset("the nullish coalescing operator")),
-            [b'?', b'.', ..] => (2, subset("optional chaining")),
+            [b'?', b'.', ..] => (2, TokenKind::OptionalChain),
             [b'+', b'=', ..] => (2, TokenKind::PlusEq),
             [b'-', b'=', ..] => (2, TokenKind::MinusEq),
             [b'*', b'=', ..] => (2, TokenKind::StarEq),

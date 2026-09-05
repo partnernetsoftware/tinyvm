@@ -869,7 +869,9 @@ pub(crate) mod m1 {
         fn assignable(&mut self, expr: &Expr) -> bool {
             match &expr.kind {
                 ExprKind::Name(_) => self.relabel(expr, Role::Write),
-                ExprKind::Member { .. } => true,
+                ExprKind::Member {
+                    optional: false, ..
+                } => true,
                 _ => false,
             }
         }
@@ -1528,6 +1530,7 @@ pub(crate) mod m1 {
                         kind: ExprKind::Member {
                             object: Box::new(receiver),
                             key: MemberKey::Static(PARSE_INT_METHOD.to_owned()),
+                            optional: false,
                         },
                         span,
                     }),
@@ -1564,6 +1567,7 @@ pub(crate) mod m1 {
             let ExprKind::Member {
                 object,
                 key: MemberKey::Static(member),
+                ..
             } = &callee.kind
             else {
                 return Ok(Err(args));
@@ -1630,6 +1634,7 @@ pub(crate) mod m1 {
                                     kind: ExprKind::Member {
                                         object: Box::new(folded),
                                         key: MemberKey::Static(pair.to_owned()),
+                                        optional: false,
                                     },
                                     span,
                                 }),
@@ -1657,6 +1662,7 @@ pub(crate) mod m1 {
                         kind: ExprKind::Member {
                             object: Box::new(receiver),
                             key: MemberKey::Static(method.to_owned()),
+                            optional: false,
                         },
                         span,
                     }),
@@ -1695,6 +1701,7 @@ pub(crate) mod m1 {
             let ExprKind::Member {
                 object,
                 key: MemberKey::Static(member),
+                ..
             } = &callee.kind
             else {
                 return Ok(Err(args));
@@ -1734,6 +1741,7 @@ pub(crate) mod m1 {
                         kind: ExprKind::Member {
                             object: Box::new(receiver),
                             key: MemberKey::Static(method.to_owned()),
+                            optional: false,
                         },
                         span,
                     }),
@@ -2064,6 +2072,7 @@ pub(crate) mod m1 {
                                         span,
                                     }),
                                     key: MemberKey::Static("length".to_owned()),
+                                    optional: false,
                                 },
                                 span,
                             }),
@@ -2106,6 +2115,7 @@ pub(crate) mod m1 {
                                 span,
                             }),
                             key: MemberKey::Static("length".to_owned()),
+                            optional: false,
                         },
                         span,
                     }),
@@ -2146,6 +2156,7 @@ pub(crate) mod m1 {
                         kind: ExprKind::Name(self.occurrence(IDX, at, Role::Read)),
                         span,
                     })),
+                    optional: false,
                 },
                 span,
             };
@@ -2833,6 +2844,7 @@ pub(crate) mod m1 {
                             kind: ExprKind::Member {
                                 object: Box::new(expr),
                                 key: MemberKey::Static(name),
+                                optional: false,
                             },
                             span,
                         };
@@ -2855,9 +2867,63 @@ pub(crate) mod m1 {
                             kind: ExprKind::Member {
                                 object: Box::new(expr),
                                 key: MemberKey::Computed(Box::new(key)),
+                                optional: false,
                             },
                             span,
                         };
+                    }
+                    // ECMA-262 13.3.9, deliberately the first closed slice:
+                    // `base?.prop` and `base?.[key]`. A continuation such as
+                    // `base?.prop.more` belongs to the broader OptionalChain
+                    // grammar and is refused below rather than lowered with
+                    // the wrong short-circuit extent.
+                    TokenKind::OptionalChain => {
+                        self.deeper(1)?;
+                        chain += 1;
+                        let span = expr.span;
+                        self.advance();
+                        let key = if self.at(&TokenKind::LBracket) {
+                            let open = self.peek().offset;
+                            self.advance();
+                            let key = self.expression(0)?;
+                            self.expect(
+                                &TokenKind::RBracket,
+                                &format!(
+                                    "needs a `]` to close the optional property access opened at byte {open}"
+                                ),
+                            )?;
+                            MemberKey::Computed(Box::new(key))
+                        } else {
+                            let token = self.peek().clone();
+                            let Some(name) = identifier_name(&token.kind) else {
+                                return Err(self.not_a_property_name(
+                                    "needs a property name or `[` after the `?.`",
+                                ));
+                            };
+                            self.advance();
+                            MemberKey::Static(name)
+                        };
+                        expr = Expr {
+                            kind: ExprKind::Member {
+                                object: Box::new(expr),
+                                key,
+                                optional: true,
+                            },
+                            span,
+                        };
+                        if matches!(
+                            self.kind(),
+                            TokenKind::Dot
+                                | TokenKind::LBracket
+                                | TokenKind::LParen
+                                | TokenKind::OptionalChain
+                        ) {
+                            return Err(unsupported(
+                                Boundary::Subset,
+                                "optional-chain continuations after the first property access",
+                                self.peek().offset,
+                            ));
+                        }
                     }
                     // 13.3.11: a template right after a MemberExpression is a
                     // TaggedTemplate -- a call, not a concatenation. It has to
@@ -3904,7 +3970,7 @@ pub(crate) mod m1 {
                     fill_expr(element, res);
                 }
             }
-            ExprKind::Member { object, key } => {
+            ExprKind::Member { object, key, .. } => {
                 fill_expr(object, res);
                 if let MemberKey::Computed(key) = key {
                     fill_expr(key, res);

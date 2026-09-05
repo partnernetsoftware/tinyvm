@@ -1417,20 +1417,12 @@ fn spread_and_destructuring_are_refused() {
 }
 
 /// The expression forms a real binding library reaches for around a property
-/// access. None of them is an object feature; each is refused by name, which
-/// is what makes the boundary readable rather than a cliff.
+/// access. The first optional-chain slice has landed; its neighbours still
+/// name their boundary rather than turning into a cliff.
 #[test]
 fn the_neighbouring_syntax_is_refused_by_name() {
-    refuses_capability(
-        "const o = {}; return o?.a;",
-        "optional chaining",
-        Boundary::Subset,
-    );
-    refuses_capability(
-        "const o = {}; return o?.[\"a\"];",
-        "optional chaining",
-        Boundary::Subset,
-    );
+    number("const o = { a: 7 }; return o?.a;", 7.0);
+    number("const o = { a: 7 }; return o?.[\"a\"];", 7.0);
     refuses_capability(
         "const o = {}; return o.a ?? 1;",
         "the nullish coalescing operator",
@@ -1483,7 +1475,6 @@ fn every_refusal_names_a_boundary_and_a_place() {
         "const o = {}; return \"a\" in o;",
         "const o = {}; return o instanceof Object;",
         "const o = {}; return new Object();",
-        "const o = {}; return o?.a;",
         "const o = {}; const { a } = o; return 0;",
         "const o = {}; for (const k in o) { } return 0;",
         "return [1, , 2];",
