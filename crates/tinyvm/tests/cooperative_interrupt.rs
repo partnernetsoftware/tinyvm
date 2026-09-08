@@ -88,3 +88,32 @@ fn running_pure_compute_observes_an_asynchronous_interrupt() {
         "interrupt latency exceeded the precommitted bound: {elapsed:?}"
     );
 }
+
+#[test]
+fn bulk_step_charges_cannot_jump_over_an_interrupt_poll() {
+    let bytes = wat::parse_str(
+        r#"
+        (module
+          (memory 1)
+          (func (export "fill")
+            (memory.fill (i32.const 0) (i32.const 0) (i32.const 16384))))
+        "#,
+    )
+    .expect("bulk-memory fixture must compile");
+    let module = must_ok(
+        WasmModule::from_bytes_with(
+            &bytes,
+            Limits {
+                max_steps: u64::MAX,
+                ..Limits::default()
+            },
+        ),
+        "load bulk-memory fixture",
+    );
+    let requested = AtomicBool::new(true);
+
+    let interrupted = module
+        .invoke_by_name_with_interrupt("fill", &[], &requested)
+        .expect_err("a bulk charge that crosses the poll threshold must observe interruption");
+    assert!(interrupted.is_interrupted());
+}

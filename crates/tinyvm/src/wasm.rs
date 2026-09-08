@@ -7209,6 +7209,10 @@ impl Module {
             .funcs
             .get(def_idx)
             .ok_or(WasmError::Trap("call to unknown function"))?;
+        let mut next_interrupt_poll = interrupt.map(|_| {
+            let remainder = *steps & 1023;
+            steps.saturating_add(1024 - remainder)
+        });
 
         loop {
             let live_slots = locals
@@ -7217,8 +7221,11 @@ impl Module {
                 .and_then(|slots| slots.checked_add(control.len()))
                 .ok_or_else(slot_overflow)?;
             *steps += 1;
-            if *steps & 1023 == 0 && interrupt.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-                return Err(WasmError::Trap("interrupted"));
+            if next_interrupt_poll.is_some_and(|next| *steps >= next) {
+                if interrupt.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                    return Err(WasmError::Trap("interrupted"));
+                }
+                next_interrupt_poll = Some(steps.saturating_add(1024));
             }
             if *steps > self.limits.max_steps {
                 return Err(WasmError::Trap("step budget"));

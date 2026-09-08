@@ -105,7 +105,13 @@ or the C ABI. The persistent-instance control proved that a later call can use a
 
 The 100 ms asynchronous request returned in 0.11 s total, the same loop without a request still
 reached `step budget`, default and `no_std` tests passed, Clippy passed with warnings denied, and
-the static core stayed at 101,256 bytes with self-test result 42. The three-run `i32_loop` median
-moved from 7.783 to 7.535 ns/instruction (-3.2%); no measured workload regressed by 5%.
+the static core stayed at 101,256 bytes with self-test result 42. After the post-review threshold
+fix, the three-run `i32_loop` median moved from 7.783 to 7.651 ns/instruction (-1.7%); no measured
+workload regressed by 5%.
 
 The detailed evidence and deviations are in `research/cooperative-interrupt/RESULTS.md`.
+
+Post-verdict adversarial review found that bulk-operation step charges could jump over an exact
+`steps % 1024 == 0` sampling point. The accepted implementation therefore uses a monotonic next-poll
+threshold: crossing it is sufficient, even when one instruction charges many logical steps. A
+finite `memory.fill` regression crosses the first threshold and must return `Interruption`.

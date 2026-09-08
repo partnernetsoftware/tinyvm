@@ -46,14 +46,14 @@ median nanoseconds per guest instruction.
 
 | Workload | Baseline | Candidate | Change |
 |---|---:|---:|---:|
-| `i32_loop` | 7.783 | 7.535 | -3.2% |
-| `i64_loop` | 6.830 | 6.720 | -1.6% |
-| `f64_math` | 8.892 | 8.614 | -3.1% |
-| `memory_scan` | 8.712 | 8.271 | -5.1% |
-| `call_direct` | 16.527 | 16.942 | +2.5% |
-| `call_indirect` | 17.881 | 17.630 | -1.4% |
-| `br_table` | 8.595 | 8.750 | +1.8% |
-| `local_shuffle` | 6.855 | 6.668 | -2.7% |
+| `i32_loop` | 7.783 | 7.651 | -1.7% |
+| `i64_loop` | 6.830 | 6.664 | -2.4% |
+| `f64_math` | 8.892 | 8.877 | -0.2% |
+| `memory_scan` | 8.712 | 8.313 | -4.6% |
+| `call_direct` | 16.527 | 16.960 | +2.6% |
+| `call_indirect` | 17.881 | 18.138 | +1.4% |
+| `br_table` | 8.595 | 8.749 | +1.8% |
+| `local_shuffle` | 6.855 | 6.787 | -1.0% |
 
 The precommitted `i32_loop` limit was at most 5% regression; it passed. No row regressed by 5%.
 Several apparent improvements are ordinary laptop noise and are not claimed as optimizations.
@@ -67,7 +67,7 @@ Several apparent improvements are ordinary laptop noise and are not claimed as o
 | C3 control | PASS | false flag succeeds; legacy entry reaches `step budget` |
 | C4 portability | PASS | default Clippy/tests and `no_std` library tests pass; C ABI unchanged |
 | C5 regression | PASS | error taxonomy tests pass; qjswasm wiring remains a downstream increment |
-| C6 throughput | PASS | three-run `i32_loop` median -3.2%; worst regression across rows +2.5% |
+| C6 throughput | PASS | three-run `i32_loop` median -1.7%; worst regression across rows +2.6% |
 | C7 static size | PASS | 101,256 bytes; self-test 42 |
 
 ## Deviations and limits
@@ -84,3 +84,7 @@ Several apparent improvements are ordinary laptop noise and are not claimed as o
   own ownership and partial-instantiation contract.
 - Native host callbacks that block do not become interruptible through this seam. The embedding
   supervisor remains the hard containment boundary.
+- Post-verdict adversarial review found a counterexample to exact-modulo polling: one bulk-memory
+  instruction can charge enough logical steps to jump over `steps % 1024 == 0`. The implementation
+  now tracks a monotonic next-poll threshold, and a finite `memory.fill` regression proves that a
+  bulk charge crossing the threshold observes the interrupt before returning success.
