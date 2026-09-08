@@ -5542,7 +5542,21 @@ impl Module {
     /// module start function runs once. Later calls through the returned
     /// [`Instance`] preserve its memory and mutable globals.
     pub fn instantiate(self) -> Result<Instance, WasmError> {
-        Instance::new(self)
+        Instance::new(self, None)
+    }
+
+    /// Consume this decoded module and create one persistent instance while
+    /// borrowing an interrupt flag for its start function.
+    ///
+    /// The flag is not retained by the returned [`Instance`]. Later calls may
+    /// supply a different flag through [`Instance::invoke_val_with_interrupt`]
+    /// or use the ordinary non-interruptible call methods. When the start
+    /// function is interrupted, the half-built instance is removed from its
+    /// store and no [`Instance`] is returned. Instantiation is not a
+    /// transaction: writes through imported memories/tables and host callbacks
+    /// completed before the interrupt was observed are not rolled back.
+    pub fn instantiate_with_interrupt(self, interrupt: &AtomicBool) -> Result<Instance, WasmError> {
+        Instance::new(self, Some(interrupt))
     }
 
     /// Record `name` as an exported function index (for [`Module::invoke_by_name`]).
@@ -8820,7 +8834,7 @@ impl Module {
 }
 
 impl Instance {
-    fn new(mut module: Module) -> Result<Self, WasmError> {
+    fn new(mut module: Module, interrupt: Option<&AtomicBool>) -> Result<Self, WasmError> {
         let store = module.execution_store()?;
         let instance_id = store.allocate_instance_id()?;
         let globals = module.new_globals(&store, instance_id)?;
@@ -8878,7 +8892,7 @@ impl Instance {
                 },
                 &[],
                 &mut steps,
-                None,
+                interrupt,
                 0,
                 &mut resources,
             );

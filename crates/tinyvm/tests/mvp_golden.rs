@@ -1562,8 +1562,8 @@ const LEAF_TESTS: [(&str, &str); 289] = [
         "typed_host_can_borrow_selected_defined_memories_by_standard_index",
     ),
     (
-        "call-scoped cooperative interruption",
-        "running_pure_compute_observes_an_asynchronous_interrupt",
+        "call/start-scoped cooperative interruption",
+        "instance_start_borrows_the_instantiation_interrupt",
     ),
     (
         "borrowed identity, never module state",
