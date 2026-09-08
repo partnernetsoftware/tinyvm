@@ -481,6 +481,9 @@ tinyvm (35)                                      [~]
 │       ├── persistent instance                           [x]
 │       ├── start once                                    [x]
 │       ├── per-call fuel                                 [x]
+│       ├── call-scoped cooperative interruption          [x]
+│       │   ├── borrowed identity, never module state      [x]
+│       │   └── pure-compute poll without host callbacks  [x]
 │       ├── explicit guest call stack                     [x]
 │       │   ├── host-owned call-depth ceiling             [x]
 │       │   ├── host-owned activation-slot ceiling        [x]
@@ -848,7 +851,10 @@ as “almost approved” or “safe to ship externally.”
 - Cartridge bytes are capped by the embedding; every allocation-amplifying section record
   is additionally charged to one decode-complexity budget before reserve.
 - Memory pages, table elements, call depth, aggregate live activation slots and per-call
-  instructions are host-owned ceilings.
+  instructions are host-owned ceilings. An embedder may also borrow one `AtomicBool` for one
+  invocation; the interpreter polls it every 1024 guest instructions and returns the distinct
+  `Interruption` fault class. The identity is never retained by a module or persistent instance,
+  and tinyvm owns neither wall-clock policy nor a timer thread.
 - Guest-sized vectors use fallible growth. A malformed count must return a typed error,
   never abort the process while attempting an infallible allocation.
 - Load-time type/structure errors fail before a module becomes invokable. Runtime traps
@@ -873,7 +879,7 @@ as “almost approved” or “safe to ship externally.”
   `table size overflow`。文案表在 `WasmError` 的文档注释里。
 - 但下游不该复制那张表：按字符串分类，文案一改就悄悄失配（这已经真实发生过一次）。
   分类由核给：`WasmError::class()` 返回 `FaultClass`（Load / ResourceCeiling /
-  Allocation / Guest / Internal），`WasmError::ceiling()` 直接点名是哪一条 `Limits`
+  Allocation / Interruption / Guest / Internal），`WasmError::ceiling()` 直接点名是哪一条 `Limits`
   ——`max_steps` / `max_call_depth` / `max_activation_slots` / `max_memory_pages` /
   `max_table_elems`，宿主知道该抬哪个数。`WasmError` 的类型形状不变，没有新变体。
   分类只靠一条命名规则：分配失败的文案一律以 `allocation` 结尾，这条规则由测试扫源码守着。

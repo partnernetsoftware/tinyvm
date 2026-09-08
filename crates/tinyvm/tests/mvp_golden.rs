@@ -656,7 +656,31 @@ fn parse_prd_leaves(prd: &str, marker: &str) -> Vec<String> {
 // `prd/PRD.md`'s acceptance section now writes the command set down, with this
 // package in it, so the next gap is caught by the gate rather than by someone
 // deciding to look.
-const LEAF_TESTS: [(&str, &str); 280] = [
+const LEAF_TESTS: [(&str, &str); 289] = [
+    (
+        "optional chaining `base?.prop` / `base?.[key]`  first slice; `optional_chaining`",
+        "null_and_undefined_short_circuit_to_undefined",
+    ),
+    (
+        "base once; nullish skips computed key; ordinary missing-property path shared",
+        "a_computed_key_is_skipped_for_a_nullish_receiver",
+    ),
+    (
+        "no VM opcode; static core exactly 101 256 B; ordinary member golden byte-identical",
+        "an_ordinary_member_program_keeps_its_pre_milestone_bytes",
+    ),
+    (
+        "nullish coalescing `lhs ?? rhs`                   exact slice; `nullish_coalescing`; no `??=`",
+        "null_and_undefined_choose_the_right_operand",
+    ),
+    (
+        "lhs once; rhs only for null/undefined; false/0/empty retained",
+        "the_left_operand_runs_once_and_the_right_runs_only_when_needed",
+    ),
+    (
+        "`&&`/`  ` mix named refusal; no VM opcode; core 101 256 B; ordinary `  ` golden unchanged",
+        "mixing_with_boolean_short_circuit_and_assignment_are_named_refusals",
+    ),
     (
         "`toUpperCase`：小写表反转 + ASCII −32               2026-08-31；ς→Σ 手补；ß/µ/四个 titlecase 原样（记录的分歧，简单映射如此）；8 984 B 只有大写者付，两表各自门控",
         "the_inverted_table_reaches_the_same_pairs_backwards",
@@ -1536,6 +1560,18 @@ const LEAF_TESTS: [(&str, &str); 280] = [
     (
         "generalize memory-zero call-scoped borrowing",
         "typed_host_can_borrow_selected_defined_memories_by_standard_index",
+    ),
+    (
+        "call-scoped cooperative interruption",
+        "running_pure_compute_observes_an_asynchronous_interrupt",
+    ),
+    (
+        "borrowed identity, never module state",
+        "one_invocation_borrows_one_interrupt_identity",
+    ),
+    (
+        "pure-compute poll without host callbacks",
+        "running_pure_compute_observes_an_asynchronous_interrupt",
     ),
     (
         "explicit selected-memory callback context",

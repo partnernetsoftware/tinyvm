@@ -28,7 +28,8 @@ use core::cell::{Cell, Ref, RefCell, RefMut};
 use core::num::NonZeroU64;
 use core::ops::{Deref, DerefMut};
 #[cfg(not(all(feature = "staticcore", not(feature = "std"))))]
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 mod guest_memory;
 mod validate;
@@ -465,6 +466,7 @@ impl Store {
         address: &FunctionAddress,
         args: &[Val],
         steps: &mut u64,
+        interrupt: Option<&AtomicBool>,
         base_depth: usize,
         stats: &mut CallResourceStats,
     ) -> Result<Vec<Val>, WasmError> {
@@ -561,6 +563,7 @@ impl Store {
                         args,
                     }),
                     steps,
+                    interrupt,
                     memories,
                     globals,
                     &mut bulk,
@@ -582,6 +585,7 @@ impl Store {
                         values: core::mem::take(values),
                     },
                     steps,
+                    interrupt,
                     memories,
                     globals,
                     &mut bulk,
@@ -1191,6 +1195,7 @@ impl Global {
 /// | `operand stack allocation` | the allocator refused to grow the operand stack |
 /// | `control stack` | the control-frame vector could not grow |
 /// | `step budget` | `Limits::max_steps` reached |
+/// | `interrupted` | this invocation's borrowed interrupt flag was set |
 /// | `memory page limit` | declared or grown pages exceed `Limits::max_memory_pages` |
 /// | `memory allocation` | the allocator refused a linear-memory buffer |
 /// | `memory size overflow` | a page-to-byte size computation overflowed |
@@ -1445,6 +1450,9 @@ pub enum FaultClass {
     /// The allocator refused. The VM stayed loud instead of aborting, and the
     /// same work may succeed once the host has memory again.
     Allocation,
+    /// The caller explicitly interrupted this top-level invocation. This is
+    /// neither a guest fault nor a configured resource ceiling.
+    Interruption,
     /// An ordinary guest fault: out-of-bounds access, division by zero,
     /// `unreachable`, a host-door type mismatch. The guest's own program is
     /// responsible, and another guest is unaffected.
@@ -1503,6 +1511,9 @@ impl WasmError {
     /// reason.
     pub fn class(&self) -> FaultClass {
         let message = self.message();
+        if message == "interrupted" {
+            return FaultClass::Interruption;
+        }
         if self.ceiling().is_some() {
             return FaultClass::ResourceCeiling;
         }
@@ -1534,6 +1545,11 @@ impl WasmError {
     /// Whether the allocator refused.
     pub fn is_allocation(&self) -> bool {
         matches!(self.class(), FaultClass::Allocation)
+    }
+
+    /// Whether this call stopped because its borrowed interrupt flag was set.
+    pub fn is_interrupted(&self) -> bool {
+        matches!(self.class(), FaultClass::Interruption)
     }
 
     /// Whether this is an internal invariant rather than anything the guest or
@@ -6098,6 +6114,7 @@ impl Module {
                     args: &[],
                 },
                 &mut steps,
+                None,
                 &mut memories,
                 &mut globals,
                 &mut bulk,
@@ -6120,6 +6137,7 @@ impl Module {
         self.call_any(
             WasmCall { index: entry, args },
             &mut steps,
+            None,
             &mut memories,
             &mut globals,
             &mut bulk,
@@ -6162,6 +6180,23 @@ impl Module {
         self.invoke_val(idx, args)
     }
 
+    /// Resolve and invoke an exported function with a cancellation flag that
+    /// is borrowed only for this call. The flag is polled every 1024 guest
+    /// instructions and does not become module or instance state.
+    pub fn invoke_by_name_with_interrupt(
+        &self,
+        name: &str,
+        args: &[Val],
+        interrupt: &AtomicBool,
+    ) -> Result<Vec<Val>, WasmError> {
+        let idx = self
+            .exports
+            .get(name)
+            .copied()
+            .ok_or(WasmError::Trap("no exported function named"))?;
+        self.invoke_val_with_interrupt(idx, args, interrupt)
+    }
+
     /// Invoke function `idx` with `args`, returning its result values.
     ///
     /// Fresh zero-initialised linear memories are allocated for the call and
@@ -6173,10 +6208,43 @@ impl Module {
         vals_to_i32(results)
     }
 
+    /// Invoke function `idx` through the i32 convenience ABI with a
+    /// cancellation flag borrowed only for this call.
+    pub fn invoke_with_interrupt(
+        &self,
+        idx: usize,
+        args: &[i32],
+        interrupt: &AtomicBool,
+    ) -> Result<Vec<i32>, WasmError> {
+        let vals = i32_args_to_vals(args)?;
+        let results = self.invoke_val_with_interrupt(idx, &vals, interrupt)?;
+        vals_to_i32(results)
+    }
+
     /// Invoke function `idx` with typed [`Val`] arguments, returning typed
     /// results. This is the full entry point; [`Module::invoke`] is the i32
     /// convenience wrapper over it.
     pub fn invoke_val(&self, idx: usize, args: &[Val]) -> Result<Vec<Val>, WasmError> {
+        self.invoke_val_controlled(idx, args, None)
+    }
+
+    /// Invoke function `idx` with typed values and a cancellation flag
+    /// borrowed only for this call.
+    pub fn invoke_val_with_interrupt(
+        &self,
+        idx: usize,
+        args: &[Val],
+        interrupt: &AtomicBool,
+    ) -> Result<Vec<Val>, WasmError> {
+        self.invoke_val_controlled(idx, args, Some(interrupt))
+    }
+
+    fn invoke_val_controlled(
+        &self,
+        idx: usize,
+        args: &[Val],
+        interrupt: Option<&AtomicBool>,
+    ) -> Result<Vec<Val>, WasmError> {
         let mut steps: u64 = 0;
         let store = self.execution_store()?;
         let instance_id = store.allocate_instance_id()?;
@@ -6200,6 +6268,7 @@ impl Module {
         self.call_any(
             WasmCall { index: idx, args },
             &mut steps,
+            interrupt,
             &mut memories,
             &mut globals,
             &mut bulk,
@@ -6799,10 +6868,12 @@ impl Module {
     }
 
     /// Dispatch one call that cannot leave its instance.
+    #[allow(clippy::too_many_arguments)]
     fn call_any(
         &self,
         call: WasmCall<'_>,
         steps: &mut u64,
+        interrupt: Option<&AtomicBool>,
         memories: &mut [MemorySlot],
         globals: &mut [GlobalSlot],
         bulk: &mut BulkState<'_>,
@@ -6811,6 +6882,7 @@ impl Module {
         match self.call_any_until_boundary(
             CallEntry::Call(call),
             steps,
+            interrupt,
             memories,
             globals,
             bulk,
@@ -6825,10 +6897,12 @@ impl Module {
 
     /// Dispatch a call by combined index until it returns or selects a foreign owner.
     #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn call_any_until_boundary(
         &self,
         entry: CallEntry<'_>,
         steps: &mut u64,
+        interrupt: Option<&AtomicBool>,
         memories: &mut [MemorySlot],
         globals: &mut [GlobalSlot],
         bulk: &mut BulkState<'_>,
@@ -6882,6 +6956,7 @@ impl Module {
                 self.run_defined(
                     current,
                     steps,
+                    interrupt,
                     memories,
                     globals,
                     bulk,
@@ -6976,6 +7051,7 @@ impl Module {
                 self.run_defined(
                     current,
                     steps,
+                    interrupt,
                     memories,
                     globals,
                     bulk,
@@ -7111,10 +7187,12 @@ impl Module {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_defined(
         &self,
         activation: DefinedActivation,
         steps: &mut u64,
+        interrupt: Option<&AtomicBool>,
         memories: &mut [MemorySlot],
         globals: &mut [GlobalSlot],
         bulk: &mut BulkState<'_>,
@@ -7139,6 +7217,9 @@ impl Module {
                 .and_then(|slots| slots.checked_add(control.len()))
                 .ok_or_else(slot_overflow)?;
             *steps += 1;
+            if *steps & 1023 == 0 && interrupt.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                return Err(WasmError::Trap("interrupted"));
+            }
             if *steps > self.limits.max_steps {
                 return Err(WasmError::Trap("step budget"));
             }
@@ -8790,6 +8871,7 @@ impl Instance {
                 },
                 &[],
                 &mut steps,
+                None,
                 0,
                 &mut resources,
             );
@@ -8825,6 +8907,26 @@ impl Instance {
         self.invoke_val(idx, args)
     }
 
+    /// Resolve and invoke an exported function while borrowing a cancellation
+    /// flag only for this call. A later call may supply a different flag.
+    pub fn invoke_by_name_with_interrupt(
+        &mut self,
+        name: &str,
+        args: &[Val],
+        interrupt: &AtomicBool,
+    ) -> Result<Vec<Val>, WasmError> {
+        let idx = self
+            .state
+            .try_borrow()
+            .map_err(|_| WasmError::Trap("instance is already borrowed"))?
+            .module
+            .exports
+            .get(name)
+            .copied()
+            .ok_or(WasmError::Trap("no exported function named"))?;
+        self.invoke_val_with_interrupt(idx, args, interrupt)
+    }
+
     /// Invoke a function through the i32 convenience ABI while retaining
     /// instance state.
     pub fn invoke(&mut self, idx: usize, args: &[i32]) -> Result<Vec<i32>, WasmError> {
@@ -8832,9 +8934,41 @@ impl Instance {
         vals_to_i32(self.invoke_val(idx, &vals)?)
     }
 
+    /// Invoke a function through the i32 convenience ABI while borrowing a
+    /// cancellation flag only for this call.
+    pub fn invoke_with_interrupt(
+        &mut self,
+        idx: usize,
+        args: &[i32],
+        interrupt: &AtomicBool,
+    ) -> Result<Vec<i32>, WasmError> {
+        let vals = i32_args_to_vals(args)?;
+        vals_to_i32(self.invoke_val_with_interrupt(idx, &vals, interrupt)?)
+    }
+
     /// Invoke a function with typed values. The instruction counter starts at
     /// zero for this top-level call; memory and globals remain live.
     pub fn invoke_val(&mut self, idx: usize, args: &[Val]) -> Result<Vec<Val>, WasmError> {
+        self.invoke_val_controlled(idx, args, None)
+    }
+
+    /// Invoke a function with typed values while borrowing a cancellation
+    /// flag only for this top-level call.
+    pub fn invoke_val_with_interrupt(
+        &mut self,
+        idx: usize,
+        args: &[Val],
+        interrupt: &AtomicBool,
+    ) -> Result<Vec<Val>, WasmError> {
+        self.invoke_val_controlled(idx, args, Some(interrupt))
+    }
+
+    fn invoke_val_controlled(
+        &mut self,
+        idx: usize,
+        args: &[Val],
+        interrupt: Option<&AtomicBool>,
+    ) -> Result<Vec<Val>, WasmError> {
         let mut steps = 0;
         let mut resources = CallResourceStats::default();
         let result = self.store.invoke_registered(
@@ -8844,6 +8978,7 @@ impl Instance {
             },
             args,
             &mut steps,
+            interrupt,
             0,
             &mut resources,
         );
