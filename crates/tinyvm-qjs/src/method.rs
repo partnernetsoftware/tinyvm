@@ -1751,6 +1751,44 @@ fn attribution_search_prefix(
     b.push(Ins::End);
     b.push(Ins::End);
 }
+// The high bound and the low bound are both `u32` local indices, so a swap
+// between them still emits a well-typed loop: only their order in the emitted
+// bytecode tells them apart. The expected sequence is written here instead of
+// being produced by the helper under test, and the indices are not adjacent so
+// equal values cannot mask a swap.
+#[cfg(test)]
+#[test]
+fn attribution_search_prefix_reads_the_high_bound_before_the_low_bound() {
+    const H: u32 = 30;
+    const I: u32 = 41;
+    const HL: u32 = 52;
+    const NL: u32 = 74;
+    const P: u32 = 96;
+    const W: u32 = 118;
+    let mut b: Vec<Ins> = Vec::new();
+    attribution_search_prefix(
+        &mut b,
+        SearchLocals {
+            h: H,
+            i: I,
+            hl: HL,
+            nl: NL,
+            p: P,
+            w: W,
+        },
+        SearchAttributionProbe::Loop,
+    );
+    assert!(b.len() >= 8, "the prefix must emit the bound comparison");
+    assert!(matches!(b.first(), Some(Ins::Block(BlockType::Empty))));
+    assert!(matches!(b.get(1), Some(Ins::Loop(BlockType::Empty))));
+    assert!(matches!(b.get(2), Some(Ins::LocalGet(v)) if *v == HL));
+    assert!(matches!(b.get(3), Some(Ins::LocalGet(v)) if *v == NL));
+    assert!(matches!(b.get(4), Some(Ins::I32Sub)));
+    assert!(matches!(b.get(5), Some(Ins::LocalGet(v)) if *v == I));
+    assert!(matches!(b.get(6), Some(Ins::I32LtU)));
+    assert!(matches!(b.get(7), Some(Ins::BrIf(1))));
+    assert!(matches!(b.get(8), Some(Ins::LocalGet(v)) if *v != NL && *v != HL));
+}
 
 #[cfg(test)]
 mod string_search_attribution {
