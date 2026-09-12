@@ -1622,7 +1622,7 @@ fn includes(ctx: &Ctx) -> FnBuild {
         probe @ (SearchAttributionProbe::Loop
         | SearchAttributionProbe::Read
         | SearchAttributionProbe::Compare) => {
-            attribution_search_prefix(b, h, i, hl, nl, p, w, probe);
+            attribution_search_prefix(b, SearchLocals { h, i, hl, nl, p, w }, probe);
             const_bool(false, b);
             return f;
         }
@@ -1691,23 +1691,32 @@ fn includes(ctx: &Ctx) -> FnBuild {
     f
 }
 
+/// The search loop's local indices travel together: a caller that passes two
+/// of them in the other order changes what the emitted bytecode reads while
+/// keeping its shape, which is exactly the mistake this court exists to catch.
 #[cfg(test)]
-fn attribution_search_prefix(
-    b: &mut Vec<Ins>,
+#[derive(Clone, Copy)]
+struct SearchLocals {
     h: u32,
     i: u32,
     hl: u32,
     nl: u32,
     p: u32,
     w: u32,
+}
+
+#[cfg(test)]
+fn attribution_search_prefix(
+    b: &mut Vec<Ins>,
+    locals: SearchLocals,
     probe: SearchAttributionProbe,
 ) {
     b.push(Ins::Block(BlockType::Empty));
     b.push(Ins::Loop(BlockType::Empty));
-    b.push(Ins::LocalGet(hl));
-    b.push(Ins::LocalGet(nl));
+    b.push(Ins::LocalGet(locals.hl));
+    b.push(Ins::LocalGet(locals.nl));
     b.push(Ins::I32Sub);
-    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(locals.i));
     b.push(Ins::I32LtU);
     b.push(Ins::BrIf(1));
 
@@ -1715,29 +1724,29 @@ fn attribution_search_prefix(
         // This is the production four-byte load, has-zero-byte comparison and
         // clear-window branch. The court's absent first byte takes that branch
         // for every complete window.
-        skip_clear_window(b, h, i, hl, p, w);
+        skip_clear_window(b, locals.h, locals.i, locals.hl, locals.p, locals.w);
     } else {
         if probe == SearchAttributionProbe::Read {
-            b.push(Ins::LocalGet(h));
-            b.push(Ins::LocalGet(i));
+            b.push(Ins::LocalGet(locals.h));
+            b.push(Ins::LocalGet(locals.i));
             b.push(Ins::I32Add);
             b.push(Ins::I32Load(0, 4));
-            b.push(Ins::LocalSet(w));
+            b.push(Ins::LocalSet(locals.w));
         }
-        b.push(Ins::LocalGet(i));
+        b.push(Ins::LocalGet(locals.i));
         b.push(Ins::I32Const(4));
         b.push(Ins::I32Add);
-        b.push(Ins::LocalSet(i));
+        b.push(Ins::LocalSet(locals.i));
         b.push(Ins::Br(0));
     }
 
     // Fewer than four bytes remain only at the tail. P1-P3 intentionally do
     // not add the exact byte verifier owned by P4; advance one byte so the
     // diagnostic terminates while retaining the production bound check.
-    b.push(Ins::LocalGet(i));
+    b.push(Ins::LocalGet(locals.i));
     b.push(Ins::I32Const(1));
     b.push(Ins::I32Add);
-    b.push(Ins::LocalSet(i));
+    b.push(Ins::LocalSet(locals.i));
     b.push(Ins::Br(0));
     b.push(Ins::End);
     b.push(Ins::End);
