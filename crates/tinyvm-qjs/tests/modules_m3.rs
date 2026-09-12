@@ -14,7 +14,9 @@
 //! test suite that had been doing exactly this by hand.
 
 use tinyvm::{Limits, WasmModule};
-use tinyvm_qjs::{CompileError, Options, Value, compile_qjs_m1, compile_qjs_m1_with_modules};
+use tinyvm_qjs::{
+    Boundary, CompileError, Options, Value, compile_qjs_m1, compile_qjs_m1_with_modules,
+};
 
 /// A resolver over an in-memory table, which is all the compiler ever sees.
 fn table(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
@@ -73,6 +75,55 @@ fn an_exported_function_is_reachable_through_the_alias() {
         ),
         "3"
     );
+}
+
+/// A static namespace member is checked against the resolver's authoritative
+/// exports while the compiler still knows both the specifier and member.
+#[test]
+fn a_missing_static_namespace_member_names_the_module_and_member() {
+    let error = build(
+        "import * as rh from \"lib/rh_compat\"; return rh.output_sucess({});",
+        &[(
+            "lib/rh_compat",
+            "export function output_success(value) { return value.ok === true; }\n\
+             export function is_direct_file(path) { return path === \"file\"; }",
+        )],
+    )
+    .expect_err("a member absent from the authoritative exports must not compile");
+    assert_eq!(error.boundary, Boundary::ThirdBinding);
+    assert!(error.message.contains("lib/rh_compat"), "{error}");
+    assert!(error.message.contains("output_sucess"), "{error}");
+}
+
+#[test]
+fn exported_static_namespace_members_still_compile() {
+    let module = "export function output_success(value) { return value.ok === true; }\n\
+                  export function is_direct_file(path) { return path === \"file\"; }";
+    build(
+        "import * as rh from \"lib/rh_compat\"; return rh.output_success({ok:true});",
+        &[("lib/rh_compat", module)],
+    )
+    .expect("the exported output_success member compiles");
+    build(
+        "import * as rh from \"lib/rh_compat\"; return rh.is_direct_file(\"file\");",
+        &[("lib/rh_compat", module)],
+    )
+    .expect("the exported is_direct_file member compiles");
+}
+
+#[test]
+fn dynamic_namespace_and_ordinary_object_members_are_not_static_export_checks() {
+    let module = "export function output_success(value) { return value.ok === true; }";
+    build(
+        "import * as rh from \"lib/rh_compat\"; const key = \"output_sucess\"; return rh[key];",
+        &[("lib/rh_compat", module)],
+    )
+    .expect("dynamic namespace access remains a runtime property read");
+    build(
+        "const ordinary = { output_success: 1 }; return ordinary.output_sucess;",
+        &[],
+    )
+    .expect("ordinary object members remain runtime property reads");
 }
 
 /// So is an exported `const`, including one holding a function value.

@@ -400,6 +400,8 @@ pub(crate) mod m1 {
             options,
             resolve,
             exports: Vec::new(),
+            namespaces: Vec::new(),
+            namespace_members: Vec::new(),
             loading: Vec::new(),
             functions: Vec::new(),
             bindings: Vec::new(),
@@ -438,6 +440,16 @@ pub(crate) mod m1 {
         /// source order. Empty while parsing the entry source, which is why
         /// an `export` there is refused rather than ignored.
         exports: Vec<(String, BindingId)>,
+        /// Resolver-authoritative export names for each namespace import.
+        ///
+        /// The namespace is still lowered as an ordinary object. This table
+        /// exists only long enough for resolution to reject a statically
+        /// spelled property that the imported module does not export.
+        namespaces: Vec<Namespace>,
+        /// Static `name.member` reads, paired with the occurrence of `name`.
+        /// Resolution later decides whether that occurrence names an imported
+        /// namespace or an ordinary object.
+        namespace_members: Vec<NamespaceMember>,
         /// The specifiers currently being parsed, outermost first.
         ///
         /// A cycle is not a stack overflow here: it is detected and named.
@@ -512,6 +524,18 @@ pub(crate) mod m1 {
         /// runs on it and reports an undeclared `Number` for a program that no
         /// longer mentions one.
         folded: bool,
+    }
+
+    struct Namespace {
+        binding: BindingId,
+        specifier: String,
+        exports: Vec<String>,
+    }
+
+    struct NamespaceMember {
+        occurrence: u32,
+        member: String,
+        offset: usize,
     }
 
     /// What the occurrence does to the binding. The three answers differ:
@@ -1089,6 +1113,12 @@ pub(crate) mod m1 {
                     at,
                 ));
             }
+
+            self.namespaces.push(Namespace {
+                binding: alias_id,
+                specifier,
+                exports: exports.iter().map(|(name, _)| name.clone()).collect(),
+            });
 
             let mut out = body;
             out.push(Stmt {
@@ -2860,6 +2890,13 @@ pub(crate) mod m1 {
                             };
                             continue;
                         }
+                        if let ExprKind::Name(object) = &expr.kind {
+                            self.namespace_members.push(NamespaceMember {
+                                occurrence: object.occurrence,
+                                member: name.clone(),
+                                offset: token.offset,
+                            });
+                        }
                         expr = Expr {
                             kind: ExprKind::Member {
                                 object: Box::new(expr),
@@ -2921,6 +2958,13 @@ pub(crate) mod m1 {
                                 ));
                             };
                             self.advance();
+                            if let ExprKind::Name(object) = &expr.kind {
+                                self.namespace_members.push(NamespaceMember {
+                                    occurrence: object.occurrence,
+                                    member: name.clone(),
+                                    offset: token.offset,
+                                });
+                            }
                             MemberKey::Static(name)
                         };
                         expr = Expr {
@@ -3448,6 +3492,25 @@ pub(crate) mod m1 {
                     }
                 })
                 .collect::<Result<_, _>>()?;
+            for access in &self.namespace_members {
+                let binding = match resolved[access.occurrence as usize] {
+                    Res::Local(id) | Res::Global(id) | Res::Captured(id) | Res::Callee(id) => id,
+                    Res::Unresolved | Res::Host(_) | Res::Json => continue,
+                };
+                let Some(namespace) = self.namespaces.iter().find(|ns| ns.binding == binding)
+                else {
+                    continue;
+                };
+                if !namespace.exports.iter().any(|name| name == &access.member) {
+                    return Err(crate::diag::host_table(
+                        &format!(
+                            "finds no export named `{}` in the imported module `{}`",
+                            access.member, namespace.specifier
+                        ),
+                        access.offset,
+                    ));
+                }
+            }
             self.record_captures(&resolved);
             Ok(resolved)
         }
