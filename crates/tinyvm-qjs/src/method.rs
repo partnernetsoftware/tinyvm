@@ -1622,7 +1622,7 @@ fn includes(ctx: &Ctx) -> FnBuild {
         probe @ (SearchAttributionProbe::Loop
         | SearchAttributionProbe::Read
         | SearchAttributionProbe::Compare) => {
-            attribution_search_prefix(b, SearchLocals { h, i, hl, nl, p, w }, probe);
+            attribution_search_prefix(b, search_locals(h, i, hl, nl, p, w), probe);
             const_bool(false, b);
             return f;
         }
@@ -1703,6 +1703,16 @@ struct SearchLocals {
     nl: u32,
     p: u32,
     w: u32,
+}
+
+/// Assembles the search loop's locals by role, so the call site names what
+/// each index means instead of assembling the struct in place: `hl` is the
+/// high bound, `nl` the low bound, `i` the cursor, `h` the haystack body and
+/// `p`/`w` the byte pointer and its loaded window. Only the ignored
+/// attribution court reaches this, so it carries no production bytecode.
+#[cfg(test)]
+fn search_locals(h: u32, i: u32, hl: u32, nl: u32, p: u32, w: u32) -> SearchLocals {
+    SearchLocals { h, i, hl, nl, p, w }
 }
 
 #[cfg(test)]
@@ -1788,6 +1798,31 @@ fn attribution_search_prefix_reads_the_high_bound_before_the_low_bound() {
     assert!(matches!(b.get(6), Some(Ins::I32LtU)));
     assert!(matches!(b.get(7), Some(Ins::BrIf(1))));
     assert!(matches!(b.get(8), Some(Ins::LocalGet(v)) if *v != NL && *v != HL));
+}
+
+// The constructor is the only place that decides which local index plays
+// which role, so the expected values are written here by hand and the indices
+// are not adjacent: a swap inside it cannot hide behind two equal values.
+#[cfg(test)]
+#[test]
+fn search_locals_names_each_index_by_its_role() {
+    const H: u32 = 30;
+    const I: u32 = 41;
+    const HL: u32 = 52;
+    const NL: u32 = 74;
+    const P: u32 = 96;
+    const W: u32 = 118;
+    let locals = search_locals(H, I, HL, NL, P, W);
+    assert_eq!(locals.h, H, "h is the haystack body");
+    assert_eq!(locals.i, I, "i is the cursor");
+    assert_eq!(locals.hl, HL, "hl is the high bound");
+    assert_eq!(locals.nl, NL, "nl is the low bound");
+    assert_eq!(locals.p, P, "p is the byte pointer");
+    assert_eq!(locals.w, W, "w is the loaded window");
+    assert_ne!(
+        locals.hl, locals.nl,
+        "the two bounds must be distinguishable"
+    );
 }
 
 #[cfg(test)]
