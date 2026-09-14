@@ -23,7 +23,7 @@
 //! rather than letting a Map or a generator quietly produce nothing.
 
 use tinyvm::{Limits, WasmModule};
-use tinyvm_qjs::{Value, compile_qjs_m1};
+use tinyvm_qjs::{Boundary, Value, compile_qjs_m1};
 
 enum Out {
     Str(String),
@@ -111,6 +111,32 @@ fn the_three_declaration_keywords_all_work() {
         text("let s = 0; for (var x of [1,2]) { s = s + x; } return s;"),
         "3"
     );
+}
+
+/// A missing binding is a malformed header, not an absent language feature.
+///
+/// `of` remains a contextual delimiter rather than a generally available
+/// identifier. Seeing it immediately after the declaration keyword gives the
+/// parser enough context to name the missing structural piece without letting
+/// the lexer's fallback claim that this supported loop form is unavailable.
+#[test]
+fn a_declaration_header_without_a_binding_names_the_missing_name() {
+    for (source, keyword, offset) in [
+        ("for (let of values) { }", "`let`", 9),
+        ("for (const of values) { }", "`const`", 11),
+        ("for (var of values) { }", "`var`", 9),
+    ] {
+        let error = compile_qjs_m1(source).expect_err("a declaration needs a binding");
+        assert_eq!(
+            error.message,
+            format!(
+                "this engine needs a name after the {keyword} keyword in the `for … of` header"
+            ),
+            "{source:?}"
+        );
+        assert_eq!(error.offset, offset, "{source:?}");
+        assert_eq!(error.boundary, Boundary::Subset, "{source:?}");
+    }
 }
 
 /// Each pass binds a **new** `x`, so a closure made on pass N sees pass N's

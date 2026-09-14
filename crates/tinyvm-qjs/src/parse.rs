@@ -2263,6 +2263,22 @@ pub(crate) mod m1 {
         }
 
         fn for_parts(&mut self) -> Result<StmtKind, CompileError> {
+            if matches!(
+                self.kind(),
+                TokenKind::Let | TokenKind::Const | TokenKind::Var
+            ) && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|token| contextual_of(&token.kind))
+            {
+                return Err(malformed(
+                    &format!(
+                        "needs a name after {} in the `for … of` header",
+                        self.kind().name()
+                    ),
+                    self.tokens[self.pos + 1].offset,
+                ));
+            }
             if self.at_for_of_head() {
                 return self.for_of_parts();
             }
