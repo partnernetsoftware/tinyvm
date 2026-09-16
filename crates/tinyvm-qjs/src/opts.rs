@@ -166,3 +166,16 @@ pub enum Names {
 pub struct Options {
     pub names: Names,
 }
+
+/// Runtime ceilings a compiled module asks its embedder to provide.
+///
+/// These switches declare mechanisms, not values. The emitted wasm reads the
+/// actual ceiling through an ordinary import when it needs it, so one compiled
+/// artifact can be instantiated under different limits. Keeping this separate
+/// from [`Options`] preserves the existing compiler surface for embeddings
+/// that do not want runtime ceilings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeLimits {
+    /// Bound the cardinality of each individual Array.
+    pub collection_items: bool,
+}

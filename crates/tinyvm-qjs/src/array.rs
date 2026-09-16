@@ -30,7 +30,7 @@ use super::repr::{
 };
 use super::runtime::{
     ALIGN_WORD, FAULT_INVALID_WRITE, FnBuild, RefusalNames, Rt, RtFunc, StringPool,
-    record_named_fault,
+    record_collection_items_exhausted, record_named_fault,
 };
 
 // -------------------------------------------------------------------------
@@ -174,6 +174,8 @@ pub(crate) struct Ctx {
     /// so `s[i]` is the code unit. `None` keeps the String receiver on the
     /// `__obj_get` path it always took.
     pub(crate) str_index: Option<u32>,
+    /// Zero-argument import returning the cardinality ceiling for one Array.
+    pub(crate) collection_items_limit_import: Option<u32>,
 }
 
 impl Ctx {
@@ -231,6 +233,15 @@ fn arr_new(ctx: &Ctx) -> FnBuild {
     let mut f = FnBuild::new(1);
     let p = f.local(ValType::I32);
     let b = &mut f.body;
+    if let Some(limit) = ctx.collection_items_limit_import {
+        b.push(Ins::Call(limit));
+        b.push(Ins::LocalGet(0));
+        b.push(Ins::I32LtU);
+        b.push(Ins::If(BlockType::Empty));
+        record_collection_items_exhausted(b);
+        b.push(Ins::Unreachable);
+        b.push(Ins::End);
+    }
     b.push(Ins::I32Const(ARR_HEADER));
     b.push(ctx.rt(Rt::Alloc));
     b.push(Ins::LocalSet(p));
@@ -350,6 +361,18 @@ fn arr_push(ctx: &Ctx) -> FnBuild {
     let e = f.local(ValType::I32);
     let n = f.local(ValType::I32);
     let b = &mut f.body;
+
+    if let Some(limit) = ctx.collection_items_limit_import {
+        b.push(Ins::LocalGet(0));
+        b.push(Ins::I32Load(ALIGN_WORD, ARR_LEN));
+        b.push(Ins::Call(limit));
+        b.push(Ins::I32LtU);
+        b.push(Ins::I32Eqz);
+        b.push(Ins::If(BlockType::Empty));
+        record_collection_items_exhausted(b);
+        b.push(Ins::Unreachable);
+        b.push(Ins::End);
+    }
 
     b.push(Ins::LocalGet(0));
     b.push(ctx.me(Ar::Grow));

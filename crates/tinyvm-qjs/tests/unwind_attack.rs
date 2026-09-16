@@ -171,6 +171,7 @@ impl Bases {
             runtime_base: self.rt.func_base,
             names: self.array_names,
             str_index: None,
+            collection_items_limit_import: None,
         }));
         all
     }

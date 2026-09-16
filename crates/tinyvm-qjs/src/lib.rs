@@ -107,7 +107,12 @@ mod repr;
 mod runtime;
 
 pub use diag::{Boundary, CompileError};
-pub use opts::{HostFn, HostParam, HostResult, Names, Options};
+pub use opts::{HostFn, HostParam, HostResult, Names, Options, RuntimeLimits};
+
+/// Module of the internal runtime-limit imports emitted on explicit opt-in.
+pub const RUNTIME_LIMIT_MODULE: &str = "tinyvm_qjs_runtime";
+/// Function import returning the maximum cardinality of one Array.
+pub const COLLECTION_ITEMS_LIMIT_IMPORT: &str = "collection_items";
 pub use qjs2wasm::qjs2wasm;
 
 /// A JavaScript value as a host sees it at the call boundary.
@@ -259,6 +264,10 @@ pub enum GuestFault {
     /// out-of-range index on an Array, or a property on a value that has
     /// none. [`guest_invalid_write`] says which.
     InvalidWrite,
+    /// One Array would exceed the embedder-provided cardinality ceiling.
+    /// The ceiling applies independently to each Array, so this is not a
+    /// cumulative allocation counter and is not heap exhaustion.
+    CollectionItemsExhausted,
 }
 
 /// Read the guest's own account of why it trapped, out of its linear memory.
@@ -407,6 +416,7 @@ pub fn guest_fault(memory: &[u8]) -> Option<GuestFault> {
         runtime::FAULT_NOT_A_FUNCTION => Some(GuestFault::NotAFunction),
         runtime::FAULT_NO_PRIMITIVE_FORM => Some(GuestFault::NoPrimitiveForm),
         runtime::FAULT_INVALID_WRITE => Some(GuestFault::InvalidWrite),
+        runtime::FAULT_COLLECTION_ITEMS_EXHAUSTED => Some(GuestFault::CollectionItemsExhausted),
         _ => None,
     }
 }
@@ -543,9 +553,24 @@ pub fn compile_qjs_m1_with_modules(
     options: Options,
     resolve: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Vec<u8>, CompileError> {
+    compile_qjs_m1_with_modules_and_runtime_limits(
+        source,
+        options,
+        RuntimeLimits::default(),
+        resolve,
+    )
+}
+
+/// [`compile_qjs_m1_with_modules`] with opt-in runtime limit mechanisms.
+pub fn compile_qjs_m1_with_modules_and_runtime_limits(
+    source: &str,
+    options: Options,
+    runtime_limits: RuntimeLimits,
+    resolve: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<u8>, CompileError> {
     let tokens = lex::tokenize(source)?;
     let program = parse::m1::parse_with_modules(tokens, options.clone(), Some(resolve))?;
-    let module = emit::m1::lower(&program, &options)?;
+    let module = emit::m1::lower_with_runtime_limits(&program, &options, runtime_limits)?;
     Ok(ir::m1::assemble(&module))
 }
 
@@ -566,9 +591,26 @@ pub fn compile_qjs_m1_with_allocation_probe(
     source: &str,
     options: Options,
 ) -> Result<Vec<u8>, CompileError> {
+    compile_qjs_m1_with_runtime_limits_and_allocation_probe(
+        source,
+        options,
+        RuntimeLimits::default(),
+    )
+}
+
+/// [`compile_qjs_m1_with_allocation_probe`] with opt-in runtime limits.
+pub fn compile_qjs_m1_with_runtime_limits_and_allocation_probe(
+    source: &str,
+    options: Options,
+    runtime_limits: RuntimeLimits,
+) -> Result<Vec<u8>, CompileError> {
     let tokens = lex::tokenize(source)?;
     let program = parse::m1::parse(tokens, options.clone())?;
-    let module = emit::m1::lower_with_allocation_probe(&program, &options)?;
+    let module = emit::m1::lower_with_runtime_limits_and_allocation_probe(
+        &program,
+        &options,
+        runtime_limits,
+    )?;
     Ok(ir::m1::assemble(&module))
 }
 
@@ -580,16 +622,44 @@ pub fn compile_qjs_m1_with_modules_and_allocation_probe(
     options: Options,
     resolve: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Vec<u8>, CompileError> {
+    compile_qjs_m1_with_modules_and_runtime_limits_and_allocation_probe(
+        source,
+        options,
+        RuntimeLimits::default(),
+        resolve,
+    )
+}
+
+/// [`compile_qjs_m1_with_modules_and_allocation_probe`] with runtime limits.
+pub fn compile_qjs_m1_with_modules_and_runtime_limits_and_allocation_probe(
+    source: &str,
+    options: Options,
+    runtime_limits: RuntimeLimits,
+    resolve: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<u8>, CompileError> {
     let tokens = lex::tokenize(source)?;
     let program = parse::m1::parse_with_modules(tokens, options.clone(), Some(resolve))?;
-    let module = emit::m1::lower_with_allocation_probe(&program, &options)?;
+    let module = emit::m1::lower_with_runtime_limits_and_allocation_probe(
+        &program,
+        &options,
+        runtime_limits,
+    )?;
     Ok(ir::m1::assemble(&module))
 }
 
 pub fn compile_qjs_m1_with(source: &str, options: Options) -> Result<Vec<u8>, CompileError> {
+    compile_qjs_m1_with_runtime_limits(source, options, RuntimeLimits::default())
+}
+
+/// [`compile_qjs_m1_with`] with opt-in runtime limit mechanisms.
+pub fn compile_qjs_m1_with_runtime_limits(
+    source: &str,
+    options: Options,
+    runtime_limits: RuntimeLimits,
+) -> Result<Vec<u8>, CompileError> {
     let tokens = lex::tokenize(source)?;
     let program = parse::m1::parse(tokens, options.clone())?;
-    let module = emit::m1::lower(&program, &options)?;
+    let module = emit::m1::lower_with_runtime_limits(&program, &options, runtime_limits)?;
     Ok(ir::m1::assemble(&module))
 }
 

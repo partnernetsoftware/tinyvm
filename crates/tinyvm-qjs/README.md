@@ -46,6 +46,14 @@ One JavaScript value is **two** wasm values — a `(tag: i32, payload: i64)` pai
 is the door across that boundary; `Value::String` is a pointer into the
 instance's linear memory, not text, and resolving it needs the instance.
 
+Embedders may opt compiled modules into generic runtime-limit mechanisms with
+`RuntimeLimits`. These switches declare imports, not limit values: the host
+binds the requested value when it loads the module, so the same wasm bytes can
+run under a different ceiling each time. The default compiler entry points do
+not emit these imports and retain their existing behavior. `collection_items`
+currently bounds each Array independently at its creation/growth boundary and
+reports `GuestFault::CollectionItemsExhausted`, distinct from heap exhaustion.
+
 ## What it compiles
 
 - **Numbers**: binary64 throughout. `1/10 + 2/10 !== 3/10`, `2147483647 + 1`

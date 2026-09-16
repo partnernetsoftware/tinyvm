@@ -597,21 +597,23 @@ pub(crate) mod m1 {
         }
     }
 
-    pub(crate) fn lower(
+    pub(crate) fn lower_with_runtime_limits(
         program: &ast::Program,
         options: &Options,
+        runtime_limits: crate::RuntimeLimits,
     ) -> Result<ir::Module, CompileError> {
-        lower_inner(program, options, false)
+        lower_inner(program, options, runtime_limits, false)
     }
 
     /// Diagnostic lowering for allocation attribution. Ordinary lowering
     /// never enters this path, so its module bytes cannot acquire a probe
     /// global, local or instruction by accident.
-    pub(crate) fn lower_with_allocation_probe(
+    pub(crate) fn lower_with_runtime_limits_and_allocation_probe(
         program: &ast::Program,
         options: &Options,
+        runtime_limits: crate::RuntimeLimits,
     ) -> Result<ir::Module, CompileError> {
-        let mut module = lower_inner(program, options, true)?;
+        let mut module = lower_inner(program, options, runtime_limits, true)?;
         add_allocation_probe(&mut module);
         Ok(module)
     }
@@ -619,6 +621,7 @@ pub(crate) mod m1 {
     fn lower_inner(
         program: &ast::Program,
         options: &Options,
+        runtime_limits: crate::RuntimeLimits,
         allocation_probe: bool,
     ) -> Result<ir::Module, CompileError> {
         let scan = scan(program, matches!(options.names, Names::Declared(_)))?;
@@ -636,7 +639,9 @@ pub(crate) mod m1 {
         // exactly where the runtime ends. Both bases are arithmetic on two
         // constant set lengths, which is what lets the runtime name a
         // conversion by index before either set is built.
-        let runtime_base = table.imports();
+        let collection_items_limit = runtime_limits.collection_items && scan.arrays;
+        let collection_items_limit_import = collection_items_limit.then_some(table.imports());
+        let runtime_base = table.imports() + u32::from(collection_items_limit);
         let convert_base = runtime_base + runtime::SET.len() as u32;
         // The JSON set sits between the conversions and the user's functions,
         // and is absent entirely for a program that never names `JSON`, which
@@ -722,7 +727,7 @@ pub(crate) mod m1 {
         };
 
         let mut types: Vec<ir::FuncType> = Vec::new();
-        let imports: Vec<ir::Import> = match &table {
+        let mut imports: Vec<ir::Import> = match &table {
             Table::Pairs(hosts) => hosts
                 .iter()
                 .map(|host| ir::Import {
@@ -733,6 +738,13 @@ pub(crate) mod m1 {
                 .collect(),
             Table::Raw(bound) => raw_imports(bound, &mut types),
         };
+        if collection_items_limit {
+            imports.push(ir::Import {
+                module: crate::RUNTIME_LIMIT_MODULE.to_owned(),
+                name: crate::COLLECTION_ITEMS_LIMIT_IMPORT.to_owned(),
+                type_index: intern(&mut types, Vec::new(), vec![ValType::I32]),
+            });
+        }
 
         // The JSON set is built only for a program that names `JSON`, and it
         // is handed the unwind globals so that its refusals are catchable
@@ -771,6 +783,7 @@ pub(crate) mod m1 {
                 runtime_base,
                 names: array::Names::intern(&mut pool),
                 str_index,
+                collection_items_limit_import,
             })
         } else {
             Vec::new()
