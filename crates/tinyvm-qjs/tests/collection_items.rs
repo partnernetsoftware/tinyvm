@@ -12,6 +12,7 @@ fn compile(source: &str) -> Vec<u8> {
         Options::default(),
         RuntimeLimits {
             collection_items: true,
+            ..RuntimeLimits::default()
         },
     )
     .expect("source compiles")
@@ -97,6 +98,7 @@ fn the_runtime_import_is_opt_in_and_array_gated() {
         Options::default(),
         RuntimeLimits {
             collection_items: true,
+            ..RuntimeLimits::default()
         },
     )
     .expect("scalar source compiles");

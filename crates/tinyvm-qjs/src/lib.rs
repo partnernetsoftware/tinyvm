@@ -113,6 +113,8 @@ pub use opts::{HostFn, HostParam, HostResult, Names, Options, RuntimeLimits};
 pub const RUNTIME_LIMIT_MODULE: &str = "tinyvm_qjs_runtime";
 /// Function import returning the maximum cardinality of one Array.
 pub const COLLECTION_ITEMS_LIMIT_IMPORT: &str = "collection_items";
+/// Function import returning the maximum active expression depth in one JS function.
+pub const EXPRESSION_DEPTH_LIMIT_IMPORT: &str = "expression_depth";
 pub use qjs2wasm::qjs2wasm;
 
 /// A JavaScript value as a host sees it at the call boundary.
@@ -268,6 +270,9 @@ pub enum GuestFault {
     /// The ceiling applies independently to each Array, so this is not a
     /// cumulative allocation counter and is not heap exhaustion.
     CollectionItemsExhausted,
+    /// One JS function exceeded the embedder-provided active expression-depth ceiling.
+    /// Calls start a fresh chain, so this is independent of call depth and activation slots.
+    ExpressionDepthExhausted,
 }
 
 /// Read the guest's own account of why it trapped, out of its linear memory.
@@ -417,6 +422,7 @@ pub fn guest_fault(memory: &[u8]) -> Option<GuestFault> {
         runtime::FAULT_NO_PRIMITIVE_FORM => Some(GuestFault::NoPrimitiveForm),
         runtime::FAULT_INVALID_WRITE => Some(GuestFault::InvalidWrite),
         runtime::FAULT_COLLECTION_ITEMS_EXHAUSTED => Some(GuestFault::CollectionItemsExhausted),
+        runtime::FAULT_EXPRESSION_DEPTH_EXHAUSTED => Some(GuestFault::ExpressionDepthExhausted),
         _ => None,
     }
 }

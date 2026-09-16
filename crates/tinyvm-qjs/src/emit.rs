@@ -487,6 +487,13 @@ pub(crate) mod m1 {
         const WORDS: u32 = 3;
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct ExpressionDepth {
+        limit: u32,
+        active: u32,
+        import: u32,
+    }
+
     /// Where the `JSON` namespace object lives, for a program that names it.
     ///
     /// One V1 pair of globals holding one object, built by `__json_ns` on the
@@ -641,7 +648,11 @@ pub(crate) mod m1 {
         // conversion by index before either set is built.
         let collection_items_limit = runtime_limits.collection_items && scan.arrays;
         let collection_items_limit_import = collection_items_limit.then_some(table.imports());
-        let runtime_base = table.imports() + u32::from(collection_items_limit);
+        let expression_depth_limit = runtime_limits.expression_depth;
+        let expression_depth_limit_import =
+            expression_depth_limit.then_some(table.imports() + u32::from(collection_items_limit));
+        let runtime_base =
+            table.imports() + u32::from(collection_items_limit) + u32::from(expression_depth_limit);
         let convert_base = runtime_base + runtime::SET.len() as u32;
         // The JSON set sits between the conversions and the user's functions,
         // and is absent entirely for a program that never names `JSON`, which
@@ -680,6 +691,17 @@ pub(crate) mod m1 {
             binding_globals
                 + unwind.map_or(0, |_| Unwind::WORDS)
                 + u32::from(scan.json) * Json::WORDS
+        });
+        let expression_depth = expression_depth_limit.then(|| {
+            let base = binding_globals
+                + unwind.map_or(0, |_| Unwind::WORDS)
+                + u32::from(scan.json) * Json::WORDS
+                + u32::from(allocation_probe);
+            ExpressionDepth {
+                limit: base,
+                active: base + 1,
+                import: expression_depth_limit_import.expect("enabled import"),
+            }
         });
 
         let ctx = Ctx {
@@ -742,6 +764,13 @@ pub(crate) mod m1 {
             imports.push(ir::Import {
                 module: crate::RUNTIME_LIMIT_MODULE.to_owned(),
                 name: crate::COLLECTION_ITEMS_LIMIT_IMPORT.to_owned(),
+                type_index: intern(&mut types, Vec::new(), vec![ValType::I32]),
+            });
+        }
+        if expression_depth_limit {
+            imports.push(ir::Import {
+                module: crate::RUNTIME_LIMIT_MODULE.to_owned(),
+                name: crate::EXPRESSION_DEPTH_LIMIT_IMPORT.to_owned(),
                 type_index: intern(&mut types, Vec::new(), vec![ValType::I32]),
             });
         }
@@ -965,6 +994,7 @@ pub(crate) mod m1 {
                 scan.captures,
                 id,
                 immediate_host_argument_total,
+                expression_depth,
             )
             .function()?;
             let arity = if id == ast::Program::SCRIPT {
@@ -1082,12 +1112,27 @@ pub(crate) mod m1 {
                     body.push(Ins::LocalGet(0));
                 }
                 body.extend((0..arity * WIDTH).map(|i| Ins::LocalGet(env_slot + i)));
+                let adapter_locals = if let Some(depth) = expression_depth {
+                    let saved = u32::from(scan.captures) + uniform.arity * WIDTH;
+                    body.push(Ins::GlobalGet(depth.active));
+                    body.push(Ins::LocalSet(saved));
+                    body.push(Ins::I32Const(0));
+                    body.push(Ins::GlobalSet(depth.active));
+                    vec![(1, ValType::I32)]
+                } else {
+                    Vec::new()
+                };
                 body.push(Ins::Call(user_base + id.0));
+                if let Some(depth) = expression_depth {
+                    let saved = u32::from(scan.captures) + uniform.arity * WIDTH;
+                    body.push(Ins::LocalGet(saved));
+                    body.push(Ins::GlobalSet(depth.active));
+                }
                 funcs.push(func(
                     format!("<adapter of {}>", debug_name(program, *id)),
                     None,
                     uniform.type_index,
-                    Vec::new(),
+                    adapter_locals,
                     body,
                 ));
                 in_table.push(adapter_base + fns.reserved as u32 + position as u32);
@@ -1182,6 +1227,16 @@ pub(crate) mod m1 {
                 mutable: true,
                 init: ir::Const::I32(0),
             });
+        }
+        if let Some(expression_depth) = expression_depth {
+            debug_assert_eq!(globals.len() as u32, expression_depth.limit);
+            for _ in 0..2 {
+                globals.push(ir::Global {
+                    ty: ir::ValType::I32,
+                    mutable: true,
+                    init: ir::Const::I32(0),
+                });
+            }
         }
 
         let data = if pool.is_empty() {
@@ -2325,6 +2380,7 @@ pub(crate) mod m1 {
         /// Diagnostic-only gross allocation counter for the exact immediate
         /// `JSON.stringify(binding)` -> raw host argument region.
         immediate_host_argument_total: Option<u32>,
+        expression_depth: Option<ExpressionDepth>,
         user_base: u32,
         id: ast::FuncId,
         f: FnBuild,
@@ -2390,6 +2446,7 @@ pub(crate) mod m1 {
             captures: bool,
             id: ast::FuncId,
             immediate_host_argument_total: Option<u32>,
+            expression_depth: Option<ExpressionDepth>,
         ) -> Self {
             let function = program.func(id);
             let arity = if id == ast::Program::SCRIPT {
@@ -2443,6 +2500,7 @@ pub(crate) mod m1 {
                 unwind,
                 json,
                 immediate_host_argument_total,
+                expression_depth,
                 user_base,
                 captures,
                 id,
@@ -2577,6 +2635,11 @@ pub(crate) mod m1 {
                 // sitting there when a later call trapped for its own,
                 // entirely different reason.
                 runtime::clear_fault(&mut self.f.body);
+                if let Some(depth) = self.expression_depth {
+                    self.push(Ins::Call(depth.import));
+                    self.push(Ins::GlobalSet(depth.limit));
+                    self.reset_expression_depth();
+                }
                 // And the same argument, one word over. The in-flight flag is
                 // a module **global**, so it is instance state, and an
                 // uncaught throw traps with it still raised -- a tinyvm
@@ -3220,8 +3283,16 @@ pub(crate) mod m1 {
                 return;
             };
             self.push(Ins::GlobalGet(unwind.flag));
+            if self.expression_depth.is_none() {
+                let target = self.unwind_target();
+                self.push(Ins::BrIf(target));
+                return;
+            }
+            self.push(Ins::If(BlockType::Empty));
+            self.reset_expression_depth();
             let target = self.unwind_target();
-            self.push(Ins::BrIf(target));
+            self.push(Ins::Br(target));
+            self.push(Ins::End);
         }
 
         /// `throw e`, ECMA-262 14.14.1: evaluate, then leave.
@@ -3242,6 +3313,7 @@ pub(crate) mod m1 {
         /// Hand a throw whose globals are already set to the nearest handler,
         /// or out of the function.
         fn leave_with_throw(&mut self) {
+            self.reset_expression_depth();
             match self.handlers.last() {
                 Some(&at) => {
                     let back = self.depth - at;
@@ -3281,6 +3353,7 @@ pub(crate) mod m1 {
         /// Enter a `catch` clause: the throw stops being in flight, and the
         /// value it carried becomes the parameter (ECMA-262 14.15.3 step 4).
         fn bind_caught(&mut self, param: Option<ast::BindingId>) {
+            self.reset_expression_depth();
             match self.unwind {
                 Some(unwind) => {
                     self.push(Ins::I32Const(0));
@@ -3705,6 +3778,13 @@ pub(crate) mod m1 {
 
         /// Leave exactly one JS value -- two wasm values -- on the stack.
         fn expr(&mut self, expr: &ast::Expr) -> Result<(), CompileError> {
+            self.enter_expression();
+            self.expr_inner(expr)?;
+            self.leave_expression();
+            Ok(())
+        }
+
+        fn expr_inner(&mut self, expr: &ast::Expr) -> Result<(), CompileError> {
             match &expr.kind {
                 // An integer literal is a Number: ECMA-262 6.1.6.1 has one
                 // numeric type and it is the double. `1/2` is `0.5` here.
@@ -4151,7 +4231,9 @@ pub(crate) mod m1 {
             }
             let arity = self.program.func(target).params.len() as u32;
             self.arguments(args, arity)?;
+            let caller_depth = self.save_and_reset_expression_depth();
             self.push(Ins::Call(self.user_base + target.0));
+            self.restore_expression_depth(caller_depth);
             // One of the two places a throw can arrive from somewhere else.
             self.throw_check();
             Ok(())
@@ -4219,13 +4301,67 @@ pub(crate) mod m1 {
             };
             self.call_checked_record(slot, &callee_name);
             self.push(Ins::I32Load(ALIGN_WORD, FN_ELEMENT));
+            let caller_depth = self.save_and_reset_expression_depth();
             self.push(Ins::CallIndirect(uniform.type_index, 0));
+            self.restore_expression_depth(caller_depth);
             // The other one. The adapter in the table needs no check of its
             // own: it forwards and returns, so a throw the target raised is
             // still in flight when this returns.
             self.throw_check();
             self.give(slot);
             Ok(())
+        }
+
+        fn enter_expression(&mut self) {
+            let Some(depth) = self.expression_depth else {
+                return;
+            };
+            self.push(Ins::GlobalGet(depth.active));
+            self.push(Ins::GlobalGet(depth.limit));
+            self.push(Ins::I32GeU);
+            self.push(Ins::If(BlockType::Empty));
+            runtime::record_expression_depth_exhausted(&mut self.f.body);
+            self.push(Ins::Unreachable);
+            self.push(Ins::End);
+            self.push(Ins::GlobalGet(depth.active));
+            self.push(Ins::I32Const(1));
+            self.push(Ins::I32Add);
+            self.push(Ins::GlobalSet(depth.active));
+        }
+
+        fn leave_expression(&mut self) {
+            let Some(depth) = self.expression_depth else {
+                return;
+            };
+            self.push(Ins::GlobalGet(depth.active));
+            self.push(Ins::I32Const(1));
+            self.push(Ins::I32Sub);
+            self.push(Ins::GlobalSet(depth.active));
+        }
+
+        fn reset_expression_depth(&mut self) {
+            if let Some(depth) = self.expression_depth {
+                self.push(Ins::I32Const(0));
+                self.push(Ins::GlobalSet(depth.active));
+            }
+        }
+
+        fn save_and_reset_expression_depth(&mut self) -> Option<u32> {
+            let depth = self.expression_depth?;
+            let saved = self.take_raw();
+            self.push(Ins::GlobalGet(depth.active));
+            self.push(Ins::LocalSet(saved));
+            self.reset_expression_depth();
+            Some(saved)
+        }
+
+        fn restore_expression_depth(&mut self, saved: Option<u32>) {
+            let (Some(depth), Some(saved)) = (self.expression_depth, saved) else {
+                return;
+            };
+            self.push(Ins::LocalGet(saved));
+            self.push(Ins::GlobalSet(depth.active));
+            self.give_raw(saved);
         }
 
         /// A method call, specialised at the call site.

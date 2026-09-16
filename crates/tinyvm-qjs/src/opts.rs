@@ -178,4 +178,6 @@ pub struct Options {
 pub struct RuntimeLimits {
     /// Bound the cardinality of each individual Array.
     pub collection_items: bool,
+    /// Bound the active expression-evaluation chain within one JS function.
+    pub expression_depth: bool,
 }

@@ -167,6 +167,11 @@ pub(crate) fn record_collection_items_exhausted(out: &mut Vec<Ins>) {
     store_fault(FAULT_COLLECTION_ITEMS_EXHAUSTED, out);
 }
 
+/// Record expression-chain exhaustion immediately before trapping.
+pub(crate) fn record_expression_depth_exhausted(out: &mut Vec<Ins>) {
+    store_fault(FAULT_EXPRESSION_DEPTH_EXHAUSTED, out);
+}
+
 /// Emitted where a throw becomes a trap: `__throw` in a module with no unwind
 /// channel, and the entry point's epilogue where a throw ran out of handlers.
 /// The write has to come first -- once the trap has happened there is no
@@ -263,6 +268,11 @@ pub(crate) const FAULT_INVALID_WRITE: i32 = 10;
 /// This is distinct from heap exhaustion: raising memory cannot make an Array
 /// accepted when its own item limit is the exhausted resource.
 pub(crate) const FAULT_COLLECTION_ITEMS_EXHAUSTED: i32 = 11;
+
+/// One function's simultaneously active expression-evaluation chain crossed
+/// the runtime ceiling. This is deliberately distinct from call depth and
+/// activation-slot exhaustion.
+pub(crate) const FAULT_EXPRESSION_DEPTH_EXHAUSTED: i32 = 12;
 
 /// Emitted where a host argument's tag test fails: the detail first, then
 /// the code, then the caller's `unreachable`.
