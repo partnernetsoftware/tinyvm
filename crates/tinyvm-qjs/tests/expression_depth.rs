@@ -3,7 +3,8 @@
 use tinyvm::{Limits, Val, WasmInstance, WasmModule};
 use tinyvm_qjs::{
     EXPRESSION_DEPTH_LIMIT_IMPORT, GuestFault, Options, RUNTIME_LIMIT_MODULE, RuntimeLimits, Value,
-    compile_qjs_m1_with_runtime_limits, guest_fault,
+    compile_qjs_m1_with_modules_and_runtime_limits, compile_qjs_m1_with_runtime_limits,
+    guest_fault,
 };
 
 fn compile(source: &str) -> Vec<u8> {
@@ -47,6 +48,28 @@ fn run(bytes: &[u8], limit: i32) -> Result<Value, GuestFault> {
 
 fn number(value: f64) -> Result<Value, GuestFault> {
     Ok(Value::Number(value))
+}
+
+#[test]
+fn modules_with_throwing_helpers_keep_valid_expression_stacks() {
+    let module = r#"
+function request(payload) {
+  if (payload === 0) { throw "empty"; }
+  return payload;
+}
+export function call(command) { return request({command: command}); }
+"#;
+    let bytes = compile_qjs_m1_with_modules_and_runtime_limits(
+        "import * as api from \"api\"; return api.call(7).command;",
+        Options::default(),
+        RuntimeLimits {
+            expression_depth: true,
+            ..RuntimeLimits::default()
+        },
+        &|specifier| (specifier == "api").then(|| module.to_owned()),
+    )
+    .expect("module closure compiles");
+    assert_eq!(run(&bytes, 8), number(7.0));
 }
 
 #[test]
@@ -164,4 +187,68 @@ fn emitted_growth_is_recorded_at_eight_and_sixty_four_levels() {
         129
     );
     assert!(sixty_four.len() > eight.len());
+}
+
+#[test]
+fn the_same_throwing_helper_without_modules_keeps_valid_expression_stacks() {
+    // C: byte-for-byte the same helper shape as the module case, but with no
+    // module boundary -- isolates whether the load-time invalidity needs
+    // `parse_with_modules` at all.
+    let bytes = compile(
+        "function request(payload) { if (payload === 0) { throw \"empty\"; } return payload; } \
+         return request({command: 7}).command;",
+    );
+    assert_eq!(run(&bytes, 8), number(7.0));
+}
+
+#[test]
+fn module_with_throw_under_no_runtime_limits_loads() {
+    // D: the A source again, but with both runtime limits off. Separates
+    // "module+throw is already broken" from "expression-depth instrumentation
+    // breaks module+throw".
+    let module = r#"
+function request(payload) {
+  if (payload === 0) { throw "empty"; }
+  return payload;
+}
+export function call(command) { return request({command: command}); }
+"#;
+    let bytes = compile_qjs_m1_with_modules_and_runtime_limits(
+        "import * as api from \"api\"; return api.call(7).command;",
+        Options::default(),
+        RuntimeLimits::default(),
+        &|specifier| (specifier == "api").then(|| module.to_owned()),
+    )
+    .expect("module closure compiles");
+    let mut instance = WasmModule::from_bytes_with(&bytes, Limits::default())
+        .expect("no-limit module with throw must load")
+        .instantiate()
+        .expect("instantiates");
+    let values = instance
+        .invoke_by_name("main", &Value::args(&[]))
+        .expect("runs");
+    assert_eq!(Value::returned(&values), Ok(Value::Number(7.0)));
+}
+
+#[test]
+fn module_export_without_inner_call_keeps_valid_expression_stacks() {
+    // E: module export with a throw but *no* inner function call. Separates
+    // "the module wrapper/export path" from "an intra-module call".
+    let module = r#"
+export function call(command) {
+  if (command === 0) { throw "empty"; }
+  return command;
+}
+"#;
+    let bytes = compile_qjs_m1_with_modules_and_runtime_limits(
+        "import * as api from \"api\"; return api.call(7);",
+        Options::default(),
+        RuntimeLimits {
+            expression_depth: true,
+            ..RuntimeLimits::default()
+        },
+        &|specifier| (specifier == "api").then(|| module.to_owned()),
+    )
+    .expect("module closure compiles");
+    assert_eq!(run(&bytes, 8), number(7.0));
 }

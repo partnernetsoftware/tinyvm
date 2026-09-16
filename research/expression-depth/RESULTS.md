@@ -73,3 +73,38 @@ artifact bytes 是测量记录，不是未来固定承诺。若 expression taxon
 - 不用静态 AST 最大深度、call depth、activation slots 或 fuel 近似本事实；
 - 本次不做插桩性能优化。若后续真实 workload 证明 G4 成本需要优化，应另立测量叶，且不得
   放宽 G1/G2/G5。
+
+## 后续修复：modules × expression-depth 的 load 期失败（2026-09-16）
+
+把该 limit 接到下游（`agenterm-qjswasm` 打开 `RuntimeLimits { expression_depth: true }`）后，
+**modules 与 throw 的组合**在模块加载期失败。四面夹逼（`tests/expression_depth.rs`，四条各
+自 PASS/FAIL）：
+
+| 形状 | expression_depth | 结果 |
+|---|---|---|
+| module 内调用一个会 `throw` 的函数 | on | **非法**：`validation: operand stack underflow` |
+| 同一段源码内联、无 module 边界 | on | 合法 |
+| module + throw，两个 runtime limit 全关 | off | 合法 |
+| module 内 `throw` 但**没有**内部调用 | on | 合法 |
+
+**根因**：`throw_check`（call 之后的 throw 检查）在 limit 开启时把两条指令写成了
+
+```wat
+global.get $unwind_flag
+if (empty)                 ;; ← 这个块是根因
+  <reset_expression_depth>
+  br $target
+end
+```
+
+`Lower::push` 对 `Ins::If(_)` 会 `self.depth += 1`，而 `unwind_target()` 用 `self.depth` 计算
+**相对标签**：有 handler 时 `self.depth - at`，**没有 handler 时就是 `self.depth`**。⇒ 那个块
+让无 handler 的 throw 标签**多跳一层**，生成的模块因此非法。有 handler 时 `depth - at` 恰好
+抵消多出的那一层，所以只有"无 handler 的 throw"路径触发——这也解释了为什么四格中只有第一格红。
+
+**修复**：`throw_check` 无论 limit 是否发布都**只发两条指令**（`global.get $flag` +
+`br_if $unwind_target`），**不引入任何块**。这里本来也不需要恢复：callee 抛出时已经在
+`throw_stmt` 里重置了自己的链，正常返回则按设计保留 caller 的链。
+
+**判据**：`cargo test -p tinyvm-qjs --test expression_depth` = 9 passed / 0 failed（上述四条 +
+原有五条），`--test modules_m3` = 16 passed / 0 failed。

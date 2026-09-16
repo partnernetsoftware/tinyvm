@@ -3278,21 +3278,22 @@ pub(crate) mod m1 {
 
         /// The check after a call that could have thrown: two instructions,
         /// and none at all in a program with no `throw` in it.
+        ///
+        /// These stay two instructions even when the expression-depth limit is
+        /// published. Wrapping a reset in an `if` would add a block, and
+        /// [`Self::unwind_target`] counts its label relative to `self.depth` --
+        /// which that block changes -- so a handler-less throw would branch one
+        /// frame too far and the module would fail validation on load. Nothing
+        /// needs restoring here anyway: a callee that throws already reset its
+        /// own chain in [`Self::throw_stmt`], and a callee that returns normally
+        /// leaves the caller's chain intact by design.
         fn throw_check(&mut self) {
             let Some(unwind) = self.unwind else {
                 return;
             };
             self.push(Ins::GlobalGet(unwind.flag));
-            if self.expression_depth.is_none() {
-                let target = self.unwind_target();
-                self.push(Ins::BrIf(target));
-                return;
-            }
-            self.push(Ins::If(BlockType::Empty));
-            self.reset_expression_depth();
             let target = self.unwind_target();
-            self.push(Ins::Br(target));
-            self.push(Ins::End);
+            self.push(Ins::BrIf(target));
         }
 
         /// `throw e`, ECMA-262 14.14.1: evaluate, then leave.
