@@ -121,6 +121,9 @@ pub unsafe extern "C" fn tinyvm_wasi_host_v1_run(
             max_steps: config.max_steps,
             max_call_depth: config.max_call_depth as usize,
             max_activation_slots: config.max_activation_slots as usize,
+            // This decoding path has no decode-budget field in its wire
+            // format, so it keeps the loader's default ceiling.
+            ..Limits::default()
         };
         let mut module = WasmModule::from_bytes_with(wasm, limits).map_err(wasm_status)?;
         wasi.bind(&mut module).map_err(wasm_status)?;

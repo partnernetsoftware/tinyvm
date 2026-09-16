@@ -108,3 +108,21 @@ end
 
 **判据**：`cargo test -p tinyvm-qjs --test expression_depth` = 9 passed / 0 failed（上述四条 +
 原有五条），`--test modules_m3` = 16 passed / 0 failed。
+
+## decode budget 现在是 `Limits` 字段（2026-09-16）
+
+下游实测：`entry + 全部 reserved modules` 在 expression_depth **开启**时是
+**781,705 bytes / 347,290 decode items**，超过加载器固定的 **262,144**（+32.5%）⇒
+`module decode budget`。off 侧未直接测，按插桩放大率反推约 **93,100**（≈35%）。⇒ 这是
+**插桩放大 × 固定预算**的容量冲突，与上面的 `throw_check` 修复无关（该修复只删指令）。
+
+修法：把该上限从常量变成公开 `Limits` 的字段 **`max_decode_items`**（默认仍
+`WASM_MAX_DECODE_ITEMS = 262_144`），`DecodeBudget` 从**传入的 `Limits`** 取值。
+⇒ **默认行为逐字不变**；需要解码更大模块的嵌入者（例如加载自带 entry + reserved
+modules 的产品）显式提高即可，而不必放宽全局默认。host profile 的 wire 格式**没有**
+该字段，profile 装载的模块继续用默认上限。
+
+证据（`tests/decode_budget_limit.rs`，手编码一份字节供三向共用）：同一份
+300,000 个 no-op 的函数体 —— 默认 `Limits` **拒绝**（`module decode budget`）、
+显式 `524_288` **加载**；`max_decode_items: 0` 与 `4` 均 **fail-closed**。
+既有 `tests/untrusted.rs` 的 count-bomb 语义（默认上限下的拒绝）保持不变。

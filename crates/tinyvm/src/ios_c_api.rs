@@ -274,6 +274,9 @@ unsafe fn read_runtime_config(
             max_steps: prefix.max_steps,
             max_call_depth,
             max_activation_slots,
+            // The FFI v1 wire format has no decode-budget field, so this path
+            // keeps the loader's default ceiling.
+            ..Limits::default()
         },
         game_limits: GameLimits {
             max_render_bytes: prefix.max_render_bytes as usize,

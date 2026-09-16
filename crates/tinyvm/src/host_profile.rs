@@ -369,6 +369,9 @@ impl HostProfileV1 {
             max_steps: read_u64(bytes, 24)?,
             max_call_depth,
             max_activation_slots,
+            // The host-profile wire format has no decode-budget field, so the
+            // loader keeps the default ceiling for profile-loaded modules.
+            ..Limits::default()
         };
         let game_limits = GameLimits {
             max_render_bytes: read_u32(bytes, 32)? as usize,

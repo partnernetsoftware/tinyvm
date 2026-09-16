@@ -1391,9 +1391,9 @@ struct DecodeBudget {
 }
 
 impl DecodeBudget {
-    fn new() -> Self {
+    fn new(max_decode_items: usize) -> Self {
         Self {
-            remaining: WASM_MAX_DECODE_ITEMS,
+            remaining: max_decode_items,
             memory_count: 0,
         }
     }
@@ -1582,6 +1582,12 @@ pub struct Limits {
     /// Maximum aggregate locals, operand values and control frames across the
     /// current activation and every suspended caller.
     pub max_activation_slots: usize,
+    /// Maximum decode items (roughly: instructions) the loader will spend in
+    /// one decoding pass before refusing. A `DecodeBudget` is created per pass
+    /// -- once for the module's section stream and once for every code body --
+    /// so this bounds the decode amplification of any single pass over
+    /// untrusted bytes. Charged per opcode and per immediate group.
+    pub max_decode_items: usize,
 }
 
 impl Default for Limits {
@@ -1592,6 +1598,7 @@ impl Default for Limits {
             max_steps: WASM_MAX_STEPS,
             max_call_depth: WASM_MAX_DEPTH,
             max_activation_slots: WASM_MAX_ACTIVATION_SLOTS,
+            max_decode_items: WASM_MAX_DECODE_ITEMS,
         }
     }
 }
@@ -4896,7 +4903,7 @@ impl Module {
         result_arity: usize,
         body: &[u8],
     ) -> Result<usize, WasmError> {
-        let mut budget = DecodeBudget::new();
+        let mut budget = DecodeBudget::new(self.limits.max_decode_items);
         budget.memory_count = 1;
         let DecodedCode {
             ops: code,
@@ -5023,7 +5030,7 @@ impl Module {
         let mut elems: Vec<ElemSegment> = Vec::new();
         let mut defined_memories: Vec<MemoryDesc> = Vec::new();
         let mut data: Vec<DataSegment> = Vec::new();
-        let mut budget = DecodeBudget::new();
+        let mut budget = DecodeBudget::new(limits.max_decode_items);
         let mut last_standard_section_rank = 0u8;
         let mut data_count: Option<usize> = None;
 
