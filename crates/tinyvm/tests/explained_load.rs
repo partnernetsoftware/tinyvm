@@ -163,3 +163,43 @@ fn a_well_formed_module_loads_through_either_entry() {
     assert!(WasmModule::from_bytes_explained(&wasm, Limits::default()).is_ok());
     assert!(WasmModule::from_bytes_with(&wasm, Limits::default()).is_ok());
 }
+
+/// The decoder's own ceiling refuses a quantity, not a body.
+///
+/// Measured, not assumed: both a refusal reached in the section stream and one
+/// reached inside a code body answer `function: None` for this fault, because
+/// charging runs before the validation loop that records a site. So the text
+/// is the whole report, and what makes the fault actionable is
+/// [`tinyvm::WasmCeiling::DecodeItems`] naming the `Limits` field to raise --
+/// not a number here, which could only ever say where charging stopped.
+#[test]
+fn a_decode_ceiling_refuses_a_count_not_a_body() {
+    let wasm = wat::parse_str(r#"(module (func (export "one") (result i32) (i32.const 1)))"#)
+        .expect("well-formed");
+    WasmModule::from_bytes_with(&wasm, Limits::default()).expect("loads by default");
+
+    let explained = WasmModule::from_bytes_explained(
+        &wasm,
+        Limits {
+            max_decode_items: 1,
+            ..Limits::default()
+        },
+    )
+    .err()
+    .expect("one item is not enough to decode this module");
+    assert_eq!(
+        explained.function, None,
+        "a limit refuses a count, not a function body"
+    );
+    assert_eq!(explained.error, WasmError::Decode("module decode budget"));
+    assert_eq!(
+        explained.to_string(),
+        "module decode budget",
+        "the plain entry's text is unchanged"
+    );
+    assert_eq!(
+        explained.error.ceiling(),
+        Some(tinyvm::WasmCeiling::DecodeItems),
+        "the fault names the Limits field to raise"
+    );
+}

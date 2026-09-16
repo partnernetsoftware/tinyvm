@@ -119,12 +119,30 @@ fn every_host_configured_ceiling_names_its_own_limits_field() {
         "table elements",
     );
 
+    // The decoder's own ceiling is reached while loading as well, and the
+    // module is not what is wrong: these bytes load under the default ceiling.
+    // A ceiling below it is therefore the only thing that refused.
+    let decodable = wasm(r#"(module (func (export "one") (result i32) (i32.const 1)))"#);
+    WasmModule::from_bytes_with(&decodable, Limits::default())
+        .expect("the fixture loads, so the refusal below is the ceiling's");
+    let decode_items = must_trap(
+        WasmModule::from_bytes_with(
+            &decodable,
+            Limits {
+                max_decode_items: 1,
+                ..Limits::default()
+            },
+        ),
+        "decode items",
+    );
+
     let reached = [
         ("max_steps", steps, WasmCeiling::Steps),
         ("max_call_depth", call_depth, WasmCeiling::CallDepth),
         ("max_activation_slots", slots, WasmCeiling::ActivationSlots),
         ("max_memory_pages", pages, WasmCeiling::MemoryPages),
         ("max_table_elems", elems, WasmCeiling::TableElems),
+        ("max_decode_items", decode_items, WasmCeiling::DecodeItems),
     ];
     for (field, error, expected) in reached {
         assert!(
@@ -145,7 +163,7 @@ fn every_host_configured_ceiling_names_its_own_limits_field() {
         );
     }
 
-    // Five budgets, five answers: an embedder can tell which number to raise.
+    // Six budgets, six answers: an embedder can tell which number to raise.
     for (index, (left_field, left, _)) in reached.iter().enumerate() {
         for (right_field, right, _) in reached.iter().skip(index + 1) {
             assert!(
@@ -343,7 +361,7 @@ fn every_fault_message_obeys_the_naming_rule_the_classifier_reads() {
             );
         }
         // Rule two: no message classifies as a ceiling by accident. Only the
-        // five documented ones may name a `Limits` field.
+        // six documented ones may name a `Limits` field.
         if let Some(ceiling) = error.ceiling() {
             assert!(
                 matches!(
@@ -353,6 +371,7 @@ fn every_fault_message_obeys_the_naming_rule_the_classifier_reads() {
                         | WasmCeiling::ActivationSlots
                         | WasmCeiling::MemoryPages
                         | WasmCeiling::TableElems
+                        | WasmCeiling::DecodeItems
                 ),
                 "{file}: {message:?} names an unexpected ceiling"
             );
@@ -415,6 +434,7 @@ fn fault_types_are_debug_printable_outside_this_crates_unit_tests() {
         r#"Decode("module allocation")"#
     );
     assert_eq!(format!("{:?}", WasmCeiling::MemoryPages), "MemoryPages");
+    assert_eq!(format!("{:?}", WasmCeiling::DecodeItems), "DecodeItems");
     assert_eq!(
         format!("{:?}", WasmFaultClass::ResourceCeiling),
         "ResourceCeiling"

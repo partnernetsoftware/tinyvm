@@ -1432,6 +1432,8 @@ pub enum Ceiling {
     MemoryPages,
     /// [`Limits::max_table_elems`].
     TableElems,
+    /// [`Limits::max_decode_items`].
+    DecodeItems,
 }
 
 /// What kind of fault a [`WasmError`] is, for a caller that must react
@@ -1488,6 +1490,7 @@ impl WasmError {
             "activation slot limit" => Ceiling::ActivationSlots,
             "memory page limit" => Ceiling::MemoryPages,
             "table element limit" => Ceiling::TableElems,
+            "module decode budget" => Ceiling::DecodeItems,
             _ => return None,
         })
     }
@@ -1582,11 +1585,20 @@ pub struct Limits {
     /// Maximum aggregate locals, operand values and control frames across the
     /// current activation and every suspended caller.
     pub max_activation_slots: usize,
-    /// Maximum decode items (roughly: instructions) the loader will spend in
-    /// one decoding pass before refusing. A `DecodeBudget` is created per pass
-    /// -- once for the module's section stream and once for every code body --
-    /// so this bounds the decode amplification of any single pass over
-    /// untrusted bytes. Charged per opcode and per immediate group.
+    /// Maximum decode items (roughly: instructions) the loader will spend on a
+    /// module before refusing. Charged per opcode and per immediate group.
+    ///
+    /// [`Module::from_bytes_with`] and [`Module::from_bytes_explained`] charge
+    /// **one shared budget for the whole module** -- the section stream and
+    /// every code body draw on the same total -- so this bounds the decode
+    /// amplification of the untrusted bytes handed to them, and a caller sizes
+    /// it once for the module it wants to admit. A refusal names this field
+    /// through [`Ceiling::DecodeItems`]; it does not report how far it got,
+    /// because charging stops at the refusal.
+    ///
+    /// [`Module::add_function`] builds a module one body at a time out of
+    /// bytes the host assembles itself, and gives each body its own budget, so
+    /// there the same number bounds one body.
     pub max_decode_items: usize,
 }
 
