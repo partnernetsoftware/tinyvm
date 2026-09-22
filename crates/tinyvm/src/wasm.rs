@@ -4706,6 +4706,7 @@ struct InstanceState {
     last_steps: u64,
     last_peak_call_depth: usize,
     last_peak_activation_slots: usize,
+    last_trap_site: Option<TrapSite>,
 }
 
 /// Mutable store owned by one evaluation or persistent instance. Keeping the
@@ -4728,6 +4729,31 @@ struct WasmCall<'a> {
 struct CallResourceStats {
     peak_call_depth: usize,
     peak_activation_slots: usize,
+    trap_site: Option<TrapSite>,
+}
+
+impl CallResourceStats {
+    /// Keep the innermost failing guest function: the first activation to
+    /// fail is the one a failure started in; every caller it unwinds through
+    /// sees the site already written.
+    fn record_trap(&mut self, function_index: usize) {
+        if self.trap_site.is_none() {
+            self.trap_site = Some(TrapSite {
+                function_index: u32::try_from(function_index).unwrap_or(u32::MAX),
+            });
+        }
+    }
+}
+
+/// Which guest-defined function a failed top-level call stopped in: its index
+/// in the module's function index space (imports first, the number a `name`
+/// section uses). Written at the call boundary around the interpreter loop,
+/// never inside it, so an instruction pays nothing for it. It locates the
+/// stop; it does not classify it -- the failure is still the returned
+/// [`WasmError`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrapSite {
+    pub function_index: u32,
 }
 
 struct CallContext<'a> {
@@ -6980,13 +7006,14 @@ impl Module {
                     .checked_add(callers.len())
                     .and_then(|value| value.checked_add(1))
                     .ok_or(WasmError::Trap("call depth"))?;
+                let function_index = self.hosts.len().saturating_add(current.def_idx);
                 let activation_resources = ActivationResources {
                     available_slots,
                     suspended_slots: total_suspended_slots,
                     call_depth: current_depth,
                     stats: context.stats,
                 };
-                self.run_defined(
+                match self.run_defined(
                     current,
                     steps,
                     interrupt,
@@ -6994,7 +7021,13 @@ impl Module {
                     globals,
                     bulk,
                     activation_resources,
-                )?
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        context.stats.record_trap(function_index);
+                        return Err(error);
+                    }
+                }
             } else if index < self.hosts.len() {
                 if let Some(caller) = callers.last_mut() {
                     let result_count = self.hosts[index].n_results;
@@ -7075,13 +7108,14 @@ impl Module {
                     core::mem::take(&mut args),
                     available_slots,
                 )?;
+                let function_index = self.hosts.len().saturating_add(current.def_idx);
                 let activation_resources = ActivationResources {
                     available_slots,
                     suspended_slots: total_suspended_slots,
                     call_depth: current_depth,
                     stats: context.stats,
                 };
-                self.run_defined(
+                match self.run_defined(
                     current,
                     steps,
                     interrupt,
@@ -7089,7 +7123,13 @@ impl Module {
                     globals,
                     bulk,
                     activation_resources,
-                )?
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        context.stats.record_trap(function_index);
+                        return Err(error);
+                    }
+                }
             };
             match outcome {
                 DefinedOutcome::Values(values) => {
@@ -8892,6 +8932,7 @@ impl Instance {
             last_steps: 0,
             last_peak_call_depth: 0,
             last_peak_activation_slots: 0,
+            last_trap_site: None,
         }));
         store.register_instance_state(instance_id, &state)?;
         let instance = Self {
@@ -9026,7 +9067,15 @@ impl Instance {
         state.last_steps = steps;
         state.last_peak_call_depth = resources.peak_call_depth;
         state.last_peak_activation_slots = resources.peak_activation_slots;
+        state.last_trap_site = resources.trap_site;
         result
+    }
+
+    /// Which guest-defined function the last top-level invocation stopped in,
+    /// when it failed inside one; `None` after a call that succeeded or failed
+    /// before any guest function ran. Reset by every top-level call.
+    pub fn last_trap_site(&self) -> Option<TrapSite> {
+        self.state.borrow().last_trap_site
     }
 
     /// Instructions consumed by the last completed top-level invocation,
